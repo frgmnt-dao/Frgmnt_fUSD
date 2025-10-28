@@ -1,9 +1,4 @@
-![Img](header.png)
 
-# TypeScript Solidity Boilerplate Starter Kit
-
-A BoilerPlate Template Project To Start Solidity Development With Hardhat and Typescript.
-All you have to do is create a new repository from the template and start coding your smart contracts.
 
 ## Hardhat Configuration
 
@@ -63,11 +58,7 @@ If you are going to use public network, make sure you include the right RPC prov
 
 Make sure you include either `MNEMONIC` or `PRIVATE_KEY` in your `.env` file.
 
-### Example Flow - Deploy ERC721 Token
-
-> This is an example flow to deploy an ERC721 token to a public network and interact with it.
-
-#### 1.1 Deploy BasicERC721 Contract
+#### Deploy Contract
 
 ```shell
 hh ignition deploy ignition/modules/BasicERC721Module.ts --network sepolia
@@ -78,31 +69,6 @@ hh ignition deploy ignition/modules/BasicERC721Module.ts --network sepolia
 ```shell
 hh ignition verify chain-11155111
 ```
-
-#### 1.2 Deploy and Verify
-
-```shell
-hh ignition deploy ignition/modules/BasicERC721Module.ts --network sepolia --verify
-```
-
-#### 1.3 Deploy and Verify with Custom Parameters
-
-Look at `ignition/parameters/custom.json` to see how to adjust contract parameters
-
-```shell
-hh ignition deploy ignition/modules/BasicERC721Module.ts --network sepolia --verify --parameters ignition/parameters/custom.json
-```
-
-#### 2. Interact With Contract - Mint
-
-```shell
-hh erc721-mint \
- --contract 0x1FEB5675Be6F256c4680BE447D6C353E02e04fb9 \
- --recipient 0x73faDd7E476a9Bc2dA6D1512A528366A3E50c3cF \
- --network sepolia
-```
-
----
 
 ### Testing
 
@@ -149,17 +115,7 @@ npm run sol:format:write
 npm run solhint
 ```
 
-<br>
 
-## Contact Protokol
-
-**Need additional help with your solidity project?**
-
-Protokol builds custom blockchain and web3 solutions for organisations of all sizes. We build everything from smart contracts, to dApps, to fully bespoke web3 solutions.
-
-Reach out at [protokol.com/contact](https://www.protokol.com/contact/) to learn how our web3 development services could help bring your project to life.
-
-<br>
 
 ## Join Protokol
 
