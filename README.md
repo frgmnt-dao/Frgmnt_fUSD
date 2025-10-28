@@ -8,8 +8,6 @@
 - Prettier and eslint configured for project files and solidity smart contract
 - [Solhint](https://github.com/protofire/solhint) configured for enforcing best practices
 - Github actions workflows prepared for CI/CD
-- Prepared Smart Contract Examples, Tests, Deployments and Tasks for Common ERC Standards (ERC20, ERC721, ERC1155)
-
 Check the Hardhat documentation for more information.
 
 https://hardhat.org/getting-started/
@@ -115,10 +113,5 @@ npm run sol:format:write
 npm run solhint
 ```
 
-
-
-## Join Protokol
-
-**Looking for an exciting new role in web3?**
 
 Head over to [protokol.com/careers](https://www.protokol.com/careers/) to discover the roles we have available or to submit your résumé.
