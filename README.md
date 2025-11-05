@@ -114,4 +114,3 @@ npm run solhint
 ```
 
 
-Head over to [protokol.com/careers](https://www.protokol.com/careers/) to discover the roles we have available or to submit your résumé.
