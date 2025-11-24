@@ -114,7 +114,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
         _setFeeNumerator(_performanceFeeNumerator, _managerFeeNumerator, 0, 0);
 
-        _changeAssets(_supportedAssets, new address);
+        _changeAssets(_supportedAssets,  new address[](0));
     }
 
     // -----------------------------------------------------------------------
@@ -133,7 +133,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         return _maximumSupportedAssetCount;
     }
 
-    function getAssetPrice(address _asset) external view override returns (uint256) {
+    function getAssetPrice(address _asset) external view  returns (uint256) {
         return _assetPrice[_asset];
     }
 
@@ -141,12 +141,12 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         return _assetType[_asset];
     }
 
-    function getAssetGuard(address _asset) external view override returns (address) {
+    function getAssetGuard(address _asset) external view  returns (address) {
         return _assetGuard[_asset];
     }
 
     // NEW FOR OPTION 3
-    function getContractGuard(address _contract) external view override returns (address) {
+    function getContractGuard(address _contract) external view  returns (address) {
         return _contractGuard[_contract];
     }
 
@@ -377,7 +377,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         return IAssetGuard(guard).getBalance(poolLogic, _asset);
     }
 
-    function assetDecimal(address _asset) public view override returns (uint256) {
+    function assetDecimal(address _asset) public view  returns (uint256) {
         address guard = _assetGuard[_asset];
         require(guard != address(0), "no guard");
         return IAssetGuard(guard).getDecimals(_asset);

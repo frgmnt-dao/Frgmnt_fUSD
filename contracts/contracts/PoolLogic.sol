@@ -6,26 +6,19 @@ import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Own
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 import {IManaged} from "./interfaces/IManaged.sol";
 import {IPoolManagerLogic} from "./interfaces/IPoolManagerLogic.sol";
+import {IHasSupportedAsset} from "./interfaces/IHasSupportedAsset.sol";
+
 import {IAssetGuard} from "./interfaces/guards/IAssetGuard.sol";
 import {IComplexAssetGuard} from "./interfaces/guards/IComplexAssetGuard.sol";
 import {IGuard} from "./interfaces/guards/IGuard.sol";
-import {ITxTrackingGuard} from "./interfaces/guards/ITxTrackingGuard.sol";
-import {IHasSupportedAsset} from "./interfaces/IHasSupportedAsset.sol";
 
 interface ITokenLogic is IERC20 {
     function burnFrom(address account, uint256 amount) external;
     function burn(uint256 amount) external;
     function getExitRemainingCooldown(address user) external view returns (uint256);
-}
-
-interface IPriceInfo {
-    /// @notice Returns USD price (18 decimals) of the asset
-    function getAssetPrice(address asset) external view returns (uint256);
-
-    /// @notice Returns decimals of the asset
-    function assetDecimal(address asset) external view returns (uint256);
 }
 
 contract PoolLogic is
@@ -58,57 +51,76 @@ contract PoolLogic is
         uint256 pending;
     }
 
+    /// @notice Complex withdraw parameters (similar to IPoolLogic.ComplexAsset)
     struct ComplexAsset {
         address supportedAsset;
         bytes withdrawData;
-        uint256 slippageTolerance;
+        uint256 slippageTolerance; // in bps, e.g. 100 = 1%
     }
 
     enum RequestStatus { None, Pending, Finalized, Claimed }
 
     struct CashWithdrawRequest {
         address user;
-        uint256 fusdAmountTotal;
-        uint256 fusdNetForAsset;
+        uint256 fusdAmountTotal;    // FUSD locked for withdrawal (before fee)
+        uint256 fusdNetForAsset;    // FUSD to convert to asset (after fee)
         address asset;
         uint256 requestedAt;
-        uint256 assetAmount;
+        uint256 assetAmount;        // amount of asset claimable
         RequestStatus status;
+    }
+
+    struct TxToExecute {
+        address to;
+        bytes data;
     }
 
     // ============================================================
     // =                        STORAGE                           =
     // ============================================================
 
+    /// @notice TokenLogic (FUSD) address
     address public fusd;
+
+    /// @notice Linked PoolManagerLogic
     address public poolManagerLogic;
 
+    /// @notice Pool creation time
     uint256 public creationTime;
+
+    /// @notice For compatibility / UI only
     bool public privatePool;
 
+    /// @notice Reward per share in FUSD (scaled 1e18)
     uint256 public rewardPerShare;
+
     mapping(address => UserReward) public userRewards;
 
+    /// @notice Last timestamp when management fee accrued
     uint256 public lastMgmtFeeTimestamp;
 
+    /// @notice Queued cash withdraw requests
     uint256 public lastRequestId;
     mapping(uint256 => CashWithdrawRequest) public cashWithdrawRequests;
     mapping(address => uint256[]) public userRequests;
 
     // ============================================================
-    // =                         EVENTS                            =
+    // =                         EVENTS                           =
     // ============================================================
 
     event Stake(address indexed user, uint256 fusdIn, uint256 sharesMinted, uint256 entryFeeFusd);
     event Unstake(address indexed user, uint256 sharesBurned, uint256 fusdOut);
-    event RewardDistributed(address indexed by, uint256 total, uint256 toStakers, uint256 perfFee);
-    event Harvest(address indexed user, uint256 amount);
+
+    event RewardDistributed(address indexed by, uint256 fusdGross, uint256 fusdToStakers, uint256 perfFeeFusd);
+    event Harvest(address indexed user, uint256 fusdAmount);
+
+    event ManagementFeesAccrued(uint256 feeShares, uint256 timestamp);
 
     event CashWithdrawImmediate(
         address indexed user,
         uint256 fusdTotal,
         uint256 fusdNet,
-        uint256 fee,
+        uint256 fusdFee,
         address indexed asset,
         uint256 assetAmount
     );
@@ -118,7 +130,7 @@ contract PoolLogic is
         address indexed user,
         uint256 fusdTotal,
         uint256 fusdNet,
-        uint256 fee,
+        uint256 fusdFee,
         address indexed asset
     );
 
@@ -138,12 +150,14 @@ contract PoolLogic is
     );
 
     event PoolPrivacyUpdated(bool isPoolPrivate);
-    event ManagementFeesAccrued(uint256 shares, uint256 timestamp);
+
+    event TransactionExecuted(address pool, address manager, uint16 transactionType, uint256 time);
 
     // ============================================================
     // =                      INITIALIZATION                       =
     // ============================================================
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
@@ -153,9 +167,9 @@ contract PoolLogic is
         address _poolManagerLogic,
         address _owner
     ) external initializer {
-        require(_fusd != address(0), "FUSD=0");
-        require(_poolManagerLogic != address(0), "PML=0");
-        require(_owner != address(0), "owner=0");
+        require(_fusd != address(0), "PoolLogic: fusd=0");
+        require(_poolManagerLogic != address(0), "PoolLogic: managerLogic=0");
+        require(_owner != address(0), "PoolLogic: owner=0");
 
         __ERC20_init("Staked Frgmnt USD", "SFUSD");
         __Ownable_init(_owner);
@@ -163,6 +177,7 @@ contract PoolLogic is
 
         fusd = _fusd;
         poolManagerLogic = _poolManagerLogic;
+
         creationTime = block.timestamp;
         lastMgmtFeeTimestamp = block.timestamp;
         privatePool = false;
@@ -181,13 +196,14 @@ contract PoolLogic is
     }
 
     function _managerFees()
-        internal view
+        internal
+        view
         returns (
-            uint256 perf,
-            uint256 mgmt,
+            uint256 performance,
+            uint256 management,
             uint256 entry,
             uint256 exit,
-            uint256 denom
+            uint256 denominator
         )
     {
         return IPoolManagerLogic(poolManagerLogic).getFee();
@@ -198,7 +214,7 @@ contract PoolLogic is
     }
 
     // ============================================================
-    // =                MANAGEMENT FEES & REWARDS                  =
+    // =                MANAGEMENT FEE & REWARDS                   =
     // ============================================================
 
     modifier updateFeesAndRewards(address user) {
@@ -208,86 +224,116 @@ contract PoolLogic is
     }
 
     function _accrueManagementFee() internal {
-        uint256 dt = block.timestamp - lastMgmtFeeTimestamp;
+        uint256 ts = block.timestamp;
+        uint256 dt = ts - lastMgmtFeeTimestamp;
         if (dt == 0) return;
 
-        ( , uint256 mgmtFee, , , uint256 denom) = _managerFees();
-        if (mgmtFee == 0) {
-            lastMgmtFeeTimestamp = block.timestamp;
+        (
+            ,
+            uint256 managementFeeNumerator,
+            ,
+            ,
+            uint256 feeDenominator
+        ) = _managerFees();
+
+        if (managementFeeNumerator == 0) {
+            lastMgmtFeeTimestamp = ts;
             return;
         }
 
         uint256 supply = totalSupply();
-        if (supply > 0) {
-            uint256 shares =
-                (supply * mgmtFee * dt) / (denom * 365 days);
-
-            if (shares > 0) {
-                _mint(_manager(), shares);
-                emit ManagementFeesAccrued(shares, block.timestamp);
-            }
+        if (supply == 0) {
+            lastMgmtFeeTimestamp = ts;
+            return;
         }
-        lastMgmtFeeTimestamp = block.timestamp;
+
+        // feeShares = supply * mgmtFee * dt / (denom * 365 days)
+        uint256 feeShares =
+            (supply * managementFeeNumerator * dt) /
+            (feeDenominator * 365 days);
+
+        if (feeShares > 0) {
+            _mint(_manager(), feeShares);
+            emit ManagementFeesAccrued(feeShares, ts);
+        }
+
+        lastMgmtFeeTimestamp = ts;
     }
 
     function _updateUserReward(address user) internal {
         if (user == address(0)) return;
 
         UserReward storage ur = userRewards[user];
-        uint256 bal = balanceOf(user);
-        uint256 acc = (bal * rewardPerShare) / 1e18;
+        uint256 balance = balanceOf(user);
+        uint256 accumulated = (balance * rewardPerShare) / 1e18;
 
-        if (acc > ur.rewardDebt) {
-            ur.pending += (acc - ur.rewardDebt);
+        if (accumulated > ur.rewardDebt) {
+            ur.pending += (accumulated - ur.rewardDebt);
         }
 
-        ur.rewardDebt = (bal * rewardPerShare) / 1e18;
+        ur.rewardDebt = (balance * rewardPerShare) / 1e18;
+    }
+
+    /// @notice Called by PoolManagerLogic.commitFeeIncrease()
+    function mintManagerFee() external nonReentrant {
+        require(msg.sender == poolManagerLogic, "PoolLogic: only managerLogic");
+        _accrueManagementFee();
     }
 
     // ============================================================
-    // =                         STAKE                            =
+    // =                           STAKE                           =
     // ============================================================
 
     function stake(uint256 amountFusd)
         external
         nonReentrant
+        updateFeesAndRewards(msg.sender)
     {
-        require(amountFusd > 0, "zero");
+        require(amountFusd > 0, "PoolLogic: zero amount");
 
-        _accrueManagementFee();
-        _updateUserReward(msg.sender);
-
+        // Pull FUSD from user
         IERC20(fusd).transferFrom(msg.sender, address(this), amountFusd);
 
-        ( , , uint256 entryFee, , uint256 denom) = _managerFees();
+        // Entry fee in FUSD
+        (
+            ,
+            ,
+            uint256 entryFeeNumerator,
+            ,
+            uint256 feeDenominator
+        ) = _managerFees();
 
-        uint256 fee = entryFee > 0 ? (amountFusd * entryFee) / denom : 0;
-        if (fee > amountFusd) fee = amountFusd;
+        uint256 feeFusd = 0;
+        if (entryFeeNumerator > 0) {
+            feeFusd = (amountFusd * entryFeeNumerator) / feeDenominator;
+            if (feeFusd > amountFusd) {
+                feeFusd = amountFusd;
+            }
+        }
 
-        uint256 net = amountFusd - fee;
-        require(net > 0, "net=0");
+        uint256 netFusd = amountFusd - feeFusd;
+        require(netFusd > 0, "PoolLogic: netFusd=0");
 
-        _mint(msg.sender, net);
+        _mint(msg.sender, netFusd);
 
+        // update rewardDebt after mint
         UserReward storage ur = userRewards[msg.sender];
         ur.rewardDebt = (balanceOf(msg.sender) * rewardPerShare) / 1e18;
 
-        emit Stake(msg.sender, amountFusd, net, fee);
+        emit Stake(msg.sender, amountFusd, netFusd, feeFusd);
     }
 
     // ============================================================
-    // =                        UNSTAKE                           =
+    // =                          UNSTAKE                          =
     // ============================================================
 
     function unstake(uint256 shareAmount)
         external
         nonReentrant
+        updateFeesAndRewards(msg.sender)
     {
-        require(shareAmount > 0, "zero");
-        require(balanceOf(msg.sender) >= shareAmount, "insufficient");
-
-        _accrueManagementFee();
-        _updateUserReward(msg.sender);
+        require(shareAmount > 0, "PoolLogic: zero shares");
+        require(balanceOf(msg.sender) >= shareAmount, "PoolLogic: not enough shares");
 
         _burn(msg.sender, shareAmount);
 
@@ -300,35 +346,48 @@ contract PoolLogic is
     }
 
     // ============================================================
-    // =                     REWARDS / HARVEST                    =
+    // =                       REWARD LOGIC                        =
     // ============================================================
 
     function distributeReward(uint256 amountFusd)
         external
         nonReentrant
-        updateFeesAndRewards(address(0))
+        updateFeesAndRewards(address(0)) // global update
     {
-        require(msg.sender == _manager(), "only manager");
-        require(amountFusd > 0, "zero");
+        require(msg.sender == _manager(), "PoolLogic: only manager");
+        require(amountFusd > 0, "PoolLogic: zero reward");
 
         uint256 supply = totalSupply();
-        require(supply > 0, "no supply");
+        require(supply > 0, "PoolLogic: no stakers");
 
+        // Pull FUSD from manager
         IERC20(fusd).transferFrom(msg.sender, address(this), amountFusd);
 
-        (uint256 perfFee, , , , uint256 denom) = _managerFees();
+        (
+            uint256 performanceFeeNumerator,
+            ,
+            ,
+            ,
+            uint256 feeDenominator
+        ) = _managerFees();
 
-        uint256 fee = perfFee > 0 ? (amountFusd * perfFee) / denom : 0;
-        if (fee > amountFusd) fee = amountFusd;
-
-        if (fee > 0) {
-            IERC20(fusd).transfer(_manager(), fee);
+        uint256 perfFee = 0;
+        if (performanceFeeNumerator > 0) {
+            perfFee = (amountFusd * performanceFeeNumerator) / feeDenominator;
+            if (perfFee > amountFusd) {
+                perfFee = amountFusd;
+            }
         }
 
-        uint256 reward = amountFusd - fee;
-        rewardPerShare += (reward * 1e18) / supply;
+        uint256 toStakers = amountFusd - perfFee;
 
-        emit RewardDistributed(msg.sender, amountFusd, reward, fee);
+        if (perfFee > 0) {
+            IERC20(fusd).transfer(_manager(), perfFee);
+        }
+
+        rewardPerShare += (toStakers * 1e18) / supply;
+
+        emit RewardDistributed(msg.sender, amountFusd, toStakers, perfFee);
     }
 
     function harvest()
@@ -338,16 +397,16 @@ contract PoolLogic is
     {
         UserReward storage ur = userRewards[msg.sender];
         uint256 amount = ur.pending;
-        require(amount > 0, "none");
+        require(amount > 0, "PoolLogic: nothing to harvest");
 
         ur.pending = 0;
         IERC20(fusd).transfer(msg.sender, amount);
 
         emit Harvest(msg.sender, amount);
     }
-    
-        // ============================================================
-    // =              FUSD → ASSET CONVERSION HELPERS             =
+
+    // ============================================================
+    // =            FUSD → ASSET CONVERSION HELPERS                =
     // ============================================================
 
     function _fusdToAssetAmount(uint256 fusdAmount, address asset)
@@ -359,14 +418,15 @@ contract PoolLogic is
 
         require(
             IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset),
-            "unsupported asset"
+            "PoolLogic: asset not supported"
         );
 
-        uint256 price = IPriceInfo(poolManagerLogic).getAssetPrice(asset);
-        require(price > 0, "bad price");
+        uint256 price = IPoolManagerLogic(poolManagerLogic).getAssetPrice(asset);
+        require(price > 0, "PoolLogic: bad asset price");
 
-        uint256 decimals = IPriceInfo(poolManagerLogic).assetDecimal(asset);
+        uint256 decimals = IPoolManagerLogic(poolManagerLogic).assetDecimal(asset);
 
+        // FUSD is USD-18
         uint256 assetAmount18 = (fusdAmount * 1e18) / price;
 
         if (decimals == 18) {
@@ -383,12 +443,22 @@ contract PoolLogic is
         view
         returns (uint256 netFusd, uint256 feeFusd)
     {
-        ( , , , uint256 exitFee, uint256 denom) = _managerFees();
+        (
+            ,
+            ,
+            ,
+            uint256 exitFeeNumerator,
+            uint256 feeDenominator
+        ) = _managerFees();
 
-        if (exitFee == 0) return (fusdAmount, 0);
+        if (exitFeeNumerator == 0 || fusdAmount == 0) {
+            return (fusdAmount, 0);
+        }
 
-        feeFusd = (fusdAmount * exitFee) / denom;
-        if (feeFusd > fusdAmount) feeFusd = fusdAmount;
+        feeFusd = (fusdAmount * exitFeeNumerator) / feeDenominator;
+        if (feeFusd > fusdAmount) {
+            feeFusd = fusdAmount;
+        }
         netFusd = fusdAmount - feeFusd;
     }
 
@@ -397,8 +467,11 @@ contract PoolLogic is
     // ============================================================
 
     /**
-     * @notice Immediate withdraw uses FULL dHEDGE-style withdrawProcessing()
-     *         with ComplexAsset support.
+     * @notice Immediate cash-out:
+     *  - burns FUSD from user
+     *  - applies FUSD withdraw fee
+     *  - converts net FUSD to portion of pool
+     *  - uses dHEDGE-style withdrawProcessing via guards
      */
     function withdrawCashImmediate(
         uint256 fusdAmount,
@@ -409,38 +482,36 @@ contract PoolLogic is
         nonReentrant
         updateFeesAndRewards(msg.sender)
     {
-        require(fusdAmount > 0, "zero fusd");
+        require(fusdAmount > 0, "PoolLogic: zero fusd");
         require(
             IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset),
-            "unsupported"
+            "PoolLogic: asset not supported"
         );
 
+        // cooldown enforced only on CASH withdraw (not unstake)
         require(
             ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) == 0,
-            "cooldown"
+            "PoolLogic: cooldown"
         );
 
-        // --- Compute withdraw fee ---
         (uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
-        require(netFusd > 0, "net=0");
+        require(netFusd > 0, "PoolLogic: netFusd=0");
 
-        // --- Burn FUSD ---
+        // burn FUSD from user
         ITokenLogic(fusd).burnFrom(msg.sender, fusdAmount);
 
-        // --- Compute portion from net USD ---
+        // compute portion in terms of totalFundValue
         uint256 fundValue = _totalValue();
-        require(fundValue > 0, "fund=0");
+        require(fundValue > 0, "PoolLogic: fund=0");
 
         uint256 portion = (netFusd * 1e18) / fundValue;
 
-        // --- Perform guard/complex withdrawal ---
         (address withdrawAsset, uint256 withdrawAmount, ) =
             _withdrawProcessing(asset, msg.sender, portion, complexData);
 
-        require(withdrawAsset != address(0), "invalid withdraw asset");
-        require(withdrawAmount > 0, "zero withdraw");
+        require(withdrawAsset != address(0), "PoolLogic: invalid withdraw asset");
+        require(withdrawAmount > 0, "PoolLogic: zero withdraw");
 
-        // --- Send asset to user ---
         IERC20(withdrawAsset).transfer(msg.sender, withdrawAmount);
 
         emit CashWithdrawImmediate(
@@ -454,7 +525,7 @@ contract PoolLogic is
     }
 
     // ============================================================
-    // =                CASH WITHDRAW — QUEUED                     =
+    // =                 CASH WITHDRAW — QUEUED                    =
     // ============================================================
 
     function requestCashWithdraw(uint256 fusdAmount, address asset)
@@ -463,21 +534,22 @@ contract PoolLogic is
         updateFeesAndRewards(msg.sender)
         returns (uint256 requestId)
     {
-        require(fusdAmount > 0, "zero");
+        require(fusdAmount > 0, "PoolLogic: zero fusd");
         require(
             IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset),
-            "unsupported"
+            "PoolLogic: asset not supported"
         );
 
         require(
             ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) == 0,
-            "cooldown"
+            "PoolLogic: cooldown"
         );
 
+        // lock FUSD in this contract
         IERC20(fusd).transferFrom(msg.sender, address(this), fusdAmount);
 
         (uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
-        require(netFusd > 0, "net=0");
+        require(netFusd > 0, "PoolLogic: netFusd=0");
 
         requestId = ++lastRequestId;
         cashWithdrawRequests[requestId] = CashWithdrawRequest({
@@ -506,24 +578,24 @@ contract PoolLogic is
         external
         nonReentrant
     {
-        require(msg.sender == _manager(), "only manager");
+        require(msg.sender == _manager(), "PoolLogic: only manager");
 
         CashWithdrawRequest storage r = cashWithdrawRequests[requestId];
-        require(r.status == RequestStatus.Pending, "invalid");
-        require(r.user != address(0), "bad user");
+        require(r.status == RequestStatus.Pending, "PoolLogic: not pending");
+        require(r.user != address(0), "PoolLogic: invalid request");
 
         uint256 totalFusd = r.fusdAmountTotal;
-        require(totalFusd > 0, "zero fusd");
+        require(totalFusd > 0, "PoolLogic: zero fusd");
 
+        // burn the FUSD locked in contract
         ITokenLogic(fusd).burn(totalFusd);
 
-        uint256 assetAmount = _fusdToAssetAmount(
-            r.fusdNetForAsset, r.asset
-        );
-
+        // convert netFusd to assetAmount using price
+        uint256 assetAmount = _fusdToAssetAmount(r.fusdNetForAsset, r.asset);
+        require(assetAmount > 0, "PoolLogic: assetAmount=0");
         require(
             IERC20(r.asset).balanceOf(address(this)) >= assetAmount,
-            "insufficient"
+            "PoolLogic: insufficient asset"
         );
 
         r.assetAmount = assetAmount;
@@ -544,32 +616,24 @@ contract PoolLogic is
         updateFeesAndRewards(msg.sender)
     {
         CashWithdrawRequest storage r = cashWithdrawRequests[requestId];
-        require(r.user == msg.sender, "not owner");
-        require(r.status == RequestStatus.Finalized, "not ready");
+        require(r.user == msg.sender, "PoolLogic: not owner");
+        require(r.status == RequestStatus.Finalized, "PoolLogic: not finalized");
 
-        uint256 amt = r.assetAmount;
-        require(amt > 0, "zero");
+        uint256 amount = r.assetAmount;
+        require(amount > 0, "PoolLogic: zero asset");
 
-        r.assetAmount = 0;
         r.status = RequestStatus.Claimed;
+        r.assetAmount = 0;
 
-        IERC20(r.asset).transfer(msg.sender, amt);
+        IERC20(r.asset).transfer(msg.sender, amount);
 
-        emit CashWithdrawClaimed(
-            requestId,
-            msg.sender,
-            r.asset,
-            amt
-        );
+        emit CashWithdrawClaimed(requestId, msg.sender, r.asset, amount);
     }
 
     // ============================================================
-    // =            dHEDGE-STYLE WITHDRAW PROCESSING               =
+    // =           dHEDGE-STYLE WITHDRAW PROCESSING                =
     // ============================================================
 
-    /**
-     * @dev FULL integration of dHEDGE withdrawProcessing, adapted to PoolManagerLogic
-     */
     function _withdrawProcessing(
         address asset,
         address to,
@@ -583,11 +647,10 @@ contract PoolLogic is
             bool externalProcessed
         )
     {
-        // --- Retrieve guard ---
         address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-        require(guard != address(0), "invalid guard");
+        require(guard != address(0), "PoolLogic: invalid guard");
 
-        // --- Compute balance portion ---
+        // portion of asset balance
         uint256 balance = IAssetGuard(guard).getBalance(address(this), asset);
         uint256 portionBalance = (balance * portion) / 1e18;
 
@@ -595,12 +658,10 @@ contract PoolLogic is
             IPoolManagerLogic(poolManagerLogic).assetValue(asset, portionBalance);
 
         IAssetGuard.MultiTransaction[] memory transactions;
+        bool regularProcessing = true;
 
-        bool regular = true;
-
-        // --- Complex asset path ---
         if (complexData.withdrawData.length > 0) {
-            require(asset == complexData.supportedAsset, "invalid asset data");
+            require(asset == complexData.supportedAsset, "PoolLogic: invalid asset data");
 
             (withdrawAsset, withdrawAmount, transactions) =
                 IComplexAssetGuard(guard).withdrawProcessing(
@@ -611,10 +672,8 @@ contract PoolLogic is
                     complexData.withdrawData
                 );
 
-            regular = false;
-
+            regularProcessing = false;
         } else {
-            // --- Regular guarded withdraw ---
             (withdrawAsset, withdrawAmount, transactions) =
                 IAssetGuard(guard).withdrawProcessing(
                     address(this),
@@ -624,30 +683,30 @@ contract PoolLogic is
                 );
         }
 
-        // --- Execute MultiTransactions if any ---
         uint256 txCount = transactions.length;
         if (txCount > 0) {
-            uint256 beforeBal = 0;
+            uint256 assetBalanceBefore = 0;
             if (withdrawAsset != address(0)) {
-                beforeBal = IERC20(withdrawAsset).balanceOf(address(this));
+                assetBalanceBefore = IERC20(withdrawAsset).balanceOf(address(this));
             }
 
             for (uint256 i = 0; i < txCount; ++i) {
-                externalProcessed =
-                    transactions[i].to.call(transactions[i].txData).length > 0;
+                (bool success, ) = transactions[i].to.call(transactions[i].txData);
+                require(success, "PoolLogic: withdraw tx failed");
+                externalProcessed = true;
             }
 
             if (withdrawAsset != address(0)) {
-                uint256 afterBal = IERC20(withdrawAsset).balanceOf(address(this));
-                if (afterBal > beforeBal) {
-                    withdrawAmount += (afterBal - beforeBal);
+                uint256 assetBalanceAfter = IERC20(withdrawAsset).balanceOf(address(this));
+                if (assetBalanceAfter > assetBalanceBefore) {
+                    withdrawAmount += (assetBalanceAfter - assetBalanceBefore);
                 }
             }
         }
 
-        // --- Slippage check for regular withdraws ---
+        // slippage check (only regular processing)
         if (
-            regular &&
+            regularProcessing &&
             complexData.slippageTolerance != 0 &&
             withdrawAsset != address(0)
         ) {
@@ -657,7 +716,7 @@ contract PoolLogic is
             require(
                 actualValue >=
                     (expectedValue * (10_000 - complexData.slippageTolerance)) / 10_000,
-                "high slippage"
+                "PoolLogic: high withdraw slippage"
             );
         }
 
@@ -665,149 +724,121 @@ contract PoolLogic is
     }
 
     // ============================================================
-    // =            GUARDED TX EXECUTION (LIKE dHEDGE)             =
+    // =           GUARDED TX EXECUTION (SINGLE TX)                =
     // ============================================================
 
     function _execTransaction(
         address to,
-        bytes memory data
-    )
-        private
-        nonReentrant
-        returns (bool success)
-    {
-        require(to != address(0), "to=0");
+        bytes calldata data
+    ) internal {
+        require(to != address(0), "PoolLogic: to=0");
 
-        // --- Try contract guard ---
-        address contractGuard =
-            IPoolManagerLogic(poolManagerLogic).getContractGuard(to);
-
-        address guard;
         uint16 txType;
         bool isPublic;
+        address poolMgr = poolManagerLogic;
+
+        // 1) Try contract guard
+        address contractGuard =
+            IPoolManagerLogic(poolMgr).getContractGuard(to);
 
         if (contractGuard != address(0)) {
-            guard = contractGuard;
-            (txType, isPublic) =
-                IGuard(guard).txGuard(poolManagerLogic, to, data);
+            (txType, isPublic) = IGuard(contractGuard).txGuard(poolMgr, to, data);
         }
 
-        // --- If no txType found, try asset guard ---
+        // 2) If no txType, try asset guard
         if (txType == 0) {
             address assetGuard =
-                IPoolManagerLogic(poolManagerLogic).getAssetGuard(to);
+                IPoolManagerLogic(poolMgr).getAssetGuard(to);
 
-            if (assetGuard == address(0)) {
-                revert("no guard");
-            } else {
-                require(
-                    IHasSupportedAsset(poolManagerLogic).isSupportedAsset(to),
-                    "asset disabled"
-                );
-            }
+            require(assetGuard != address(0), "PoolLogic: no guard");
 
-            guard = assetGuard;
-            (txType, isPublic) =
-                IGuard(guard).txGuard(poolManagerLogic, to, data);
+            // if asset guard, ensure asset is enabled
+            require(
+                IHasSupportedAsset(poolMgr).isSupportedAsset(to),
+                "PoolLogic: asset disabled"
+            );
+
+            (txType, isPublic) = IGuard(assetGuard).txGuard(poolMgr, to, data);
         }
 
-        require(txType > 0, "invalid tx");
+        require(txType > 0, "PoolLogic: invalid transaction");
+
+        address managerAddr = _manager();
         require(
-            isPublic ||
-                msg.sender == _manager() ||
-                msg.sender == _trader(),
-            "not allowed"
+            isPublic || msg.sender == managerAddr || msg.sender == _trader(),
+            "PoolLogic: only manager/trader/public"
         );
 
-        success = to.call(data).length > 0;
+        (bool ok, ) = to.call(data);
+        require(ok, "PoolLogic: tx failed");
 
-        // --- Optional tracking ---
-        if (ITxTrackingGuard(guard).isTxTrackingGuard()) {
-            ITxTrackingGuard(guard).afterTxGuard(
-                poolManagerLogic,
-                to,
-                data
-            );
-        }
+        emit TransactionExecuted(address(this), managerAddr, txType, block.timestamp);
     }
 
     function execTransaction(address to, bytes calldata data)
         external
+        nonReentrant
         returns (bool)
     {
-        return _execTransaction(to, data);
+        _execTransaction(to, data);
+        return true;
     }
 
-    function execTransactions(address[] calldata tos, bytes[] calldata datas)
-        external
-    {
-        require(tos.length == datas.length, "len mismatch");
-        for (uint256 i = 0; i < tos.length; ++i) {
-            require(_execTransaction(tos[i], datas[i]), "tx failed");
-        }
+    /// @notice Batch execution disabled in this minimal version to avoid stack-too-deep.
+    ///         The function is kept for ABI compatibility.
+    function execTransactions(TxToExecute[] calldata /* txs */) external pure {
+        revert("PoolLogic: execTransactions disabled");
     }
-    
-        // ============================================================
-    // =                       VIEW HELPERS                        =
+
+    // ============================================================
+    // =                         VIEWS                             =
     // ============================================================
 
     function pendingReward(address user) external view returns (uint256) {
         UserReward memory ur = userRewards[user];
-        uint256 bal = balanceOf(user);
+        uint256 balance = balanceOf(user);
+        uint256 acc = (balance * rewardPerShare) / 1e18;
 
-        uint256 acc = (bal * rewardPerShare) / 1e18;
         if (acc > ur.rewardDebt) {
             return ur.pending + (acc - ur.rewardDebt);
         }
         return ur.pending;
     }
 
-    function getUserRequests(address user)
-        external
-        view
-        returns (uint256[] memory)
-    {
+    function getUserRequests(address user) external view returns (uint256[] memory) {
         return userRequests[user];
     }
 
     // ============================================================
-    // =               TOKEN PRICE / FUND SUMMARY                  =
+    // =                TOKEN PRICE / FUND SUMMARY                 =
     // ============================================================
 
-    function _tokenPrice(uint256 fundValue, uint256 supply)
+    function _tokenPrice(uint256 fundValue, uint256 tokenSupply)
         internal
         pure
-        returns (uint256)
+        returns (uint256 price)
     {
-        if (supply == 0 || fundValue == 0) return 0;
-        return (fundValue * 1e18) / supply;
+        if (tokenSupply == 0 || fundValue == 0) return 0;
+        price = (fundValue * 1e18) / tokenSupply;
     }
 
-    function tokenPrice() external view returns (uint256) {
-        uint256 value = _totalValue();
+    function tokenPrice() external view returns (uint256 price) {
+        uint256 fundValue = _totalValue();
         uint256 supply = totalSupply();
-        return _tokenPrice(value, supply);
+        price = _tokenPrice(fundValue, supply);
     }
 
-    function tokenPriceWithoutManagerFee() external view returns (uint256) {
-        uint256 value = _totalValue();
+    function tokenPriceWithoutManagerFee() external view returns (uint256 price) {
+        uint256 fundValue = _totalValue();
         uint256 supply = totalSupply();
-        return _tokenPrice(value, supply);
+        price = _tokenPrice(fundValue, supply);
     }
 
-    function calculateAvailableManagerFee(uint256)
-        public
-        pure
-        returns (uint256)
-    {
-        return 0; // all fees are eagerly minted
+    function calculateAvailableManagerFee(uint256 /* _fundValue */) public pure returns (uint256 fee) {
+        return 0;
     }
 
-    function getFundSummary()
-        external
-        view
-        returns (FundSummary memory)
-    {
+    function getFundSummary() external view returns (FundSummary memory) {
         (
             uint256 performanceFeeNumerator,
             uint256 managementFeeNumerator,
@@ -834,13 +865,12 @@ contract PoolLogic is
     }
 
     // ============================================================
-    // =                       PRIVACY FLAG                        =
+    // =                     PRIVACY FLAG                          =
     // ============================================================
 
-    function setPoolPrivate(bool _private) external {
-        require(msg.sender == _manager(), "only manager");
-        privatePool = _private;
-        emit PoolPrivacyUpdated(_private);
+    function setPoolPrivate(bool _privatePool) external {
+        require(msg.sender == _manager(), "PoolLogic: only manager");
+        privatePool = _privatePool;
+        emit PoolPrivacyUpdated(_privatePool);
     }
-
 }
