@@ -117,6 +117,16 @@ interface ITransactionTypes {
     FluidLendingWithdraw, // 109
     BuyPendlePT, // 110
     SellPendlePT, // 111
-    AaveSetEfficiencyMode // 112
+    AaveSetEfficiencyMode, // 112
+
+    // -------------------- Morpho Blue -------------------- //
+    MorphoSupply,              // 113
+    MorphoWithdraw,            // 114
+    MorphoBorrow,              // 115
+    MorphoRepay,               // 116
+    MorphoSupplyCollateral,    // 117
+    MorphoWithdrawCollateral,  // 118
+    MorphoLiquidate,           // 119
+    MorphoFlashLoan            // 120
   }
 }

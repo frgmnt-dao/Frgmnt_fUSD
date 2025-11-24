@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
 import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import "@uniswap/v3-periphery/contracts/interfaces/IMulticall.sol";
 
 import "../../../utils/TxDataUtils.sol";
-import "../../../utils/uniswap/UniswapV3PriceLibrary.sol";
+import "../../../utils/UniswapV3PriceLibrary.sol";
 import "../../../utils/tracker/NftTrackerStorage.sol";
 import "../../../interfaces/guards/ITxTrackingGuard.sol";
 import "../../../interfaces/guards/IGuard.sol";
@@ -71,7 +72,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 
   /// @notice Return all tracked NFT tokenIds owned by a pool.
   function getOwnedTokenIds(address poolLogic) public view returns (uint256[] memory tokenIds) {
-    bytes[] memory data = DhedgeNftTrackerStorage(nftTracker).getAllData(NFT_TYPE, poolLogic);
+    bytes[] memory data = NftTrackerStorage(nftTracker).getAllData(NFT_TYPE, poolLogic);
     tokenIds = new uint256[](data.length);
     for (uint256 i = 0; i < data.length; i++) {
       tokenIds[i] = abi.decode(data[i], (uint256));
@@ -244,7 +245,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
     if (method == INonfungiblePositionManager.mint.selector) {
       uint256 index = nonfungiblePositionManager.totalSupply();
       // Underflow revert on index-1 if index == 0 is intentional to prevent stale state
-      DhedgeNftTrackerStorage(nftTracker).addData(
+      NftTrackerStorage(nftTracker).addData(
         to,
         NFT_TYPE,
         poolLogic,
@@ -252,7 +253,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
       );
 
       require(
-        DhedgeNftTrackerStorage(nftTracker).getDataCount(NFT_TYPE, poolLogic) <= uniV3PositionsLimit,
+        NftTrackerStorage(nftTracker).getDataCount(NFT_TYPE, poolLogic) <= uniV3PositionsLimit,
         "Frgmnt: too many Uniswap V3 positions"
       );
 
@@ -264,7 +265,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
       (bool isValidTokenId, uint256 i) = _isValidOwnedTokenId(poolLogic, tokenId);
       require(isValidTokenId, "Frgmnt: position not tracked");
 
-      DhedgeNftTrackerStorage(nftTracker).removeData(to, NFT_TYPE, poolLogic, i);
+      NftTrackerStorage(nftTracker).removeData(to, NFT_TYPE, poolLogic, i);
       return true;
 
     } else if (method == IMulticall.multicall.selector) {

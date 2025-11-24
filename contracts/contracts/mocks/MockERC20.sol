@@ -1,20 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+/// @notice Minimal ERC20 + decimals used to satisfy IERC20 and IERC20Extended in tests.
+contract MockERC20 {
+    string public name = "Mock";
+    string public symbol = "MCK";
+    uint8 public _decimals;
+    mapping(address => uint256) public balances;
 
-contract MockERC20 is ERC20 {
-    uint8 private _decimals;
-
-    constructor(string memory n, string memory s, uint8 d) ERC20(n, s) {
-        _decimals = d;
+    constructor(uint8 decimals_) {
+        _decimals = decimals_;
     }
 
     function mint(address to, uint256 amount) external {
-        _mint(to, amount);
+        balances[to] += amount;
     }
 
-    function decimals() public view override returns (uint8) {
+    function balanceOf(address account) external view returns (uint256) {
+        return balances[account];
+    }
+
+    function decimals() external view returns (uint8) {
         return _decimals;
     }
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
 import {Path} from "@uniswap/v3-periphery/contracts/libraries/Path.sol";
@@ -5,8 +6,9 @@ import {Path} from "@uniswap/v3-periphery/contracts/libraries/Path.sol";
 import {IPoolManagerLogic} from "../../../interfaces/IPoolManagerLogic.sol";
 import {IHasSupportedAsset} from "../../../interfaces/IHasSupportedAsset.sol";
 import {ITransactionTypes} from "../../../interfaces/ITransactionTypes.sol";
-import {IV3SwapRouter} from "../../../interfaces/uniswapV3/IV3SwapRouter.sol";
-import {SlippageAccumulator, SlippageAccumulatorUser} from "../../../utils/SlippageAccumulatorUser.sol";
+import {IV3SwapRouter} from "../../../interfaces/IV3SwapRouter.sol";
+import {SlippageAccumulator} from "../../../utils/SlippageAccumulator.sol";
+import {SlippageAccumulatorUser} from "../../../utils/SlippageAccumulatorUser.sol";
 import {TxDataUtils} from "../../../utils/TxDataUtils.sol";
 
 /**
@@ -18,6 +20,24 @@ import {TxDataUtils} from "../../../utils/TxDataUtils.sol";
  */
 contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumulatorUser {
   using Path for bytes;
+
+  /// @notice Emitted for exact-input style swaps where the input amount is known.
+  event ExchangeFrom(
+    address indexed poolLogic,
+    address indexed srcAsset,
+    uint256 amountIn,
+    address indexed dstAsset,
+    uint256 time
+  );
+
+  /// @notice Emitted for exact-output style swaps where the output amount is known.
+  event ExchangeTo(
+    address indexed poolLogic,
+    address indexed srcAsset,
+    address indexed dstAsset,
+    uint256 amountOut,
+    uint256 time
+  );
 
   constructor(address _slippageAccumulator) SlippageAccumulatorUser(_slippageAccumulator) {}
 
@@ -41,7 +61,9 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
     IHasSupportedAsset poolManagerLogicAssets = IHasSupportedAsset(poolManagerLogic);
 
     if (method == IV3SwapRouter.exactInput.selector) {
-      IV3SwapRouter.ExactInputParams memory params = abi.decode(getParams(data), (IV3SwapRouter.ExactInputParams));
+      IV3SwapRouter.ExactInputParams memory params =
+        abi.decode(getParams(data), (IV3SwapRouter.ExactInputParams));
+
       (address srcAsset, address dstAsset) = _decodePath(params.path);
 
       require(poolManagerLogicAssets.isSupportedAsset(dstAsset), "Frgmnt: unsupported destination asset");
@@ -75,7 +97,9 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
       txType = uint16(TransactionType.Exchange);
 
     } else if (method == IV3SwapRouter.exactOutput.selector) {
-      IV3SwapRouter.ExactOutputParams memory params = abi.decode(getParams(data), (IV3SwapRouter.ExactOutputParams));
+      IV3SwapRouter.ExactOutputParams memory params =
+        abi.decode(getParams(data), (IV3SwapRouter.ExactOutputParams));
+
       (address dstAsset, address srcAsset) = _decodePath(params.path);
 
       require(poolManagerLogicAssets.isSupportedAsset(dstAsset), "Frgmnt: unsupported destination asset");
@@ -131,6 +155,7 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
     (srcAsset, , ) = path.decodeFirstPool();
 
     address asset;
+
     // Walk the path to find the final token
     while (path.hasMultiplePools()) {
       path = path.skipToken();
@@ -139,8 +164,9 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
 
     // Destination is the token of the last pool in the path
     (, dstAsset, ) = path.decodeFirstPool();
+
     if (dstAsset == address(0)) {
-      // If residual bytes are zeros, use `asset` captured from the last hop
+      // If residual bytes are zeros, use asset captured from the last hop
       dstAsset = asset;
     }
   }

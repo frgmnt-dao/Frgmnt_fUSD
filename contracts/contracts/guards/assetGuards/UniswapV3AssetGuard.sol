@@ -13,7 +13,7 @@ import "../../interfaces/IHasAssetInfo.sol";
 import "../../interfaces/IPoolLogic.sol";
 import "../../interfaces/IERC20Extended.sol";
 import "../contractGuards/uniswapV3/UniswapV3NonfungiblePositionGuard.sol";
-import "../../utils/uniswap/UniswapV3PriceLibrary.sol";
+import "../../utils/UniswapV3PriceLibrary.sol";
 
 /**
  * @title Frgmnt Uniswap V3 Asset Guard
