@@ -9,33 +9,33 @@ It manages supported assets, fees, roles, and access permissions. The contract i
 
 ## ⚙️ Technical Summary
 
-| Property | Description |
-|-----------|-------------|
-| **Contract Name** | `PoolManagerLogic` |
-| **Solidity Version** | `^0.8.24` |
-| **Inheritance** | `Initializable`, `IPoolManagerLogic`, `IHasSupportedAsset`, `Managed` |
-| **Upgradeability** | Yes (via OpenZeppelin `Initializable`) |
-| **Purpose** | Controls all pool parameters, fees, assets, and access roles |
-| **Location** | `contracts/contracts/PoolManagerLogic.sol` |
+| Property             | Description                                                           |
+| -------------------- | --------------------------------------------------------------------- |
+| **Contract Name**    | `PoolManagerLogic`                                                    |
+| **Solidity Version** | `^0.8.24`                                                             |
+| **Inheritance**      | `Initializable`, `IPoolManagerLogic`, `IHasSupportedAsset`, `Managed` |
+| **Upgradeability**   | Yes (via OpenZeppelin `Initializable`)                                |
+| **Purpose**          | Controls all pool parameters, fees, assets, and access roles          |
+| **Location**         | `contracts/contracts/PoolManagerLogic.sol`                            |
 
 ---
 
 ## 🔹 Core Functions Overview
 
-| Category | Key Functions | Description |
-|-----------|----------------|-------------|
-| **Fee Management** | `setFeeNumerator`, `announceFeeIncrease`, `commitFeeIncrease`, `renounceFeeIncrease` | Configure and safely adjust performance/management fees with enforced delay. |
-| **Asset Management** | `changeAssets`, `_addAsset`, `_removeAsset` | Manage supported pool assets and enforce validation through guards. |
-| **Valuation** | `assetValue`, `totalFundValue`, `getFundComposition` | Compute balances and USD-equivalent pool values. |
-| **Roles & Permissions** | `setTraderAssetChangeDisabled`, `setNftMembershipCollectionAddress`, `isMemberAllowed` | Manage role-based access and optional NFT membership gating. |
-| **Factory Integration** | `setPoolLogic`, `_emitFactoryEvent` | Link to the pool logic and notify the factory of updates. |
-| **Configuration** | `setMinDepositUSD`, `_setMinDepositUSD` | Define operational thresholds like minimum deposits. |
+| Category                | Key Functions                                                                          | Description                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| **Fee Management**      | `setFeeNumerator`, `announceFeeIncrease`, `commitFeeIncrease`, `renounceFeeIncrease`   | Configure and safely adjust performance/management fees with enforced delay. |
+| **Asset Management**    | `changeAssets`, `_addAsset`, `_removeAsset`                                            | Manage supported pool assets and enforce validation through guards.          |
+| **Valuation**           | `assetValue`, `totalFundValue`, `getFundComposition`                                   | Compute balances and USD-equivalent pool values.                             |
+| **Roles & Permissions** | `setTraderAssetChangeDisabled`, `setNftMembershipCollectionAddress`, `isMemberAllowed` | Manage role-based access and optional NFT membership gating.                 |
+| **Factory Integration** | `setPoolLogic`, `_emitFactoryEvent`                                                    | Link to the pool logic and notify the factory of updates.                    |
+| **Configuration**       | `setMinDepositUSD`, `_setMinDepositUSD`                                                | Define operational thresholds like minimum deposits.                         |
 
 ---
 
 ## 💰 Fee Management (Core Functions)
 
-```solidity
+````solidity
 function setFeeNumerator(
   uint256 _performanceFeeNumerator,
   uint256 _managerFeeNumerator,
@@ -65,7 +65,7 @@ function getFee() external view returns (
 
 ## 🔹 Overview
 
-`PoolManagerLogic` is the **core management contract** of the **Frgmnt Protocol**, governing all operational logic for investment pools.  
+`PoolManagerLogic` is the **core management contract** of the **Frgmnt Protocol**, governing all operational logic for investment pools.
 It manages supported assets, fees, roles, and access permissions. The contract is upgradeable, modular, and security-hardened through guards and role separation.
 
 ---
@@ -185,3 +185,4 @@ function setMinDepositUSD(uint256 minDepositUSD) external onlyManager;
 
 function _setMinDepositUSD(uint256 minDepositUSD) internal;
 
+````

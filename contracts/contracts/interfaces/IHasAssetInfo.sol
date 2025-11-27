@@ -3,11 +3,11 @@ pragma solidity ^0.8.24;
 
 /// @title Frgmnt — IHasAssetInfo
 interface IHasAssetInfo {
-  function isValidAsset(address asset) external view returns (bool);
+	function isValidAsset(address asset) external view returns (bool);
 
-  function getAssetPrice(address asset) external view returns (uint256);
+	function getAssetPrice(address asset) external view returns (uint256);
 
-  function getAssetType(address asset) external view returns (uint16);
+	function getAssetType(address asset) external view returns (uint16);
 
-  function getMaximumSupportedAssetCount() external view returns (uint256);
+	function getMaximumSupportedAssetCount() external view returns (uint256);
 }

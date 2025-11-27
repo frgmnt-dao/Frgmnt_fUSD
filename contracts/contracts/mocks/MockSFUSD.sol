@@ -7,8 +7,8 @@ pragma solidity ^0.8.24;
  * @dev It just exists so that FUSDUpgradeable can forward tokens to it via safeTransferFrom.
  */
 contract MockSFUSD {
-    // Simple health-check helper
-    function ping() external pure returns (bool) {
-        return true;
-    }
+	// Simple health-check helper
+	function ping() external pure returns (bool) {
+		return true;
+	}
 }

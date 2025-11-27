@@ -69,9 +69,9 @@ From the original contract header:
 **Parameters**
 
 - `assets`: An array of `Asset` structs (defined in `IAssetHandler`), each containing:
-  - `asset` (address)
-  - `assetType` (`uint16`)
-  - `aggregator` (address of Chainlink USD feed)
+    - `asset` (address)
+    - `assetType` (`uint16`)
+    - `aggregator` (address of Chainlink USD feed)
 
 ---
 
@@ -85,7 +85,8 @@ Returns the **Chainlink USD price** of the given `asset`, normalized to 18 decim
 
 1. Reads the price aggregator from `priceAggregators[asset]`.
 2. Requires the aggregator to be non-zero:
-   - `require(aggregator != address(0), "Frgmnt: aggregator not found");`
+    - `require(aggregator != address(0), "Frgmnt: aggregator not found");`
 3. Calls Chainlink’s:
-   ```solidity
-   latestRoundData()
+    ```solidity
+    latestRoundData()
+    ```

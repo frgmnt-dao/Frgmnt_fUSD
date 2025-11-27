@@ -41,11 +41,11 @@ The `USDPriceAggregator` contract mimics a Chainlink feed with the following fix
   Uses the current `block.timestamp` as the `updatedAt` value  
   → Consumers that check for staleness will see data as current
 
-- **Round data fields**:  
-  - `roundId` = `0`  
-  - `startedAt` = `0`  
-  - `answeredInRound` = `0`  
-  These are dummy placeholders, sufficient for test/stub use cases.
+- **Round data fields**:
+    - `roundId` = `0`
+    - `startedAt` = `0`
+    - `answeredInRound` = `0`  
+      These are dummy placeholders, sufficient for test/stub use cases.
 
 - **No external calls**:  
   All values are computed locally within the contract.
@@ -70,17 +70,17 @@ This matches the standard used by Chainlink USD oracles, so upstream contracts t
 ### 3.2 `latestRoundData()`
 
 - **Visibility**: `external`, `view`
-- **Returns**:  
-  - `roundId` (`uint80`)
-  - `answer` (`int256`)
-  - `startedAt` (`uint256`)
-  - `updatedAt` (`uint256`)
-  - `answeredInRound` (`uint80`)
+- **Returns**:
+    - `roundId` (`uint80`)
+    - `answer` (`int256`)
+    - `startedAt` (`uint256`)
+    - `updatedAt` (`uint256`)
+    - `answeredInRound` (`uint80`)
 
 - **Behavior**:
-  - `answer` is always `1e8`, representing `$1.00` with 8 decimals.
-  - `updatedAt` is set to `block.timestamp` at the moment of the call.
-  - `roundId`, `startedAt`, and `answeredInRound` are static zeros.
+    - `answer` is always `1e8`, representing `$1.00` with 8 decimals.
+    - `updatedAt` is set to `block.timestamp` at the moment of the call.
+    - `roundId`, `startedAt`, and `answeredInRound` are static zeros.
 
 The return signature is fully compatible with Chainlink’s `latestRoundData()`, allowing any upstream consumer that expects a Chainlink aggregator to use this contract without changes.
 
@@ -93,8 +93,8 @@ Contracts that rely on Chainlink feeds typically:
 1. Call `decimals()` to know how many decimals the `answer` uses.
 2. Call `latestRoundData()` and extract the `answer` and `updatedAt` fields.
 3. Possibly enforce:
-   - `answer > 0`
-   - `updatedAt` not too old
+    - `answer > 0`
+    - `updatedAt` not too old
 
 `USDPriceAggregator` satisfies all these expectations.
 

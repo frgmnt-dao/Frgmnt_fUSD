@@ -12,21 +12,21 @@ import "../interfaces/IAggregatorV3Interface.sol";
  * @custom:project Frgmnt
  */
 contract USDPriceAggregator is IAggregatorV3Interface {
-  /// @inheritdoc IAggregatorV3Interface
-  function decimals() external pure override returns (uint8) {
-    return 8;
-  }
+	/// @inheritdoc IAggregatorV3Interface
+	function decimals() external pure override returns (uint8) {
+		return 8;
+	}
 
-  /**
-   * @inheritdoc IAggregatorV3Interface
-   * @dev Returns a fixed $1.00 price with current block timestamp as `updatedAt`.
-   */
-  function latestRoundData()
-    external
-    view
-    override
-    returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
-  {
-    return (0, int256(1e8), 0, block.timestamp, 0);
-  }
+	/**
+	 * @inheritdoc IAggregatorV3Interface
+	 * @dev Returns a fixed $1.00 price with current block timestamp as `updatedAt`.
+	 */
+	function latestRoundData()
+		external
+		view
+		override
+		returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)
+	{
+		return (0, int256(1e8), 0, block.timestamp, 0);
+	}
 }

@@ -1,6 +1,6 @@
 import "@openzeppelin/hardhat-upgrades"
 import "@nomicfoundation/hardhat-toolbox"
-import "solidity-coverage";
+import "solidity-coverage"
 import { HardhatUserConfig } from "hardhat/config"
 
 import "@nomiclabs/hardhat-solhint"
@@ -64,23 +64,23 @@ const config: HardhatUserConfig = {
 	},
 	solidity: {
 		compilers: [
-    { version: "0.8.24", settings: { optimizer: { enabled: true, runs: 200 } } },
-    { version: "0.7.6",  settings: { optimizer: { enabled: true, runs: 200 } } },
-  ],
-    overrides: {
-      "@uniswap/v3-core/contracts/**/*.sol": {
-        version: "0.7.6",
-        settings: {
-          optimizer: { enabled: true, runs: 200 },
-        },
-      },
-      "@uniswap/v3-periphery/contracts/**/*.sol": {
-        version: "0.7.6",
-        settings: {
-          optimizer: { enabled: true, runs: 200 },
-        },
-      },
-    },
+			{ version: "0.8.24", settings: { optimizer: { enabled: true, runs: 200 } } },
+			{ version: "0.7.6", settings: { optimizer: { enabled: true, runs: 200 } } },
+		],
+		overrides: {
+			"@uniswap/v3-core/contracts/**/*.sol": {
+				version: "0.7.6",
+				settings: {
+					optimizer: { enabled: true, runs: 200 },
+				},
+			},
+			"@uniswap/v3-periphery/contracts/**/*.sol": {
+				version: "0.7.6",
+				settings: {
+					optimizer: { enabled: true, runs: 200 },
+				},
+			},
+		},
 	},
 }
 
