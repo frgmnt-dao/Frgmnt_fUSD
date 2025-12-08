@@ -33,7 +33,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	event ManagerFeeIncreaseRenounced();
 	event PoolLogicSet(address poolLogic, address from);
 	event MinDepositUpdated(uint256 minDepositUSD);
-	event PoolManagerEvent();
 
 	// Core
 	address public override poolLogic;
@@ -172,9 +171,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		return _isPool[_pool];
 	}
 
-	function emitPoolManagerEvent() external {
-		_emitFactoryEvent();
-	}
 
 	// -----------------------------------------------------------------------
 	// Admin config
@@ -247,7 +243,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		);
 
 		_changeAssets(_addAssets, _removeAssets);
-		_emitFactoryEvent();
+		
 	}
 
 	function _changeAssets(Asset[] calldata _addAssets, address[] memory _removeAssets) internal {
@@ -416,7 +412,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		);
 
 		_setFeeNumerator(_perf, _mgr, _entry, _exit);
-		_emitFactoryEvent();
+		
 	}
 
 	function _setFeeNumerator(uint256 _perf, uint256 _mgr, uint256 _entry, uint256 _exit) internal {
@@ -455,7 +451,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		announcedFeeIncreaseTimestamp = block.timestamp + delay;
 
 		emit ManagerFeeIncreaseAnnounced(_perf, _mgr, _entry, _exit, announcedFeeIncreaseTimestamp);
-		_emitFactoryEvent();
+		
 	}
 
 	function renounceFeeIncrease() external onlyManager {
@@ -466,7 +462,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		announcedFeeIncreaseTimestamp = 0;
 
 		emit ManagerFeeIncreaseRenounced();
-		_emitFactoryEvent();
+		
 	}
 
 	function commitFeeIncrease() external onlyManager {
@@ -512,7 +508,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 		poolLogic = _poolLogic;
 		emit PoolLogicSet(_poolLogic, msg.sender);
-		_emitFactoryEvent();
 		return true;
 	}
 
@@ -531,7 +526,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	function setMinDepositUSD(uint256 _min) external onlyManager {
 		minDepositUSD = _min;
 		emit MinDepositUpdated(_min);
-		_emitFactoryEvent();
 	}
 
 	function isNftMemberAllowed(address _member) public view returns (bool) {
@@ -544,7 +538,4 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		return _isMemberAllowed(_member) || isNftMemberAllowed(_member);
 	}
 
-	function _emitFactoryEvent() internal {
-		emit PoolManagerEvent();
-	}
 }
