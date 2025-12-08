@@ -390,17 +390,17 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 price = IPoolManagerLogic(poolManagerLogic).getAssetPrice(asset);
 		require(price > 0, "PoolLogic: bad asset price");
 
-		uint256 decimals = IPoolManagerLogic(poolManagerLogic).assetDecimal(asset);
+		uint256 _decimals = IPoolManagerLogic(poolManagerLogic).assetDecimal(asset);
 
 		// FUSD is USD-18
 		uint256 assetAmount18 = (fusdAmount * 1e18) / price;
 
-		if (decimals == 18) {
+		if (_decimals == 18) {
 			assetAmount = assetAmount18;
-		} else if (decimals < 18) {
-			assetAmount = assetAmount18 / (10 ** (18 - decimals));
+		} else if (_decimals < 18) {
+			assetAmount = assetAmount18 / (10 ** (18 - _decimals));
 		} else {
-			assetAmount = assetAmount18 * (10 ** (decimals - 18));
+			assetAmount = assetAmount18 * (10 ** (_decimals - 18));
 		}
 	}
 

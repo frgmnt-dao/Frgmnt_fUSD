@@ -177,10 +177,10 @@ describe("TokenLogic (FUSD)", () => {
 				.withArgs(usdcAddress, true, 6, 1000n)
 
 			const cfg = await fusd.assetConfigs(usdcAddress)
-			expect(cfg.allowed).to.equal(true)
-			expect(cfg.decimals).to.equal(6)
-			expect(cfg.cap).to.equal(1000n)
-			expect(cfg.totalDeposited).to.equal(0n)
+			expect(cfg.allowed_).to.equal(true)
+			expect(cfg.decimals_).to.equal(6)
+			expect(cfg.cap_).to.equal(1000n)
+			expect(cfg.totalDeposited_).to.equal(0n)
 
 			// decimals > 36 should revert
 			await expect(fusd.connect(admin).configureAsset(daiAddress, true, 37, 0)).to.be.revertedWith(
@@ -190,7 +190,7 @@ describe("TokenLogic (FUSD)", () => {
 			// valid explicit decimals
 			await fusd.connect(admin).configureAsset(daiAddress, true, 18, 0)
 			const cfgDai = await fusd.assetConfigs(daiAddress)
-			expect(cfgDai.decimals).to.equal(18)
+			expect(cfgDai.decimals_).to.equal(18)
 		})
 
 		it("setAssetCap: only governance and only for configured assets", async () => {
@@ -213,7 +213,7 @@ describe("TokenLogic (FUSD)", () => {
 				.withArgs(usdcAddress, 1000n, 500n)
 
 			const cfg = await fusd.assetConfigs(usdcAddress)
-			expect(cfg.cap).to.equal(500n)
+			expect(cfg.cap_).to.equal(500n)
 		})
 	})
 
@@ -287,7 +287,7 @@ describe("TokenLogic (FUSD)", () => {
 			await expect(fusd.connect(user).deposit(usdcAddress, 1n)).to.be.revertedWith("TokenLogic: cap exceeded")
 
 			const cfg = await fusd.assetConfigs(usdcAddress)
-			expect(cfg.totalDeposited).to.equal(cap)
+			expect(cfg.totalDeposited_).to.equal(cap)
 		})
 
 		it("reverts if oracle price not set", async () => {

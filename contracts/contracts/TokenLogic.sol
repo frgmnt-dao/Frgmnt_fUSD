@@ -81,10 +81,10 @@ contract TokenLogic is
 
 	/// @notice Collateral asset configuration.
 	struct AssetConfig {
-		bool allowed; // if true, asset can be deposited
-		uint8 decimals; // asset decimals (0–36)
-		uint256 cap; // maximum allowed deposit amount
-		uint256 totalDeposited; // total deposited in this asset (raw units)
+		bool allowed_; // if true, asset can be deposited
+		uint8 decimals_; // asset decimals (0–36)
+		uint256 cap_; // maximum allowed deposit amount
+		uint256 totalDeposited_; // total deposited in this asset (raw units)
 	}
 
 	/// @notice Mapping from collateral token => its config.
@@ -178,37 +178,37 @@ contract TokenLogic is
 	}
 
 	/// @notice Configure or update a supported collateral asset.
-	/// @param asset     ERC20 token address.
-	/// @param allowed   true if asset can be deposited.
-	/// @param decimals  asset decimals (0 = auto-detect from token).
-	/// @param cap       max total deposit amount for this asset.
+	/// @param _asset     ERC20 token address.
+	/// @param _allowed   true if asset can be deposited.
+	/// @param _decimals  asset decimals (0 = auto-detect from token).
+	/// @param _cap       max total deposit amount for this asset.
 	function configureAsset(
-		address asset,
-		bool allowed,
-		uint8 decimals,
-		uint256 cap
+		address _asset,
+		bool _allowed,
+		uint8 _decimals,
+		uint256 _cap
 	) external onlyRole(GOVERNANCE_ROLE) {
-		require(asset != address(0), "TokenLogic: asset=0");
+		require(_asset != address(0), "TokenLogic: asset=0");
 
-		if (decimals == 0) {
-			decimals = IERC20Metadata(asset).decimals();
+		if (_decimals == 0) {
+			_decimals = IERC20Metadata(_asset).decimals();
 		}
-		require(decimals <= 36, "TokenLogic: bad decimals");
+		require(_decimals <= 36, "TokenLogic: bad decimals");
 
-		AssetConfig storage cfg = assetConfigs[asset];
-		cfg.allowed = allowed;
-		cfg.decimals = decimals;
-		cfg.cap = cap;
+		AssetConfig storage cfg = assetConfigs[_asset];
+		cfg.allowed_ = _allowed;
+		cfg.decimals_ = _decimals;
+		cfg.cap_ = _cap;
 
-		emit AssetConfigured(asset, allowed, decimals, cap);
+		emit AssetConfigured(_asset, _allowed, _decimals, _cap);
 	}
 
 	/// @notice Update only the cap of a previously configured asset.
 	function setAssetCap(address asset, uint256 newCap) external onlyRole(GOVERNANCE_ROLE) {
 		AssetConfig storage cfg = assetConfigs[asset];
-		require(cfg.decimals != 0, "TokenLogic: not configured");
-		uint256 old = cfg.cap;
-		cfg.cap = newCap;
+		require(cfg.decimals_ != 0, "TokenLogic: not configured");
+		uint256 old = cfg.cap_;
+		cfg.cap_ = newCap;
 		emit AssetCapUpdated(asset, old, newCap);
 	}
 
@@ -225,11 +225,11 @@ contract TokenLogic is
 	 */
 	function deposit(address asset, uint256 amount) external nonReentrant whenNotPaused {
 		AssetConfig storage cfg = assetConfigs[asset];
-		require(cfg.allowed, "TokenLogic: asset not allowed");
+		require(cfg.allowed_, "TokenLogic: asset not allowed");
 		require(amount > 0, "TokenLogic: zero amount");
 
-		if (cfg.cap > 0) {
-			require(cfg.totalDeposited + amount <= cfg.cap, "TokenLogic: cap exceeded");
+		if (cfg.cap_ > 0) {
+			require(cfg.totalDeposited_ + amount <= cfg.cap_, "TokenLogic: cap exceeded");
 		}
 
 		// 1) Pull collateral from user into this contract
@@ -240,7 +240,7 @@ contract TokenLogic is
 
 		// 3) Compute USD value of the deposit, normalized to 18 decimals
 		uint256 priceUSD = priceOracle.getUSDPrice(asset); // 18 decimals
-		uint256 fusdAmount = _convertToUSD(amount, cfg.decimals, priceUSD);
+		uint256 fusdAmount = _convertToUSD(amount, cfg.decimals_, priceUSD);
 		require(fusdAmount > 0, "TokenLogic: fusd=0");
 
 		// 4) Record previous FUSD balance BEFORE mint
@@ -251,7 +251,7 @@ contract TokenLogic is
 		_mint(msg.sender, fusdAmount);
 
 		// 6) Update total deposited for this asset
-		cfg.totalDeposited += amount;
+		cfg.totalDeposited_ += amount;
 
 		// 7) Update time-weighted average mint timestamp for the user
 		averageMintTimestamp[msg.sender] = _updateAverageMintTimestamp(previousTs, fusdAmount, prevBalance);
@@ -311,24 +311,24 @@ contract TokenLogic is
 	/**
 	 * @dev Convert an asset amount to a FUSD amount using a USD price.
 	 *
-	 * @param amount      raw asset amount
-	 * @param decimals    asset decimals
-	 * @param priceUSD    USD price with 18 decimals (price per 1 whole token)
+	 * @param _amount      raw asset amount
+	 * @param _decimals    asset decimals
+	 * @param _priceUSD    USD price with 18 decimals (price per 1 whole token)
 	 *
 	 * @return usdAmount  FUSD to mint (18 decimals)
 	 */
-	function _convertToUSD(uint256 amount, uint8 decimals, uint256 priceUSD) internal pure returns (uint256 usdAmount) {
-		if (priceUSD == 0 || amount == 0) return 0;
+	function _convertToUSD(uint256 _amount, uint8 _decimals, uint256 _priceUSD) internal pure returns (uint256 usdAmount) {
+		if (_priceUSD == 0 || _amount == 0) return 0;
 
 		// Normalize asset to 18 decimals
-		if (decimals < 18) {
-			amount = amount * (10 ** (18 - decimals));
-		} else if (decimals > 18) {
-			amount = amount / (10 ** (decimals - 18));
+		if (_decimals < 18) {
+			_amount = _amount * (10 ** (18 - _decimals));
+		} else if (_decimals > 18) {
+			_amount = _amount / (10 ** (_decimals - 18));
 		}
 
 		// usd = amount * price / 1e18
-		usdAmount = (amount * priceUSD) / 1e18;
+		usdAmount = (_amount * _priceUSD) / 1e18;
 	}
 
 	// ---------------------------------------------------------------------
