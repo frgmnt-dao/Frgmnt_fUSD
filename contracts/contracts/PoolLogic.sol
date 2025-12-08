@@ -192,7 +192,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		creationTime = block.timestamp;
 		lastFeeMintTime = block.timestamp;
-		tokenPriceAtLastFeeMint = 0;
+		tokenPriceAtLastFeeMint = 10 ** 18;
 		privatePool = false;
 	}
 
