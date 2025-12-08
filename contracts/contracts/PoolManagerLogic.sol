@@ -289,7 +289,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 			uint16 atype = _assetType[asset];
 
-			// bubble-sort by type desc
+			// insertion-sort step
 			while (len > 0 && _assetType[supportedAssets[len - 1].asset] < atype) {
 				Asset memory tmp = supportedAssets[len];
 				supportedAssets[len] = supportedAssets[len - 1];
