@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
@@ -221,6 +222,10 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		) = nonfungiblePositionManager.positions(tokenId);
 
 		// LP portion to remove
+		require(
+			(uint256(liquidity) * portion) / 1e18 <= type(uint128).max,
+			"UniswapV3AssetGuard: lpAmount overflow"
+		);
 		dec.lpAmount = uint128((uint256(liquidity) * portion) / 1e18);
 
 		// Current pool sqrtPrice
