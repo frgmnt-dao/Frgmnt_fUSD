@@ -145,7 +145,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	}
 
 	function setContractGuard(address _contract, address _guard) external onlyFactoryOwner {
-		require(_contract != address(0), "invalid contract");
+		require(_contract != address(0), "Frgmnt: invalid contract");
+		require(_guard != address(0), "Frgmnt: invalid _guard");
 		_contractGuard[_contract] = _guard;
 	}
 
@@ -224,7 +225,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	}
 
 	function setAssetGuard(address _asset, address _guard) external onlyFactoryOwner {
-		require(_asset != address(0), "invalid asset");
+		require(_guard != address(0), "Frgmnt: invalid _guard");
 		_assetGuard[_asset] = _guard;
 	}
 

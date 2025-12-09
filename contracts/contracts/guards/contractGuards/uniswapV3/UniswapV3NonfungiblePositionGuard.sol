@@ -66,7 +66,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 	bool public override isTxTrackingGuard = true;
 
 	constructor(uint256 _uniV3PositionsLimit, address _nftTracker) {
-		require(_nftTracker != address(0), "Frgmnt: invalid tracker");
+		require(_nftTracker != address(0), "Frgmnt: invalid tracker.");
 		uniV3PositionsLimit = _uniV3PositionsLimit;
 		nftTracker = _nftTracker;
 	}
