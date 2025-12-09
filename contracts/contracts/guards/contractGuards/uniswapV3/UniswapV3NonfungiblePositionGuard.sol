@@ -154,7 +154,6 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				(INonfungiblePositionManager.IncreaseLiquidityParams)
 			);
 
-			// Validate token id is tracked
 			(bool isValidTokenId, ) = _isValidOwnedTokenId(pool, param.tokenId);
 			require(isValidTokenId, "Frgmnt: position not tracked");
 
@@ -187,6 +186,9 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				(INonfungiblePositionManager.DecreaseLiquidityParams)
 			);
 
+			(bool isValidTokenId, ) = _isValidOwnedTokenId(pool, param.tokenId);
+			require(isValidTokenId, "Frgmnt: position not tracked");
+
 			emit DecreaseLiquidity(
 				poolManagerLogic.poolLogic(),
 				param.tokenId,
@@ -199,6 +201,10 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 			txType = 22; // DecreaseLiquidity
 		} else if (method == INonfungiblePositionManager.burn.selector) {
 			uint256 tokenId = abi.decode(getParams(data), (uint256));
+
+			(bool isValidTokenId, ) = _isValidOwnedTokenId(pool, tokenId);
+			require(isValidTokenId, "Frgmnt: position not tracked");
+
 			emit Burn(poolManagerLogic.poolLogic(), tokenId, block.timestamp);
 			txType = 23; // Burn
 		} else if (method == INonfungiblePositionManager.collect.selector) {
@@ -207,7 +213,12 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				(INonfungiblePositionManager.CollectParams)
 			);
 
-			(, , address token0, address token1, , , , , , , , ) = nonfungiblePositionManager.positions(param.tokenId);
+			(bool isValidTokenId, ) = _isValidOwnedTokenId(pool, param.tokenId);
+			require(isValidTokenId, "Frgmnt: position not tracked");
+
+			(, , address token0, address token1, , , , , , , , ) =
+				nonfungiblePositionManager.positions(param.tokenId);
+
 			require(poolManagerLogicAssets.isSupportedAsset(token0), "Frgmnt: unsupported token0");
 			require(poolManagerLogicAssets.isSupportedAsset(token1), "Frgmnt: unsupported token1");
 			require(pool == param.recipient, "Frgmnt: recipient != pool");
@@ -219,6 +230,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				param.amount1Max,
 				block.timestamp
 			);
+
 			txType = 24; // Collect
 		} else if (method == IMulticall.multicall.selector) {
 			bytes[] memory params = abi.decode(getParams(data), (bytes[]));
@@ -250,7 +262,6 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 
 		if (method == INonfungiblePositionManager.mint.selector) {
 			uint256 index = nonfungiblePositionManager.totalSupply();
-			// Underflow revert on index-1 if index == 0 is intentional to prevent stale state
 			NftTrackerStorage(nftTracker).addData(
 				to,
 				NFT_TYPE,
@@ -278,7 +289,6 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 			bool includeMintOrBurn;
 			for (uint256 i = 0; i < params.length; i++) {
 				if (afterTxGuardHandle(poolManagerLogic, to, params[i])) {
-					// Only one mint OR one burn is allowed per multicall for safety
 					require(!includeMintOrBurn, "Frgmnt: invalid multicall");
 					includeMintOrBurn = true;
 				}
