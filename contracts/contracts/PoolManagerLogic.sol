@@ -99,21 +99,17 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		string calldata _managerName,
 		address _poolLogic,
 		uint256 _performanceFeeNumerator,
-		uint256 _managerFeeNumerator,
-		Asset[] calldata _supportedAssets
+		uint256 _managerFeeNumerator
 	) external initializer {
 		if (_factoryOwner == address(0)) revert InvalidFactory();
 		if (_manager == address(0)) revert InvalidManager();
 		if (_poolLogic == address(0)) revert InvalidPoolLogic();
-
 		_initialize(_manager, _managerName);
-
 		factoryOwner = _factoryOwner;
 		poolLogic = _poolLogic;
-
+		_setFactoryConfig(50, 5000, 300, 100, 100, 10000, 0, 3 days); // Default factory config
 		_setFeeNumerator(_performanceFeeNumerator, _managerFeeNumerator, 0, 0);
 
-		_changeAssets(_supportedAssets, new address[](0));
 	}
 
 	// -----------------------------------------------------------------------
@@ -186,6 +182,27 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		uint256 maxPerfChange_,
 		uint256 perfChangeDelay_
 	) external onlyFactoryOwner {
+		_setFactoryConfig(
+		 maximumSupportedAssetCount_,
+		 maxPerf_,
+		 maxMgr_,
+		 maxEntry_,
+		 maxExit_,
+		 feeDenominator_,
+		 maxPerfChange_,
+		perfChangeDelay_);	
+	}
+
+	function _setFactoryConfig(
+		uint256 maximumSupportedAssetCount_,
+		uint256 maxPerf_,
+		uint256 maxMgr_,
+		uint256 maxEntry_,
+		uint256 maxExit_,
+		uint256 feeDenominator_,
+		uint256 maxPerfChange_,
+		uint256 perfChangeDelay_
+	) internal {
 		_maximumSupportedAssetCount = maximumSupportedAssetCount_;
 		_maximumPerformanceFeeNumerator = maxPerf_;
 		_maximumManagerFeeNumerator = maxMgr_;
