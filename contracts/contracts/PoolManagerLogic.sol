@@ -109,7 +109,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		poolLogic = _poolLogic;
 		_setFactoryConfig(50, 5000, 300, 100, 100, 10000, 0, 3 days); // Default factory config
 		_setFeeNumerator(_performanceFeeNumerator, _managerFeeNumerator, 0, 0);
-
 	}
 
 	// -----------------------------------------------------------------------
@@ -146,6 +145,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	}
 
 	function setContractGuard(address _contract, address _guard) external onlyFactoryOwner {
+		require(_contract != address(0), "invalid contract");
 		_contractGuard[_contract] = _guard;
 	}
 
@@ -167,7 +167,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		return _isPool[_pool];
 	}
 
-
 	// -----------------------------------------------------------------------
 	// Admin config
 	// -----------------------------------------------------------------------
@@ -183,14 +182,15 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		uint256 perfChangeDelay_
 	) external onlyFactoryOwner {
 		_setFactoryConfig(
-		 maximumSupportedAssetCount_,
-		 maxPerf_,
-		 maxMgr_,
-		 maxEntry_,
-		 maxExit_,
-		 feeDenominator_,
-		 maxPerfChange_,
-		perfChangeDelay_);	
+			maximumSupportedAssetCount_,
+			maxPerf_,
+			maxMgr_,
+			maxEntry_,
+			maxExit_,
+			feeDenominator_,
+			maxPerfChange_,
+			perfChangeDelay_
+		);
 	}
 
 	function _setFactoryConfig(
@@ -224,6 +224,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	}
 
 	function setAssetGuard(address _asset, address _guard) external onlyFactoryOwner {
+		require(_asset != address(0), "invalid asset");
 		_assetGuard[_asset] = _guard;
 	}
 
@@ -260,7 +261,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		);
 
 		_changeAssets(_addAssets, _removeAssets);
-		
 	}
 
 	function _changeAssets(Asset[] calldata _addAssets, address[] memory _removeAssets) internal {
@@ -429,7 +429,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		);
 
 		_setFeeNumerator(_perf, _mgr, _entry, _exit);
-		
 	}
 
 	function _setFeeNumerator(uint256 _perf, uint256 _mgr, uint256 _entry, uint256 _exit) internal {
@@ -468,7 +467,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		announcedFeeIncreaseTimestamp = block.timestamp + delay;
 
 		emit ManagerFeeIncreaseAnnounced(_perf, _mgr, _entry, _exit, announcedFeeIncreaseTimestamp);
-		
 	}
 
 	function renounceFeeIncrease() external onlyManager {
@@ -479,7 +477,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		announcedFeeIncreaseTimestamp = 0;
 
 		emit ManagerFeeIncreaseRenounced();
-		
 	}
 
 	function commitFeeIncrease() external onlyManager {
@@ -554,5 +551,4 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	function isMemberAllowed(address _member) public view override returns (bool) {
 		return _isMemberAllowed(_member) || isNftMemberAllowed(_member);
 	}
-
 }
