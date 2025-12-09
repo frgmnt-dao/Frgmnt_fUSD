@@ -273,7 +273,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 		address guard = _assetGuard[asset];
 		if (guard != address(0)) {
-			(bool hasFn, bytes memory data) = guard.call(abi.encodeWithSignature("isAddAssetCheckGuard()"));
+			(bool hasFn, bytes memory data) = guard.staticcall(abi.encodeWithSignature("isAddAssetCheckGuard()"));
 			if (hasFn && abi.decode(data, (bool))) {
 				IAddAssetCheckGuard(guard).addAssetCheck(poolLogic, _asset);
 			}
