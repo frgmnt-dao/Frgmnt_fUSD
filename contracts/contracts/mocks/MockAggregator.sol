@@ -19,4 +19,9 @@ contract MockAggregator {
 		}
 		return (1, answer, 0, updatedAt, 1);
 	}
+
+	function decimals() external pure returns (uint8) {
+    return 8;
+}
+
 }

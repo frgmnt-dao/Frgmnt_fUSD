@@ -10,7 +10,6 @@ import "../interfaces/IAssetHandler.sol";
  * @title Frgmnt Asset Price Feeds
  * @notice Central registry mapping assets → (type, Chainlink USD aggregator).
  * @dev    Returns USD prices scaled to 18 decimals.
- *         The `assetTypes` enum is project-specific (see header comment in original).
  * @custom:project Frgmnt
  */
 contract AssetHandler is OwnableUpgradeable, IAssetHandler {
@@ -41,7 +40,8 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 
 	/**
 	 * @notice Returns the Chainlink USD price for `asset`, scaled to 1e18.
-	 * @dev    Expects underlying aggregator with 8 decimals (standard CL USD feeds).
+	 * @dev    Handles aggregators with variable decimals by querying `decimals()`
+	 *         and normalizing to 18 decimals.
 	 *         Reverts if:
 	 *           - no aggregator registered
 	 *           - data is stale beyond `chainlinkTimeout`
@@ -50,6 +50,10 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	function getUSDPrice(address asset) external view override returns (uint256 price) {
 		address aggregator = priceAggregators[asset];
 		require(aggregator != address(0), "Frgmnt: aggregator not found");
+
+		// NEW: handle variable decimals (e.g. 8, 18, etc.)
+		uint8 _decimals = IAggregatorV3Interface(aggregator).decimals();
+		require(_decimals <= 18, "Frgmnt: unsupported decimals");
 
 		try IAggregatorV3Interface(aggregator).latestRoundData() returns (
 			uint80,
@@ -61,8 +65,8 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 			// freshness check
 			require(updatedAt + chainlinkTimeout >= block.timestamp, "Frgmnt: CL price expired");
 			if (_price > 0) {
-				// Chainlink feeds are 8dp → normalize to 18dp
-				price = uint256(_price) * 1e10;
+				// Normalize to 18 decimals: price * 10^(18 - decimals)
+				price = uint256(_price) * (10 ** (18 - _decimals));
 			}
 		} catch {
 			revert("Frgmnt: price fetch failed");

@@ -1,5 +1,6 @@
 import { expect } from "chai"
 import { ethers } from "hardhat"
+import "@nomicfoundation/hardhat-chai-matchers"
 import type { AssetHandler, MockAggregator } from "../typechain-types"
 
 describe("AssetHandler", () => {
@@ -25,7 +26,7 @@ describe("AssetHandler", () => {
 		const mock = await deployMockAggregator()
 
 		const asset = ethers.Wallet.createRandom().address
-		const assetType = 1
+		const assetType = 1n
 		const now = (await ethers.provider.getBlock("latest"))!.timestamp
 
 		// price = 100 * 1e8 (8 decimals)
@@ -80,14 +81,14 @@ describe("AssetHandler", () => {
 			await handler.initialize([
 				{
 					asset,
-					assetType: 2,
+					assetType: 2n,
 					aggregator: await mock.getAddress(),
 				},
 			])
 
 			const price = await handler.getUSDPrice(asset)
 
-			// 42 * 1e8 * 1e10 = 42 * 1e18
+			// 42 * 1e8 * 1e10 = 42 * 1e18 (for 8-decimal feeds)
 			expect(price).to.equal(42n * 10n ** 18n)
 		})
 
@@ -103,7 +104,7 @@ describe("AssetHandler", () => {
 			await handler.initialize([
 				{
 					asset,
-					assetType: 1,
+					assetType: 1n,
 					aggregator: await mock.getAddress(),
 				},
 			])
@@ -124,7 +125,7 @@ describe("AssetHandler", () => {
 			await handler.initialize([
 				{
 					asset,
-					assetType: 1,
+					assetType: 1n,
 					aggregator: await mock.getAddress(),
 				},
 			])
@@ -149,7 +150,7 @@ describe("AssetHandler", () => {
 			await handler.initialize([
 				{
 					asset,
-					assetType: 1,
+					assetType: 1n,
 					aggregator: await mock.getAddress(),
 				},
 			])
@@ -192,7 +193,7 @@ describe("AssetHandler", () => {
 
 			const mock = await deployMockAggregator()
 			const asset = ethers.Wallet.createRandom().address
-			const assetType = 7
+			const assetType = 7n
 
 			await expect(handler.addAsset(asset, assetType, await mock.getAddress()))
 				.to.emit(handler, "AddedAsset")
@@ -209,7 +210,7 @@ describe("AssetHandler", () => {
 			const mock = await deployMockAggregator()
 
 			await expect(handler.addAsset(ethers.ZeroAddress, 1, await mock.getAddress())).to.be.revertedWith(
-				"Frgmnt: asset=0"
+				"Frgmnt: asset=0",
 			)
 		})
 
@@ -270,8 +271,8 @@ describe("AssetHandler", () => {
 
 			await handler.addAssets(assets)
 
-			expect(await handler.assetTypes(asset1)).to.equal(1)
-			expect(await handler.assetTypes(asset2)).to.equal(2)
+			expect(await handler.assetTypes(asset1)).to.equal(1n)
+			expect(await handler.assetTypes(asset2)).to.equal(2n)
 			expect(await handler.priceAggregators(asset1)).to.equal(await mock1.getAddress())
 			expect(await handler.priceAggregators(asset2)).to.equal(await mock2.getAddress())
 		})
@@ -307,14 +308,14 @@ describe("AssetHandler", () => {
 			await handler.initialize([
 				{
 					asset,
-					assetType: 3,
+					assetType: 3n,
 					aggregator: await mock.getAddress(),
 				},
 			])
 
 			await expect(handler.removeAsset(asset)).to.emit(handler, "RemovedAsset").withArgs(asset)
 
-			expect(await handler.assetTypes(asset)).to.equal(0)
+			expect(await handler.assetTypes(asset)).to.equal(0n)
 			expect(await handler.priceAggregators(asset)).to.equal(ethers.ZeroAddress)
 		})
 
@@ -326,7 +327,7 @@ describe("AssetHandler", () => {
 			await handler.initialize([
 				{
 					asset,
-					assetType: 3,
+					assetType: 3n,
 					aggregator: await mock.getAddress(),
 				},
 			])
