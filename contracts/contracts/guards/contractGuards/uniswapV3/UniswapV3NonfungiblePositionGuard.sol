@@ -153,7 +153,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				getParams(data),
 				(INonfungiblePositionManager.IncreaseLiquidityParams)
 			);
-
+            // Validate token id is tracked
 			(bool isValidTokenId, ) = _isValidOwnedTokenId(pool, param.tokenId);
 			require(isValidTokenId, "Frgmnt: position not tracked");
 
@@ -262,6 +262,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 
 		if (method == INonfungiblePositionManager.mint.selector) {
 			uint256 index = nonfungiblePositionManager.totalSupply();
+			// Underflow revert on index-1 if index == 0 is intentional to prevent stale state
 			NftTrackerStorage(nftTracker).addData(
 				to,
 				NFT_TYPE,
@@ -289,6 +290,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 			bool includeMintOrBurn;
 			for (uint256 i = 0; i < params.length; i++) {
 				if (afterTxGuardHandle(poolManagerLogic, to, params[i])) {
+					// Only one mint OR one burn is allowed per multicall for safety
 					require(!includeMintOrBurn, "Frgmnt: invalid multicall");
 					includeMintOrBurn = true;
 				}
