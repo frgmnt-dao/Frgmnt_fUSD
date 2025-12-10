@@ -192,7 +192,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		creationTime = block.timestamp;
 		lastFeeMintTime = block.timestamp;
-		tokenPriceAtLastFeeMint = 10 ** 18;
+		tokenPriceAtLastFeeMint = 1e18;
 		privatePool = false;
 	}
 
@@ -838,6 +838,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 				entryFeeNumerator: entryFeeNumerator
 			});
 	}
+
+	function factory() external view returns (address) {
+        return IPoolManagerLogic(poolManagerLogic).factory();
+    }
 
 	// ============================================================
 	// =                     PRIVACY FLAG                          =
