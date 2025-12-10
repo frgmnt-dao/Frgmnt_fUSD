@@ -14,7 +14,10 @@ import "../interfaces/IAssetHandler.sol";
  */
 contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	/// @notice Chainlink oracle freshness window in seconds (default ~25 hours).
-	uint256 public chainlinkTimeout;
+	uint256 public defaultChainlinkTimeout;
+
+	/// @notice Chainlink oracle freshness window per asset.
+	mapping(address => uint256) public chainlinkTimeouts;
 
 	// ───────────────────────────────── Storage ─────────────────────────────────
 
@@ -24,7 +27,8 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	/// @inheritdoc IAssetHandler
 	mapping(address => address) public override priceAggregators;
 
-	event SetChainlinkTimeout(uint256 chainlinkTimeout_);
+	event SetDefaultChainlinkTimeout(uint256 chainlinkTimeout_);
+	event SetChainlinkTimeout(address indexed asset, uint256 chainlinkTimeout_);
 
 	/// @notice Initializer (upgradeable pattern).
 	/// @param assets Array of assets to add on deploy.
@@ -32,7 +36,7 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 		// OZ v5: __Ownable_init(initialOwner)
 		__Ownable_init(msg.sender);
 
-		chainlinkTimeout = 90_000; // ~25 hours
+		defaultChainlinkTimeout = 90_000; // ~25 hours
 		addAssets(assets);
 	}
 
@@ -51,6 +55,13 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 		address aggregator = priceAggregators[asset];
 		require(aggregator != address(0), "Frgmnt: aggregator not found");
 
+		// per-asset timeout overrides the default; fallback to default if unset
+		uint256 timeout = chainlinkTimeouts[asset];
+		if (timeout == 0) {
+			timeout = defaultChainlinkTimeout;
+		}
+		require(timeout != 0, "Frgmnt: timeout not set");
+
 		// NEW: handle variable decimals (e.g. 8, 18, etc.)
 		uint8 _decimals = IAggregatorV3Interface(aggregator).decimals();
 		require(_decimals <= 18, "Frgmnt: unsupported decimals");
@@ -63,7 +74,7 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 			uint80
 		) {
 			// freshness check
-			require(updatedAt + chainlinkTimeout >= block.timestamp, "Frgmnt: CL price expired");
+			require(updatedAt + timeout >= block.timestamp, "Frgmnt: CL price expired");
 			if (_price > 0) {
 				// Normalize to 18 decimals: price * 10^(18 - decimals)
 				price = uint256(_price) * (10 ** (18 - _decimals));
@@ -76,10 +87,17 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 
 	/* ─────────────────────────── Owner actions ─────────────────────────── */
 
-	/// @notice Update Chainlink freshness window.
-	function setChainlinkTimeout(uint256 newTimeout) external onlyOwner {
-		chainlinkTimeout = newTimeout;
-		emit SetChainlinkTimeout(newTimeout);
+	/// @notice Update default Chainlink freshness window.
+	function setDefaultChainlinkTimeout(uint256 newTimeout) external onlyOwner {
+		defaultChainlinkTimeout = newTimeout;
+		emit SetDefaultChainlinkTimeout(newTimeout);
+	}
+
+	/// @notice Update Chainlink freshness window for a specific asset.
+	function setChainlinkTimeout(address asset, uint256 newTimeout) external onlyOwner {
+		require(asset != address(0), "Frgmnt: asset=0");
+		chainlinkTimeouts[asset] = newTimeout;
+		emit SetChainlinkTimeout(asset, newTimeout);
 	}
 
 	/// @notice Register a single asset with type and Chainlink aggregator.
@@ -104,6 +122,7 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	function removeAsset(address asset) external override onlyOwner {
 		assetTypes[asset] = 0;
 		priceAggregators[asset] = address(0);
+		chainlinkTimeouts[asset] = 0;
 		emit RemovedAsset(asset);
 	}
 

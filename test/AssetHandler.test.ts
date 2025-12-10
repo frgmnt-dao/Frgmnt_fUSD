@@ -20,7 +20,7 @@ describe("AssetHandler", () => {
 		return handler
 	}
 
-	it("initializes correctly with assets and sets owner + timeout", async () => {
+	it("initializes correctly with assets and sets owner + default timeout", async () => {
 		const [deployer] = await ethers.getSigners()
 		const handler = await deployAssetHandler()
 		const mock = await deployMockAggregator()
@@ -42,11 +42,13 @@ describe("AssetHandler", () => {
 
 		// owner
 		expect(await handler.owner()).to.equal(deployer.address)
-		// timeout
-		expect(await handler.chainlinkTimeout()).to.equal(DEFAULT_TIMEOUT)
+		// default timeout
+		expect(await handler.defaultChainlinkTimeout()).to.equal(DEFAULT_TIMEOUT)
 		// mappings
 		expect(await handler.assetTypes(asset)).to.equal(assetType)
 		expect(await handler.priceAggregators(asset)).to.equal(await mock.getAddress())
+		// per-asset timeout should be unset by default
+		expect(await handler.chainlinkTimeouts(asset)).to.equal(0n)
 	})
 
 	it("prevents double initialization", async () => {
@@ -67,7 +69,7 @@ describe("AssetHandler", () => {
 			await expect(handler.getUSDPrice(randomAsset)).to.be.revertedWith("Frgmnt: aggregator not found")
 		})
 
-		it("returns normalized 18-decimal price when data is fresh and positive", async () => {
+		it("returns normalized 18-decimal price when data is fresh and positive (using default timeout)", async () => {
 			const handler = await deployAssetHandler()
 			const mock = await deployMockAggregator()
 
@@ -92,7 +94,7 @@ describe("AssetHandler", () => {
 			expect(price).to.equal(42n * 10n ** 18n)
 		})
 
-		it("reverts when Chainlink data is stale", async () => {
+		it("reverts when Chainlink data is stale (using default timeout)", async () => {
 			const handler = await deployAssetHandler()
 			const mock = await deployMockAggregator()
 
@@ -157,20 +159,50 @@ describe("AssetHandler", () => {
 
 			await expect(handler.getUSDPrice(asset)).to.be.revertedWith("Frgmnt: price fetch failed")
 		})
+
+		it("uses per-asset timeout override when set", async () => {
+			const handler = await deployAssetHandler()
+			const mock = await deployMockAggregator()
+
+			const asset = ethers.Wallet.createRandom().address
+
+			await handler.initialize([
+				{
+					asset,
+					assetType: 1n,
+					aggregator: await mock.getAddress(),
+				},
+			])
+
+			const block = await ethers.provider.getBlock("latest")
+			const now = block!.timestamp
+
+			// Set data with an old timestamp that would be stale for default timeout
+			const updatedAt = BigInt(now - Number(DEFAULT_TIMEOUT) - 1)
+			const price8 = 10n * 10n ** 8n
+			await mock.setData(price8, updatedAt, false)
+
+			// Override timeout for this asset to a larger value so it's considered fresh
+			const CUSTOM_TIMEOUT = DEFAULT_TIMEOUT * 2n
+			await handler.setChainlinkTimeout(asset, CUSTOM_TIMEOUT)
+
+			const price = await handler.getUSDPrice(asset)
+			expect(price).to.equal(10n * 10n ** 18n)
+		})
 	})
 
-	describe("setChainlinkTimeout", () => {
-		it("allows owner to update timeout and emits event", async () => {
+	describe("setDefaultChainlinkTimeout", () => {
+		it("allows owner to update default timeout and emits event", async () => {
 			const handler = await deployAssetHandler()
 			await handler.initialize([])
 
 			const newTimeout = 123_456n
 
-			await expect(handler.setChainlinkTimeout(newTimeout))
-				.to.emit(handler, "SetChainlinkTimeout")
+			await expect(handler.setDefaultChainlinkTimeout(newTimeout))
+				.to.emit(handler, "SetDefaultChainlinkTimeout")
 				.withArgs(newTimeout)
 
-			expect(await handler.chainlinkTimeout()).to.equal(newTimeout)
+			expect(await handler.defaultChainlinkTimeout()).to.equal(newTimeout)
 		})
 
 		it("reverts when called by non-owner", async () => {
@@ -180,7 +212,43 @@ describe("AssetHandler", () => {
 
 			const newTimeout = 999n
 
-			await expect(handler.connect(other).setChainlinkTimeout(newTimeout))
+			await expect(handler.connect(other).setDefaultChainlinkTimeout(newTimeout))
+				.to.be.revertedWithCustomError(handler, "OwnableUnauthorizedAccount")
+				.withArgs(other.address)
+		})
+	})
+
+	describe("setChainlinkTimeout", () => {
+		it("allows owner to update per-asset timeout and emits event", async () => {
+			const handler = await deployAssetHandler()
+			await handler.initialize([])
+
+			const asset = ethers.Wallet.createRandom().address
+			const newTimeout = 55_555n
+
+			await expect(handler.setChainlinkTimeout(asset, newTimeout))
+				.to.emit(handler, "SetChainlinkTimeout")
+				.withArgs(asset, newTimeout)
+
+			expect(await handler.chainlinkTimeouts(asset)).to.equal(newTimeout)
+		})
+
+		it("reverts when asset is zero address", async () => {
+			const handler = await deployAssetHandler()
+			await handler.initialize([])
+
+			await expect(handler.setChainlinkTimeout(ethers.ZeroAddress, 1n)).to.be.revertedWith("Frgmnt: asset=0")
+		})
+
+		it("reverts when called by non-owner", async () => {
+			const [, other] = await ethers.getSigners()
+			const handler = await deployAssetHandler()
+			await handler.initialize([])
+
+			const asset = ethers.Wallet.createRandom().address
+			const newTimeout = 999n
+
+			await expect(handler.connect(other).setChainlinkTimeout(asset, newTimeout))
 				.to.be.revertedWithCustomError(handler, "OwnableUnauthorizedAccount")
 				.withArgs(other.address)
 		})
@@ -209,9 +277,9 @@ describe("AssetHandler", () => {
 
 			const mock = await deployMockAggregator()
 
-			await expect(handler.addAsset(ethers.ZeroAddress, 1, await mock.getAddress())).to.be.revertedWith(
-				"Frgmnt: asset=0",
-			)
+			await expect(
+				handler.addAsset(ethers.ZeroAddress, 1, await mock.getAddress()),
+			).to.be.revertedWith("Frgmnt: asset=0")
 		})
 
 		it("reverts if aggregator is zero address", async () => {
@@ -313,10 +381,14 @@ describe("AssetHandler", () => {
 				},
 			])
 
+			// set an explicit per-asset timeout to ensure it is cleared
+			await handler.setChainlinkTimeout(asset, 123n)
+
 			await expect(handler.removeAsset(asset)).to.emit(handler, "RemovedAsset").withArgs(asset)
 
 			expect(await handler.assetTypes(asset)).to.equal(0n)
 			expect(await handler.priceAggregators(asset)).to.equal(ethers.ZeroAddress)
+			expect(await handler.chainlinkTimeouts(asset)).to.equal(0n)
 		})
 
 		it("reverts when non-owner calls removeAsset", async () => {
