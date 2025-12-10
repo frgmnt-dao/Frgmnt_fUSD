@@ -35,6 +35,9 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		uint160 sqrtPriceX96;
 	}
 
+	/// @dev Time buffer added to the current block timestamp for Uniswap V3 deadlines.
+	uint256 public constant DEADLINE_BUFFER = 15 minutes;
+
 	/**
 	 * @notice Returns the pool’s total Uniswap V3 position value in USD.
 	 * @dev For each owned NFT:
@@ -154,7 +157,7 @@ contract UniswapV3AssetGuard is ERC20Guard {
 						dec.lpAmount,
 						0,
 						0,
-						type(uint256).max
+						block.timestamp + DEADLINE_BUFFER
 					)
 				);
 				txCount++;
