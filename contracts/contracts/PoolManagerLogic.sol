@@ -9,6 +9,7 @@ import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
 import { IHasSupportedAsset } from "./interfaces/IHasSupportedAsset.sol";
 import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
 import { IAddAssetCheckGuard } from "./interfaces/guards/IAddAssetCheckGuard.sol";
+import { IAssetHandler } from "./interfaces/IAssetHandler.sol";
 import { Managed } from "./Managed.sol";
 
 contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsset, Managed {
@@ -61,9 +62,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 	// Asset info
 	uint256 private _maximumSupportedAssetCount;
-	mapping(address => bool) private _isValidAsset;
-	mapping(address => uint16) private _assetType;
-	mapping(address => uint256) private _assetPrice;
 
 	// Guards (Option 3)
 	mapping(address => address) private _assetGuard;
@@ -79,6 +77,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	uint256 private _performanceFeeNumeratorChangeDelay;
 
 	mapping(address => bool) private _isPool;
+
+	address public assetHandler;
 
 	uint256[20] private __gap;
 
@@ -98,6 +98,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		address _manager,
 		string calldata _managerName,
 		address _poolLogic,
+		address _assetHandler,
 		uint256 _performanceFeeNumerator,
 		uint256 _managerFeeNumerator
 	) external initializer {
@@ -107,6 +108,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		_initialize(_manager, _managerName);
 		factoryOwner = _factoryOwner;
 		poolLogic = _poolLogic;
+		require(_assetHandler != address(0), "invalid assetHandler");
+		assetHandler = _assetHandler;
 		_setFactoryConfig(50, 5000, 300, 100, 100, 10000, 0, 3 days); // Default factory config
 		_setFeeNumerator(_performanceFeeNumerator, _managerFeeNumerator, 0, 0);
 	}
@@ -119,20 +122,22 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		return address(this);
 	}
 
-	function isValidAsset(address _asset) external view returns (bool) {
-		return _isValidAsset[_asset];
-	}
-
 	function getMaximumSupportedAssetCount() external view returns (uint256) {
 		return _maximumSupportedAssetCount;
 	}
 
-	function getAssetPrice(address _asset) external view returns (uint256) {
-		return _assetPrice[_asset];
+	/// @notice Return the latest price of a given asset
+	/// @param _asset The address of the asset
+	/// @return price The latest price of a given asset
+	function getAssetPrice(address _asset) external view override returns (uint256 price) {
+		price = IAssetHandler(assetHandler).getUSDPrice(_asset);
 	}
 
-	function getAssetType(address _asset) external view returns (uint16) {
-		return _assetType[_asset];
+	/// @notice Return type of the asset
+	/// @param _asset The address of the asset
+	/// @return assetType The type of the asset
+	function getAssetType(address _asset) external view override returns (uint16 assetType) {
+		assetType = IAssetHandler(assetHandler).assetTypes(_asset);
 	}
 
 	function getAssetGuard(address _asset) external view returns (address) {
@@ -214,16 +219,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		_performanceFeeNumeratorChangeDelay = perfChangeDelay_;
 	}
 
-	function setAssetInfo(address _asset, bool _valid, uint16 _type, uint256 _price) external onlyFactoryOwner {
-		_isValidAsset[_asset] = _valid;
-		_assetType[_asset] = _type;
-		_assetPrice[_asset] = _price;
-	}
-
-	function setAssetPrice(address _asset, uint256 _price) external onlyFactoryOwner {
-		_assetPrice[_asset] = _price;
-	}
-
 	function setAssetGuard(address _asset, address _guard) external onlyFactoryOwner {
 		require(_guard != address(0), "Frgmnt: invalid _guard");
 		_assetGuard[_asset] = _guard;
@@ -236,6 +231,11 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	function setFactoryOwner(address _newOwner) external onlyFactoryOwner {
 		require(_newOwner != address(0), "zero owner");
 		factoryOwner = _newOwner;
+	}
+
+	function setAssetHandler(address _assetHandler) external onlyFactoryOwner {
+		require(_assetHandler != address(0), "invalid assetHandler");
+		assetHandler = _assetHandler;
 	}
 
 	// -----------------------------------------------------------------------
@@ -251,8 +251,15 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		return index != 0 && supportedAssets[index - 1].isDeposit;
 	}
 
+	/// @notice Return boolean if the asset is supported
+	/// @param _asset The address of the asset
+	/// @return True if it's valid asset, false otherwise
 	function validateAsset(address _asset) public view override returns (bool) {
-		return _isValidAsset[_asset];
+		return _isValidAsset(_asset);
+	}
+
+	function _isValidAsset(address _asset) internal view returns (bool) {
+		return IAssetHandler(assetHandler).priceAggregators(_asset) != address(0);
 	}
 
 	function changeAssets(Asset[] calldata _addAssets, address[] calldata _removeAssets) external {
@@ -305,10 +312,10 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 			supportedAssets.push(_asset);
 			assetPosition[asset] = len + 1;
 
-			uint16 atype = _assetType[asset];
+			uint16 atype = IAssetHandler(assetHandler).assetTypes(asset);
 
 			// insertion-sort step
-			while (len > 0 && _assetType[supportedAssets[len - 1].asset] < atype) {
+			while (len > 0 && IAssetHandler(assetHandler).assetTypes(supportedAssets[len - 1].asset) < atype) {
 				Asset memory tmp = supportedAssets[len];
 				supportedAssets[len] = supportedAssets[len - 1];
 				assetPosition[supportedAssets[len].asset] = len + 1;
@@ -384,7 +391,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	}
 
 	function assetValue(address _asset, uint256 _amount) public view override returns (uint256) {
-		uint256 price = _assetPrice[_asset];
+		uint256 price = IAssetHandler(assetHandler).getUSDPrice(_asset);
 		if (price == 0 || _amount == 0) return 0;
 
 		uint256 decimals = assetDecimal(_asset);
