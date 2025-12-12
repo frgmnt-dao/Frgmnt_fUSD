@@ -414,6 +414,42 @@ contract TokenLogic is
 	 */
 	function _authorizeUpgrade(address newImplementation) internal override onlyRole(DEFAULT_ADMIN_ROLE) {}
 
+
+    // ---------------------------------------------------------------------
+    //                     TRANSFER COOLDOWN ENFORCEMENT
+    // ---------------------------------------------------------------------
+
+    /**
+     * @dev Prevent users from transferring FUSD while they are still in cooldown.
+     *      This closes the FRG-13 bypass where a user transfers freshly minted
+     *      FUSD to another address that has no cooldown history.
+     *
+     *      Mint (from = 0)  → allowed
+     *      Burn (to = 0)    → allowed
+     *      Transfer         → blocked if sender's cooldown not expired
+     */
+    function _update(address from, address to, uint256 amount)
+        internal
+        override(ERC20Upgradeable)
+    {
+        // Apply cooldown check only to transfers (from != 0 and to != 0)
+        if (from != address(0) && to != address(0)) {
+            uint256 ts = averageMintTimestamp[from];
+
+            if (ts != 0 && cooldownPeriod != 0) {
+                uint256 end = ts + cooldownPeriod;
+
+                require(
+                    block.timestamp >= end,
+                    "TokenLogic: cooldown transfer"
+                );
+            }
+        }
+
+        super._update(from, to, amount);
+    }
+
+
 	// Reserve storage gap for future upgrades
 	uint256[40] private __gap;
 }
