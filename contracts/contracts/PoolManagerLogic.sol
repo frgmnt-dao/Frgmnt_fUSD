@@ -48,7 +48,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	uint256 public managerFeeNumerator;
 
 	address public nftMembershipCollectionAddress;
-	uint256 public override minDepositUSD;
 
 	uint256 public announcedEntryFeeNumerator;
 	uint256 public entryFeeNumerator;
@@ -543,11 +542,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		} catch {
 			revert("Invalid collection");
 		}
-	}
-
-	function setMinDepositUSD(uint256 _min) external onlyManager {
-		minDepositUSD = _min;
-		emit MinDepositUpdated(_min);
 	}
 
 	function isNftMemberAllowed(address _member) public view returns (bool) {

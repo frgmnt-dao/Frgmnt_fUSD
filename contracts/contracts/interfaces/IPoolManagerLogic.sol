@@ -27,8 +27,6 @@ interface IPoolManagerLogic {
 
 	function getFee() external view returns (uint256, uint256, uint256, uint256, uint256);
 
-	function minDepositUSD() external view returns (uint256);
-
 	function getAssetPrice(address _asset) external view returns (uint256);
 
 	function getAssetType(address _asset) external view returns (uint16);
