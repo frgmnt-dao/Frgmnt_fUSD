@@ -76,6 +76,10 @@ contract TokenLogic is
 	///         the remaining cooldown.
 	mapping(address => uint256) public averageMintTimestamp;
 
+	/// @notice Snapshot of user's FUSD balance at the time of their last deposit.
+	/// @dev Used to prevent cooldown skew via temporary balance inflation.
+	mapping(address => uint256) public lastDepositBalance;
+
 	/// @notice Collateral asset configuration.
 	struct AssetConfig {
 		/// @notice If true, asset can be deposited.
@@ -282,17 +286,26 @@ contract TokenLogic is
 		uint256 priceUSD = poolManagerLogic.getAssetPrice(asset); // 18 decimals
 		uint256 fusdAmount = _convertToUSD(amount, cfg.decimals_, priceUSD);
 		require(fusdAmount >= minDepositUSD, "TokenLogic: below minimum deposit");
-		// Record previous FUSD balance BEFORE mint
-		uint256 prevBalance = balanceOf(to);
+
+		// Record previous FUSD balance BEFORE mint (snapshot from last deposit)
+		uint256 prevBalance = lastDepositBalance[to];
 		uint256 previousTs = averageMintTimestamp[to];
+
 		// Update time-weighted average mint timestamp for the user
 		averageMintTimestamp[to] = _updateAverageMintTimestamp(previousTs, fusdAmount, prevBalance);
+
 		// Update total deposited for this asset
 		cfg.totalDeposited_ += amount;
+
 		// Forward collateral to PoolLogic
 		IERC20(asset).safeTransferFrom(msg.sender, poolLogic, amount);
+
 		// Mint FUSD to the user
 		_mint(to, fusdAmount);
+
+		// Update balance snapshot for next deposit
+		lastDepositBalance[to] = balanceOf(to);
+
 		emit Deposited(to, asset, amount, fusdAmount);
 	}
 
