@@ -38,6 +38,45 @@ contract UniswapV3AssetGuard is ERC20Guard {
 	/// @dev Time buffer added to the current block timestamp for Uniswap V3 deadlines.
 	uint256 public constant DEADLINE_BUFFER = 15 minutes;
 
+	/// @dev Admin allowed to adjust withdrawal slippage and twap window.
+	address public admin;
+
+	/// @dev Slippage protection used for Uniswap V3 liquidity withdrawals (in bps).
+	uint256 public withdrawalSlippageBps = 100; // 1%
+
+	/// @dev TWAP window (seconds) used to mitigate price manipulation during withdrawal construction.
+	uint32 public withdrawalTwapWindow = 600; // 10 minutes
+
+	uint256 private constant BPS_DENOMINATOR = 10_000;
+
+	constructor() {
+		admin = msg.sender;
+	}
+
+	modifier onlyAdmin() {
+		require(msg.sender == admin, "UniswapV3AssetGuard: not admin");
+		_;
+	}
+
+	/// @notice Updates the slippage tolerance (in bps) used for amount0Min/amount1Min on decreaseLiquidity.
+	/// @dev 0 bps = no buffer; 10_000 bps = 100% (not recommended). We cap it for safety.
+	function setWithdrawalSlippageBps(uint256 _withdrawalSlippageBps) external onlyAdmin {
+		require(_withdrawalSlippageBps <= 2_000, "UniswapV3AssetGuard: slippage too high"); // max 20%
+		withdrawalSlippageBps = _withdrawalSlippageBps;
+	}
+
+	/// @notice Updates the TWAP window (seconds) used during withdrawal construction.
+	function setWithdrawalTwapWindow(uint32 _withdrawalTwapWindow) external onlyAdmin {
+		require(_withdrawalTwapWindow >= 60, "UniswapV3AssetGuard: twap too small"); // minimum 1 minute
+		withdrawalTwapWindow = _withdrawalTwapWindow;
+	}
+
+	/// @notice Transfers admin role.
+	function setAdmin(address _admin) external onlyAdmin {
+		require(_admin != address(0), "UniswapV3AssetGuard: zero admin");
+		admin = _admin;
+	}
+
 	/**
 	 * @notice Returns the pool’s total Uniswap V3 position value in USD.
 	 * @dev For each owned NFT:
@@ -111,7 +150,7 @@ contract UniswapV3AssetGuard is ERC20Guard {
 	 * @notice Builds transactions to withdraw a portion of all Uniswap V3 NFT positions.
 	 * @dev For each NFT owned by the pool:
 	 *      1) Decrease liquidity by `portion` of current NFT liquidity (if > 0)
-	 *      2) Collect fees + decreased principals directly to `to`
+	 *      2) Collect fees + decreased principals directly to the recipient.
 	 * @param pool PoolLogic address
 	 * @param asset Uniswap V3 NonfungiblePositionManager address
 	 * @param portion Portion in 1e18 precision (1e18 = 100%)
@@ -149,14 +188,25 @@ contract UniswapV3AssetGuard is ERC20Guard {
 
 			// 1) Decrease liquidity, if any
 			if (dec.lpAmount != 0) {
+				// Slippage protection: use TWAP-priced expected principal amounts and apply configurable bps buffer.
+				uint256 amount0Min;
+				uint256 amount1Min;
+
+				if (dec.principal0 != 0) {
+					amount0Min = (dec.principal0 * (BPS_DENOMINATOR - withdrawalSlippageBps)) / BPS_DENOMINATOR;
+				}
+				if (dec.principal1 != 0) {
+					amount1Min = (dec.principal1 * (BPS_DENOMINATOR - withdrawalSlippageBps)) / BPS_DENOMINATOR;
+				}
+
 				transactions[txCount].to = address(nonfungiblePositionManager);
 				transactions[txCount].txData = abi.encodeWithSelector(
 					INonfungiblePositionManager.decreaseLiquidity.selector,
 					INonfungiblePositionManager.DecreaseLiquidityParams(
 						tokenIds[i],
 						dec.lpAmount,
-						0,
-						0,
+						amount0Min,
+						amount1Min,
 						block.timestamp + DEADLINE_BUFFER
 					)
 				);
@@ -194,6 +244,48 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		uint128 lpAmount;
 		uint256 amount0;
 		uint256 amount1;
+		// Principal amounts (TWAP-priced) used for slippage mins on decreaseLiquidity
+		uint256 principal0;
+		uint256 principal1;
+	}
+
+	/// @dev Helper to reduce stack usage in _calcDecreaseLiquidity.
+	function _getPositionParams(
+		INonfungiblePositionManager nonfungiblePositionManager,
+		uint256 tokenId
+	)
+		internal
+		view
+		returns (address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity)
+	{
+		(
+			,
+			,
+			token0,
+			token1,
+			fee,
+			tickLower,
+			tickUpper,
+			liquidity,
+			,
+			,
+			,
+
+		) = nonfungiblePositionManager.positions(tokenId);
+	}
+
+	/// @dev Helper to reduce stack usage in _calcDecreaseLiquidity.
+	function _calcAmountsIncludingFees(
+		INonfungiblePositionManager nonfungiblePositionManager,
+		uint256 tokenId,
+		uint256 portion,
+		uint256 principal0,
+		uint256 principal1
+	) internal view returns (uint256 amount0, uint256 amount1) {
+		// Include proportional share of uncollected fees
+		(uint256 feeAmount0, uint256 feeAmount1) = nonfungiblePositionManager.fees(tokenId);
+		amount0 = principal0 + ((feeAmount0 * portion) / 1e18);
+		amount1 = principal1 + ((feeAmount1 * portion) / 1e18);
 	}
 
 	/**
@@ -207,22 +299,10 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		uint256 tokenId,
 		uint256 portion
 	) internal view returns (DecreaseLiquidity memory dec) {
-		IUniswapV3Factory uniswapV3Factory = IUniswapV3Factory(nonfungiblePositionManager.factory());
-
-		(
-			,
-			,
-			address token0,
-			address token1,
-			uint24 fee,
-			int24 tickLower,
-			int24 tickUpper,
-			uint128 liquidity,
-			,
-			,
-			,
-
-		) = nonfungiblePositionManager.positions(tokenId);
+		(address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity) = _getPositionParams(
+			nonfungiblePositionManager,
+			tokenId
+		);
 
 		// LP portion to remove
 		require(
@@ -232,10 +312,15 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		dec.lpAmount = uint128((uint256(liquidity) * portion) / 1e18);
 
 		// Current pool sqrtPrice
-		(uint160 sqrtPriceX96, , , , , , ) = IUniswapV3Pool(uniswapV3Factory.getPool(token0, token1, fee)).slot0();
+		// NOTE: Use TWAP to mitigate spot price manipulation during withdrawal construction.
+		address pool = IUniswapV3Factory(nonfungiblePositionManager.factory()).getPool(token0, token1, fee);
+		require(pool != address(0), "UniswapV3AssetGuard: pool not found");
+
+		(int24 twapTick, ) = OracleLibrary.consult(pool, withdrawalTwapWindow);
+		uint160 sqrtPriceX96 = TickMath.getSqrtRatioAtTick(twapTick);
 
 		// Amounts corresponding to the lp portion
-		(dec.amount0, dec.amount1) = LiquidityAmounts.getAmountsForLiquidity(
+		(dec.principal0, dec.principal1) = LiquidityAmounts.getAmountsForLiquidity(
 			sqrtPriceX96,
 			TickMath.getSqrtRatioAtTick(tickLower),
 			TickMath.getSqrtRatioAtTick(tickUpper),
@@ -243,8 +328,12 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		);
 
 		// Include proportional share of uncollected fees
-		(uint256 feeAmount0, uint256 feeAmount1) = nonfungiblePositionManager.fees(tokenId);
-		dec.amount0 = dec.amount0 + ((feeAmount0 * portion) / 1e18);
-		dec.amount1 = dec.amount1 + ((feeAmount1 * portion) / 1e18);
+		(dec.amount0, dec.amount1) = _calcAmountsIncludingFees(
+			nonfungiblePositionManager,
+			tokenId,
+			portion,
+			dec.principal0,
+			dec.principal1
+		);
 	}
 }
