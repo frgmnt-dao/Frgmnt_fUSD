@@ -346,7 +346,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 			assetPosition[supportedAssets[i].asset] = i + 1;
 		}
 
-		assetPosition[supportedAssets[len - 1].asset] = 0;
+		assetPosition[_asset] = 0;
 		supportedAssets.pop();
 
 		emit AssetRemoved(poolLogic, manager, _asset);
@@ -364,7 +364,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 			assetPosition[supportedAssets[i].asset] = i + 1;
 		}
 
-		assetPosition[supportedAssets[len - 1].asset] = 0;
+		assetPosition[_asset] = 0;
 		supportedAssets.pop();
 
 		emit AssetRemoved(poolLogic, manager, _asset);
