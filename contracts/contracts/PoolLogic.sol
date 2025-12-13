@@ -517,7 +517,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 				cd = ComplexAsset({ supportedAsset: address(0), withdrawData: "", slippageTolerance: 0 });
 			}
 
-			(address withdrawAsset, uint256 withdrawAmount, ) = _withdrawProcessing(a, msg.sender, portion, cd);
+			(address withdrawAsset, uint256 withdrawAmount, ) = _withdrawProcessing(a, address(this), portion, cd);
 
 			if (withdrawAsset != address(0) && withdrawAmount > 0) {
 				IERC20(withdrawAsset).safeTransfer(msg.sender, withdrawAmount);
