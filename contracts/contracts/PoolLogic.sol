@@ -125,6 +125,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	mapping(uint256 => CashWithdrawRequest) public cashWithdrawRequests;
 	mapping(address => uint256[]) public userRequests;
 
+	/// @notice Contracts allowed to invoke callback-style calls (e.g., Morpho).
+	/// @dev Used by fallback to accept only known protocol callbacks.
+	mapping(address => bool) public allowedCallbackSenders;
+
 	// ============================================================
 	// =                         EVENTS                           =
 	// ============================================================
@@ -851,5 +855,31 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		require(msg.sender == _manager(), "PoolLogic: only manager");
 		privatePool = _privatePool;
 		emit PoolPrivacyUpdated(_privatePool);
+	}
+
+	// ============================================================
+	// =                 CALLBACK SENDER WHITELIST                 =
+	// ============================================================
+
+	/// @notice Allow/deny protocol contracts that call back into this PoolLogic (e.g., Morpho callbacks).
+	/// @dev Whitelist the protocol contract address that performs the callback (e.g., Morpho),
+	///      NOT the guard contract.
+	function setAllowedCallbackSender(address protocol, bool allowed) external {
+		require(msg.sender == _manager(), "PoolLogic: only manager");
+		require(protocol != address(0), "PoolLogic: protocol=0");
+		allowedCallbackSenders[protocol] = allowed;
+	}
+
+	// ============================================================
+	// =                   CALLBACK COMPATIBILITY                  =
+	// ============================================================
+
+	/// @notice Fallback function to gracefully accept callback calls
+	///         from protocols such as Morpho that expect msg.sender
+	///         to implement optional callback interfaces.
+	/// @dev Prevents unintended reverts during protocol interactions.
+	fallback() external {
+		require(allowedCallbackSenders[msg.sender], "PoolLogic: callback sender not allowed");
+		// Intentionally empty — simply prevents revert on unknown function selectors for allowed senders
 	}
 }
