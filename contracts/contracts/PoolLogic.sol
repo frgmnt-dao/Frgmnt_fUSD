@@ -125,6 +125,12 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	mapping(uint256 => CashWithdrawRequest) public cashWithdrawRequests;
 	mapping(address => uint256[]) public userRequests;
 
+	/// @notice Reserved amount for finalized-but-unclaimed requests per asset.
+	/// @dev Finalization doesn't transfer assets; without reserving, multiple requests could be finalized
+	///      against the same balance and later claims could fail. This mapping tracks the total amount
+	///      committed to Finalized requests and not yet released via claim.
+	mapping(address => uint256) public reservedAssetBalance;
+
 	/// @notice Contracts allowed to invoke callback-style calls (e.g., Morpho).
 	/// @dev Used by fallback to accept only known protocol callbacks.
 	mapping(address => bool) public allowedCallbackSenders;
@@ -591,7 +597,22 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		// convert netFusd to assetAmount using price
 		uint256 assetAmount = _fusdToAssetAmount(r.fusdNetForAsset, r.asset);
 		require(assetAmount > 0, "PoolLogic: assetAmount=0");
-		require(IERC20(r.asset).balanceOf(address(this)) >= assetAmount, "PoolLogic: insufficient asset");
+
+		// Finalization does not transfer assets to the user; assets remain on the contract until claim.
+		// Therefore we must account for other finalized-but-unclaimed requests to avoid over-allocating
+		// the same on-chain balance across multiple requests.
+		uint256 bal = IERC20(r.asset).balanceOf(address(this));
+		uint256 reserved = reservedAssetBalance[r.asset];
+
+		// Defensive: reserved should never exceed the actual on-chain balance.
+		require(bal >= reserved, "PoolLogic: bad reserved");
+
+		// Only the unreserved portion of the balance can be used for a new finalization.
+		uint256 available = bal - reserved;
+		require(available >= assetAmount, "PoolLogic: insufficient asset");
+
+		// Reserve the amount for this request until it is claimed.
+		reservedAssetBalance[r.asset] = reserved + assetAmount;
 
 		r.assetAmount = assetAmount;
 		r.status = RequestStatus.Finalized;
@@ -606,6 +627,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		uint256 amount = r.assetAmount;
 		require(amount > 0, "PoolLogic: zero asset");
+
+		// Release the reserved amount for this request.
+		// If safeTransfer reverts, the whole tx reverts and the reservation remains intact.
+		reservedAssetBalance[r.asset] -= amount;
 
 		r.status = RequestStatus.Claimed;
 		r.assetAmount = 0;
