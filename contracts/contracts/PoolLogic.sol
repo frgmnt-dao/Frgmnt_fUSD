@@ -173,6 +173,16 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	event TransactionExecuted(address pool, address actor, uint16 transactionType, uint256 time);
 
+	/// @notice Pro-rata immediate cash-out results across multiple assets
+	event CashWithdrawImmediateProRata(
+		address indexed user,
+		uint256 fusdTotal,
+		uint256 fusdNet,
+		uint256 fusdFee,
+		address[] assets,
+		uint256[] amounts
+	);
+
 	// ============================================================
 	// =                      INITIALIZATION                       =
 	// ============================================================
@@ -454,25 +464,75 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		// burn FUSD from user
 		ITokenLogic(fusd).burnFrom(msg.sender, fusdAmount);
 
+		// pro-rata withdrawal (dHEDGE-style) moved into helper to avoid stack-too-deep
+		(address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore) = _withdrawProRata(
+			asset,
+			netFusd,
+			complexData
+		);
+
+		uint256 valueAfter = _totalValue();
+		require(valueBefore >= valueAfter, "PoolLogic: bad value");
+		require(valueBefore - valueAfter <= netFusd + 1e15, "PoolLogic: value mismatch");
+
+		// Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
+		emit CashWithdrawImmediate(msg.sender, fusdAmount, netFusd, feeFusd, asset, 0);
+		emit CashWithdrawImmediateProRata(msg.sender, fusdAmount, netFusd, feeFusd, outAssets, outAmounts);
+	}
+
+	/// @dev Helper to reduce stack usage in withdrawCashImmediate (compile fix: avoids "stack too deep")
+	function _withdrawProRata(
+		address selectedAsset,
+		uint256 netFusd,
+		ComplexAsset calldata complexData
+	) internal returns (address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore) {
 		// compute portion in terms of totalFundValue
 		uint256 fundValue = _totalValue();
 		require(fundValue > 0, "PoolLogic: fund=0");
 
 		uint256 portion = (netFusd * 1e18) / fundValue;
 
-		(address withdrawAsset, uint256 withdrawAmount, ) = _withdrawProcessing(
-			asset,
-			msg.sender,
-			portion,
-			complexData
-		);
+		// dHEDGE-style: withdraw proportionally from ALL supported assets
+		IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
 
-		require(withdrawAsset != address(0), "PoolLogic: invalid withdraw asset");
-		require(withdrawAmount > 0, "PoolLogic: zero withdraw");
+		outAssets = new address[](supportedAssets.length);
+		outAmounts = new uint256[](supportedAssets.length);
+		uint256 outCount = 0;
 
-		IERC20(withdrawAsset).safeTransfer(msg.sender, withdrawAmount);
+		// Invariant-style check (dHEDGE-like): total value removed should not exceed netFusd (plus rounding tolerance)
+		valueBefore = fundValue;
 
-		emit CashWithdrawImmediate(msg.sender, fusdAmount, netFusd, feeFusd, withdrawAsset, withdrawAmount);
+		for (uint256 i = 0; i < supportedAssets.length; ++i) {
+			address a = supportedAssets[i].asset;
+
+			// Apply complex withdraw data ONLY to the chosen `asset`, other assets use empty data
+			ComplexAsset memory cd;
+			if (a == selectedAsset) {
+				cd = ComplexAsset({
+					supportedAsset: complexData.supportedAsset,
+					withdrawData: complexData.withdrawData,
+					slippageTolerance: complexData.slippageTolerance
+				});
+			} else {
+				cd = ComplexAsset({ supportedAsset: address(0), withdrawData: "", slippageTolerance: 0 });
+			}
+
+			(address withdrawAsset, uint256 withdrawAmount, ) = _withdrawProcessing(a, msg.sender, portion, cd);
+
+			if (withdrawAsset != address(0) && withdrawAmount > 0) {
+				IERC20(withdrawAsset).safeTransfer(msg.sender, withdrawAmount);
+
+				outAssets[outCount] = withdrawAsset;
+				outAmounts[outCount] = withdrawAmount;
+				outCount++;
+			}
+		}
+
+		// shrink arrays to actual length
+		assembly {
+			mstore(outAssets, outCount)
+			mstore(outAmounts, outCount)
+		}
 	}
 
 	// ============================================================
@@ -563,7 +623,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		address asset,
 		address to,
 		uint256 portion,
-		ComplexAsset calldata complexData
+		ComplexAsset memory complexData
 	) internal returns (address withdrawAsset, uint256 withdrawAmount, bool externalProcessed) {
 		WithdrawProcessingLocalVars memory v;
 
@@ -871,7 +931,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	// ============================================================
-	// =                 NON-TRANSFERABLE sFUSD                   =
+	// =                 NON-TRANSFERABLE sFUSD                    =
 	// ============================================================
 
 	/// @notice sFUSD Token: a non-transferable receipt token received when users stake their fUSD.
