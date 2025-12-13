@@ -871,6 +871,27 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	// ============================================================
+	// =                 NON-TRANSFERABLE sFUSD                   =
+	// ============================================================
+
+	/// @notice sFUSD Token: a non-transferable receipt token received when users stake their fUSD.
+	///         It gives direct access to protocol yields and compounds returns automatically.
+	function transfer(address, uint256) public pure override returns (bool) {
+		revert("PoolLogic: sFUSD is non-transferable");
+	}
+
+	/// @notice sFUSD Token: a non-transferable receipt token received when users stake their fUSD.
+	///         It gives direct access to protocol yields and compounds returns automatically.
+	function transferFrom(address, address, uint256) public pure override returns (bool) {
+		revert("PoolLogic: sFUSD is non-transferable");
+	}
+
+	/// @notice Disable approvals to prevent indirect transfers.
+	function approve(address, uint256) public pure override returns (bool) {
+		revert("PoolLogic: sFUSD is non-transferable");
+	}
+
+	// ============================================================
 	// =                   CALLBACK COMPATIBILITY                  =
 	// ============================================================
 
