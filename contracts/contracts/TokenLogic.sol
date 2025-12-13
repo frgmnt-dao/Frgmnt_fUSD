@@ -276,6 +276,20 @@ contract TokenLogic is
 	 * @param to Address that will receive the minted FUSD.
 	 */
 	function deposit(address asset, uint256 amount, address to) external nonReentrant whenNotPaused {
+		// Backward-compatible wrapper: no minimum output enforced by the user
+		deposit(asset, amount, to, 0);
+	}
+
+	/**
+	 * @notice Deposit a supported collateral asset and receive FUSD with a minimum expected output.
+	 * @dev Same logic as deposit(asset, amount, to) but allows users to enforce a minimum FUSD amount.
+	 *
+	 * @param asset Address of the collateral asset to deposit.
+	 * @param amount Amount of collateral to deposit (raw units).
+	 * @param to Address that will receive the minted FUSD.
+	 * @param minFusdAmount Minimum FUSD the user is willing to receive (18 decimals).
+	 */
+	function deposit(address asset, uint256 amount, address to, uint256 minFusdAmount) public nonReentrant whenNotPaused {
 		AssetConfig storage cfg = assetConfigs[asset];
 		require(cfg.allowed_, "TokenLogic: asset not allowed");
 		require(amount > 0, "TokenLogic: zero amount");
@@ -286,6 +300,9 @@ contract TokenLogic is
 		uint256 priceUSD = poolManagerLogic.getAssetPrice(asset); // 18 decimals
 		uint256 fusdAmount = _convertToUSD(amount, cfg.decimals_, priceUSD);
 		require(fusdAmount >= minDepositUSD, "TokenLogic: below minimum deposit");
+
+		// User-defined minimum output protection
+		require(fusdAmount >= minFusdAmount, "TokenLogic: slippage");
 
 		// Record previous FUSD balance BEFORE mint (snapshot from last deposit)
 		uint256 prevBalance = lastDepositBalance[to];
