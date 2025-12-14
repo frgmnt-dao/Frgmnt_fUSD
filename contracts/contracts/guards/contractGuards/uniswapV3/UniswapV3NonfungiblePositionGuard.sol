@@ -57,6 +57,10 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 	event Burn(address fundAddress, uint256 tokenId, uint256 time);
 	event Collect(address fundAddress, uint256 tokenId, uint128 amount0Max, uint128 amount1Max, uint256 time);
 
+	// FRG-24: Emit events for runtime tracking state changes
+	event PositionTracked(address indexed fundAddress, address indexed positionManager, uint256 indexed tokenId);
+	event PositionUntracked(address indexed fundAddress, address indexed positionManager, uint256 indexed tokenId);
+
 	bytes32 public constant NFT_TYPE = keccak256("UNISWAP_NFT_TYPE");
 	address public immutable nftTracker;
 
@@ -263,12 +267,16 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 		if (method == INonfungiblePositionManager.mint.selector) {
 			uint256 index = nonfungiblePositionManager.totalSupply();
 			// Underflow revert on index-1 if index == 0 is intentional to prevent stale state
+			uint256 tokenId = nonfungiblePositionManager.tokenByIndex(index - 1);
+
 			NftTrackerStorage(nftTracker).addData(
 				to,
 				NFT_TYPE,
 				poolLogic,
-				abi.encode(nonfungiblePositionManager.tokenByIndex(index - 1))
+				abi.encode(tokenId)
 			);
+
+			emit PositionTracked(poolLogic, to, tokenId);
 
 			require(
 				NftTrackerStorage(nftTracker).getDataCount(NFT_TYPE, poolLogic) <= uniV3PositionsLimit,
@@ -283,6 +291,9 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 			require(isValidTokenId, "Frgmnt: position not tracked");
 
 			NftTrackerStorage(nftTracker).removeData(to, NFT_TYPE, poolLogic, i);
+
+			emit PositionUntracked(poolLogic, to, tokenId);
+
 			return true;
 		} else if (method == IMulticall.multicall.selector) {
 			bytes[] memory params = abi.decode(getParams(data), (bytes[]));

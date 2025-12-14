@@ -35,6 +35,25 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	event PoolLogicSet(address poolLogic, address from);
 	event MinDepositUpdated(uint256 minDepositUSD);
 
+	// FRG-24: Events for access-control / governance state changes
+	event ContractGuardSet(address indexed contractAddress, address indexed guard);
+	event AssetGuardSet(address indexed asset, address indexed guard);
+	event PoolStatusSet(address indexed pool, bool value);
+	event FactoryOwnerUpdated(address indexed previousOwner, address indexed newOwner);
+	event AssetHandlerUpdated(address indexed previousAssetHandler, address indexed newAssetHandler);
+	event FactoryConfigUpdated(
+		uint256 maximumSupportedAssetCount,
+		uint256 maxPerf,
+		uint256 maxMgr,
+		uint256 maxEntry,
+		uint256 maxExit,
+		uint256 feeDenominator,
+		uint256 maxPerfChange,
+		uint256 perfChangeDelay
+	);
+	event TraderAssetChangeDisabledSet(bool disabled);
+	event NftMembershipCollectionAddressSet(address indexed previous, address indexed current);
+
 	// Core
 	address public override poolLogic;
 
@@ -152,6 +171,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		require(_contract != address(0), "Frgmnt: invalid contract");
 		require(_guard != address(0), "Frgmnt: invalid _guard");
 		_contractGuard[_contract] = _guard;
+		emit ContractGuardSet(_contract, _guard);
 	}
 
 	function getMaximumFee() public view returns (uint256, uint256, uint256, uint256, uint256) {
@@ -196,6 +216,17 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 			maxPerfChange_,
 			perfChangeDelay_
 		);
+
+		emit FactoryConfigUpdated(
+			maximumSupportedAssetCount_,
+			maxPerf_,
+			maxMgr_,
+			maxEntry_,
+			maxExit_,
+			feeDenominator_,
+			maxPerfChange_,
+			perfChangeDelay_
+		);
 	}
 
 	function _setFactoryConfig(
@@ -221,20 +252,26 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	function setAssetGuard(address _asset, address _guard) external onlyFactoryOwner {
 		require(_guard != address(0), "Frgmnt: invalid _guard");
 		_assetGuard[_asset] = _guard;
+		emit AssetGuardSet(_asset, _guard);
 	}
 
 	function setIsPool(address _pool, bool value) external onlyFactoryOwner {
 		_isPool[_pool] = value;
+		emit PoolStatusSet(_pool, value);
 	}
 
 	function setFactoryOwner(address _newOwner) external onlyFactoryOwner {
 		require(_newOwner != address(0), "zero owner");
+		address previousOwner = factoryOwner;
 		factoryOwner = _newOwner;
+		emit FactoryOwnerUpdated(previousOwner, _newOwner);
 	}
 
 	function setAssetHandler(address _assetHandler) external onlyFactoryOwner {
 		require(_assetHandler != address(0), "invalid assetHandler");
+		address previousAssetHandler = assetHandler;
 		assetHandler = _assetHandler;
+		emit AssetHandlerUpdated(previousAssetHandler, _assetHandler);
 	}
 
 	// -----------------------------------------------------------------------
@@ -529,6 +566,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 	function setTraderAssetChangeDisabled(bool _disabled) external onlyManager {
 		traderAssetChangeDisabled = _disabled;
+		emit TraderAssetChangeDisabledSet(_disabled);
 	}
 
 	function getFeeIncreaseInfo() external view returns (uint256, uint256, uint256, uint256, uint256) {
@@ -551,12 +589,16 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	}
 
 	function setNftMembershipCollectionAddress(address addr) external onlyManager {
+		address previous = nftMembershipCollectionAddress;
+
 		if (addr == address(0)) {
 			nftMembershipCollectionAddress = addr;
+			emit NftMembershipCollectionAddressSet(previous, addr);
 			return;
 		}
 		try ERC721Upgradeable(addr).balanceOf(address(this)) returns (uint256) {
 			nftMembershipCollectionAddress = addr;
+			emit NftMembershipCollectionAddressSet(previous, addr);
 		} catch {
 			revert("Invalid collection");
 		}

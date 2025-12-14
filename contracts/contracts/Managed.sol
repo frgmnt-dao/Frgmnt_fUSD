@@ -15,6 +15,22 @@ contract Managed is IManaged {
 	/// @param newManagerName The human-readable name of the new manager.
 	event ManagerUpdated(address indexed newManager, string newManagerName);
 
+	/// @notice Emitted when a new member is added.
+	/// @param member The address of the added member.
+	event MemberAdded(address indexed member);
+
+	/// @notice Emitted when a member is removed.
+	/// @param member The address of the removed member.
+	event MemberRemoved(address indexed member);
+
+	/// @notice Emitted when a new trader is assigned.
+	/// @param newTrader The address of the new trader.
+	event TraderUpdated(address indexed newTrader);
+
+	/// @notice Emitted when the trader role is removed.
+	/// @param previousTrader The address of the removed trader.
+	event TraderRemoved(address indexed previousTrader);
+
 	// =====================================================
 	//                 STATE VARIABLES
 	// =====================================================
@@ -144,6 +160,7 @@ contract Managed is IManaged {
 			address member = _members[i];
 			if (!_isMemberAllowed(member)) {
 				_addMember(member);
+				emit MemberAdded(member);
 			}
 			unchecked {
 				++i;
@@ -159,6 +176,7 @@ contract Managed is IManaged {
 			address member = _members[i];
 			if (_isMemberAllowed(member)) {
 				_removeMember(member);
+				emit MemberRemoved(member);
 			}
 			unchecked {
 				++i;
@@ -171,6 +189,7 @@ contract Managed is IManaged {
 	function addMember(address _member) external onlyManager {
 		if (_isMemberAllowed(_member)) return;
 		_addMember(_member);
+		emit MemberAdded(_member);
 	}
 
 	/// @notice Removes a single member.
@@ -178,6 +197,7 @@ contract Managed is IManaged {
 	function removeMember(address _member) external onlyManager {
 		if (!_isMemberAllowed(_member)) return;
 		_removeMember(_member);
+		emit MemberRemoved(_member);
 	}
 
 	/// @notice Returns the number of registered members.
@@ -195,10 +215,13 @@ contract Managed is IManaged {
 	function setTrader(address _newTrader) external onlyManager {
 		if (_newTrader == address(0)) revert InvalidTrader();
 		trader = _newTrader;
+		emit TraderUpdated(_newTrader);
 	}
 
 	/// @notice Removes the currently assigned trader.
 	function removeTrader() external onlyManager {
+		address previousTrader = trader;
 		trader = address(0);
+		emit TraderRemoved(previousTrader);
 	}
 }
