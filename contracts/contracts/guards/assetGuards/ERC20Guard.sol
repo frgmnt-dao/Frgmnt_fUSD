@@ -21,8 +21,9 @@ import "../../interfaces/IPoolManagerLogic.sol";
 import "../../interfaces/IHasSupportedAsset.sol";
 import "../../interfaces/IHasGuardInfo.sol";
 import "../../interfaces/IManaged.sol";
+import "../../interfaces/ITransactionTypes.sol";
 
-contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard {
+contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
 	// -------------------------------------------------------------------------
 	// Errors
 	// -------------------------------------------------------------------------
@@ -89,7 +90,7 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard {
 				block.timestamp
 			);
 
-			txType = 1;
+			txType = uint16(TransactionType.Approve);
 		}
 
 		// isPublic is always false for approve operations

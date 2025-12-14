@@ -9,6 +9,7 @@ import "../../interfaces/aave/IAaveProtocolDataProvider.sol";
 import "../../interfaces/IPoolManagerLogic.sol";
 import "../../interfaces/IHasAssetInfo.sol";
 import "../../interfaces/IHasSupportedAsset.sol";
+import "../../interfaces/ITransactionTypes.sol";
 
 /**
  * -------------------------------------------------------------------------
@@ -31,7 +32,7 @@ import "../../interfaces/IHasSupportedAsset.sol";
  * @custom:project  Frgmnt Protocol
  * -------------------------------------------------------------------------
  */
-contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
+contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
 	/*//////////////////////////////////////////////////////////////////////////
                                   EVENTS
   //////////////////////////////////////////////////////////////////////////*/
@@ -256,7 +257,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
 		require(onBehalfOf == poolLogic, "Frgmnt: recipient not pool");
 
 		emit Deposit(poolLogic, depositAsset, to, amount, block.timestamp);
-		txType = 9;
+		txType = uint16(TransactionType.AaveDeposit);
 	}
 
 	/**
@@ -280,7 +281,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
 		require(onBehalfOf == poolLogic, "Frgmnt: recipient not pool");
 
 		emit Withdraw(poolLogic, withdrawAsset, to, amount, block.timestamp);
-		txType = 10;
+		txType = uint16(TransactionType.AaveWithdraw);
 	}
 
 	/**
@@ -306,7 +307,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
 		require(mgr.isSupportedAsset(asset), "Frgmnt: unsupported asset");
 
 		emit SetUserUseReserveAsCollateral(poolLogic, asset, useAsCollateral, block.timestamp);
-		txType = 11;
+		txType = uint16(TransactionType.AaveSetUserUseReserveAsCollateral);
 	}
 
 	/**
@@ -364,7 +365,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
 		}
 
 		emit Borrow(poolLogic, borrowAsset, to, amount, block.timestamp);
-		txType = 12;
+		txType = uint16(TransactionType.AaveBorrow);
 	}
 
 	/**
@@ -391,7 +392,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
 		require(onBehalfOf == poolLogic, "Frgmnt: recipient not pool");
 
 		emit Repay(poolLogic, repayAsset, to, amount, block.timestamp);
-		txType = 13;
+		txType = uint16(TransactionType.AaveRepay);
 	}
 
 	/**
@@ -420,7 +421,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
 		require(assetType == 4 || assetType == 14, "Frgmnt: not borrow-enabled");
 
 		emit Repay(poolLogic, repayAsset, to, amount, block.timestamp);
-		txType = 13;
+		txType = uint16(TransactionType.AaveRepay);
 	}
 
 	/**
@@ -446,7 +447,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
 		require(IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset), "Frgmnt: unsupported asset");
 
 		emit SwapBorrowRateMode(IPoolManagerLogic(poolManagerLogic).poolLogic(), asset, rateMode);
-		txType = 14;
+		txType = uint16(TransactionType.AaveSwapBorrowRateMode);
 	}
 
 	/**
@@ -468,6 +469,6 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard {
 		require(user == poolLogic, "Frgmnt: user not pool");
 
 		emit RebalanceStableBorrowRate(IPoolManagerLogic(poolManagerLogic).poolLogic(), asset);
-		txType = 15;
+		txType = uint16(TransactionType.AaveRebalanceStableBorrowRate);
 	}
 }

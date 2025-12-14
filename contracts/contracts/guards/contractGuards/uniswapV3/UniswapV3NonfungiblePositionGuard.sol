@@ -12,6 +12,7 @@ import "../../../interfaces/guards/IGuard.sol";
 import "../../../interfaces/IPoolManagerLogic.sol";
 import "../../../interfaces/IPoolLogic.sol";
 import "../../../interfaces/IHasSupportedAsset.sol";
+import "../../../interfaces/ITransactionTypes.sol";
 
 /**
  * @title Frgmnt Uniswap V3 Nonfungible Position Guard
@@ -23,7 +24,7 @@ import "../../../interfaces/IHasSupportedAsset.sol";
  *      - Limits max number of positions per pool via `uniV3PositionsLimit`
  * @custom:project Frgmnt
  */
-contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
+contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITransactionTypes {
 	event Mint(
 		address fundAddress,
 		address token0,
@@ -151,13 +152,13 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				block.timestamp
 			);
 
-			txType = 20; // Mint
+			txType = uint16(TransactionType.UniswapV3Mint); // Mint
 		} else if (method == INonfungiblePositionManager.increaseLiquidity.selector) {
 			INonfungiblePositionManager.IncreaseLiquidityParams memory param = abi.decode(
 				getParams(data),
 				(INonfungiblePositionManager.IncreaseLiquidityParams)
 			);
-            // Validate token id is tracked
+			// Validate token id is tracked
 			(bool isValidTokenId, ) = _isValidOwnedTokenId(pool, param.tokenId);
 			require(isValidTokenId, "Frgmnt: position not tracked");
 
@@ -183,7 +184,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				block.timestamp
 			);
 
-			txType = 21; // IncreaseLiquidity
+			txType = uint16(TransactionType.UniswapV3IncreaseLiquidity); // IncreaseLiquidity
 		} else if (method == INonfungiblePositionManager.decreaseLiquidity.selector) {
 			INonfungiblePositionManager.DecreaseLiquidityParams memory param = abi.decode(
 				getParams(data),
@@ -202,7 +203,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				block.timestamp
 			);
 
-			txType = 22; // DecreaseLiquidity
+			txType = uint16(TransactionType.UniswapV3DecreaseLiquidity); // DecreaseLiquidity
 		} else if (method == INonfungiblePositionManager.burn.selector) {
 			uint256 tokenId = abi.decode(getParams(data), (uint256));
 
@@ -210,7 +211,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 			require(isValidTokenId, "Frgmnt: position not tracked");
 
 			emit Burn(poolManagerLogic.poolLogic(), tokenId, block.timestamp);
-			txType = 23; // Burn
+			txType = uint16(TransactionType.UniswapV3Burn); // Burn
 		} else if (method == INonfungiblePositionManager.collect.selector) {
 			INonfungiblePositionManager.CollectParams memory param = abi.decode(
 				getParams(data),
@@ -235,14 +236,14 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard {
 				block.timestamp
 			);
 
-			txType = 24; // Collect
+			txType = uint16(TransactionType.UniswapV3Collect); // Collect
 		} else if (method == IMulticall.multicall.selector) {
 			bytes[] memory params = abi.decode(getParams(data), (bytes[]));
 			for (uint256 i = 0; i < params.length; i++) {
 				(txType, ) = txGuard(_poolManagerLogic, to, params[i]);
 				require(txType > 0, "Frgmnt: invalid tx in multicall");
 			}
-			txType = 25; // Multicall
+			txType = uint16(TransactionType.UniswapV3Multicall); // Multicall
 		}
 
 		return (txType, false);
