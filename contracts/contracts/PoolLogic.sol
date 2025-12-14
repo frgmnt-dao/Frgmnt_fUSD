@@ -252,28 +252,49 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	function _accrueManagementFee() internal {
 		uint256 ts = block.timestamp;
-		uint256 dt = ts - lastFeeMintTime;
-		if (dt == 0) return;
 
-		(, uint256 managementFeeNumerator, , , uint256 feeDenominator) = _managerFees();
-
-		if (managementFeeNumerator == 0) {
-			lastFeeMintTime = ts;
-			return;
-		}
-
+		// If no supply, nothing to mint, but still move the clock forward
 		uint256 supply = totalSupply();
 		if (supply == 0) {
 			lastFeeMintTime = ts;
 			return;
 		}
 
-		// feeShares = supply * mgmtFee * dt / (denom * 365 days)
-		uint256 feeShares = (supply * managementFeeNumerator * dt) / (feeDenominator * 365 days);
+		uint256 fundValue = _totalValue();
+		if (fundValue == 0) {
+			lastFeeMintTime = ts;
+			return;
+		}
+
+		(
+			uint256 performanceFeeNumerator,
+			uint256 managementFeeNumerator,
+			,
+			,
+			uint256 feeDenominator
+		) = _managerFees();
+
+		(uint256 performanceFee, uint256 streamingFee) = _availableManagerFee(
+			fundValue,
+			supply,
+			performanceFeeNumerator,
+			managementFeeNumerator,
+			feeDenominator
+		);
+
+		uint256 feeShares = performanceFee + streamingFee;
 
 		if (feeShares > 0) {
-			_mint(_manager(), feeShares);
+			address mgr = _manager();
+			_updateUserReward(mgr);
+
+			_mint(mgr, feeShares);
 			emit ManagementFeesAccrued(feeShares, ts);
+
+			UserReward storage ur = userRewards[mgr];
+			ur.rewardDebt = (balanceOf(mgr) * rewardPerShare) / 1e18;
+
+			tokenPriceAtLastFeeMint = (fundValue * 1e18) / supply;
 		}
 
 		lastFeeMintTime = ts;
@@ -337,6 +358,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		// update rewardDebt after mint
 		UserReward storage ur = userRewards[msg.sender];
 		ur.rewardDebt = (balanceOf(msg.sender) * rewardPerShare) / 1e18;
+
+		if (feeFusd > 0) {
+			IERC20(fusd).safeTransfer(_manager(), feeFusd);
+		}
 
 		emit Stake(msg.sender, amountFusd, netFusd, feeFusd);
 	}
@@ -476,8 +501,12 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		(uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
 		require(netFusd > 0, "PoolLogic: netFusd=0");
 
+		if (feeFusd > 0) {
+			IERC20(fusd).safeTransferFrom(msg.sender, _manager(), feeFusd);
+		}
+
 		// burn FUSD from user
-		ITokenLogic(fusd).burnFrom(msg.sender, fusdAmount);
+		ITokenLogic(fusd).burnFrom(msg.sender, netFusd);
 
 		// pro-rata withdrawal (dHEDGE-style) moved into helper to avoid stack-too-deep
 		(address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore) = _withdrawProRata(
@@ -600,8 +629,13 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 totalFusd = r.fusdAmountTotal;
 		require(totalFusd > 0, "PoolLogic: zero fusd");
 
+		uint256 feeFusd = totalFusd - r.fusdNetForAsset;
+		if (feeFusd > 0) {
+			IERC20(fusd).safeTransfer(_manager(), feeFusd);
+		}
+
 		// burn the FUSD locked in contract
-		ITokenLogic(fusd).burn(totalFusd);
+		ITokenLogic(fusd).burn(r.fusdNetForAsset);
 
 		// convert netFusd to assetAmount using price
 		uint256 assetAmount = _fusdToAssetAmount(r.fusdNetForAsset, r.asset);
