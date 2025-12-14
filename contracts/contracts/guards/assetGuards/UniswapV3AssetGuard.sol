@@ -5,9 +5,10 @@ import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import "@uniswap/v3-periphery/contracts/libraries/OracleLibrary.sol";
-import "@uniswap/v3-periphery/contracts/libraries/PositionValue.sol";
+// import "@uniswap/v3-periphery/contracts/libraries/PositionValue.sol"; // kept optional, but not used to avoid PoolAddress.computeAddress() DoS
 import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
+import "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 
 import "./ERC20Guard.sol";
 import "../../interfaces/IHasAssetInfo.sol";
@@ -26,8 +27,6 @@ import "../../utils/UniswapV3PriceLibrary.sol";
  * @custom:project Frgmnt
  */
 contract UniswapV3AssetGuard is ERC20Guard {
-	using PositionValue for INonfungiblePositionManager;
-
 	struct UniV3PoolParams {
 		address token0;
 		address token1;
@@ -99,15 +98,10 @@ contract UniswapV3AssetGuard is ERC20Guard {
 			uint256 tokenId = tokenIds[i];
 
 			UniV3PoolParams memory params;
-			(, , params.token0, params.token1, params.fee, , , , , , , ) = nonfungiblePositionManager.positions(
-				tokenId
-			);
+			(, , params.token0, params.token1, params.fee, , , , , , , ) = nonfungiblePositionManager.positions(tokenId);
 
 			// Skip NFTs where either underlying token is not supported by the factory
-			if (
-				!IHasAssetInfo(factory).isValidAsset(params.token0) ||
-				!IHasAssetInfo(factory).isValidAsset(params.token1)
-			) {
+			if (!IHasAssetInfo(factory).isValidAsset(params.token0) || !IHasAssetInfo(factory).isValidAsset(params.token1)) {
 				continue;
 			}
 
@@ -121,12 +115,9 @@ contract UniswapV3AssetGuard is ERC20Guard {
 			);
 
 			// Total amounts for this NFT at current sqrtPrice
-			(uint256 amount0, uint256 amount1) = nonfungiblePositionManager.total(tokenId, params.sqrtPriceX96);
+			(uint256 amount0, uint256 amount1) = _positionTotalAmounts(nonfungiblePositionManager, tokenId, params.sqrtPriceX96);
 
-			balance =
-				balance +
-				_assetValue(factory, params.token0, amount0) +
-				_assetValue(factory, params.token1, amount1);
+			balance = balance + _assetValue(factory, params.token0, amount0) + _assetValue(factory, params.token1, amount1);
 		}
 	}
 
@@ -144,6 +135,11 @@ contract UniswapV3AssetGuard is ERC20Guard {
 	/// @notice Synthetic valuation uses 18 decimals.
 	function getDecimals(address) external pure override returns (uint256 decimals) {
 		decimals = 18;
+	}
+
+	/// @dev Safe uint256 -> uint128 conversion used to avoid revert on collect param casting.
+	function _toUint128(uint256 x) internal pure returns (uint128) {
+		return x > type(uint128).max ? type(uint128).max : uint128(x);
 	}
 
 	/**
@@ -221,8 +217,8 @@ contract UniswapV3AssetGuard is ERC20Guard {
 					INonfungiblePositionManager.CollectParams(
 						tokenIds[i],
 						to,
-						uint128(dec.amount0),
-						uint128(dec.amount1)
+						_toUint128(dec.amount0),
+						_toUint128(dec.amount1)
 					)
 				);
 				txCount++;
@@ -247,6 +243,79 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		// Principal amounts (TWAP-priced) used for slippage mins on decreaseLiquidity
 		uint256 principal0;
 		uint256 principal1;
+	}
+
+	// For stack-too-deep friendliness (fees computation only)
+	struct FeeData {
+		address token0;
+		address token1;
+		uint24 fee;
+		int24 tickLower;
+		int24 tickUpper;
+		uint128 liquidity;
+		uint256 feeGrowthInside0LastX128;
+		uint256 feeGrowthInside1LastX128;
+		uint128 tokensOwed0;
+		uint128 tokensOwed1;
+	}
+
+	/// @dev Reads only fee-related position data into a struct (reduces locals).
+	/// @dev Uses low-level staticcall + assembly writes to avoid stack-too-deep from tuple destructuring.
+	function _loadFeeData(
+		INonfungiblePositionManager nonfungiblePositionManager,
+		uint256 tokenId
+	) internal view returns (FeeData memory d) {
+		// Allocate struct in memory
+		d = FeeData({
+			token0: address(0),
+			token1: address(0),
+			fee: 0,
+			tickLower: 0,
+			tickUpper: 0,
+			liquidity: 0,
+			feeGrowthInside0LastX128: 0,
+			feeGrowthInside1LastX128: 0,
+			tokensOwed0: 0,
+			tokensOwed1: 0
+		});
+
+		(bool ok, bytes memory data) = address(nonfungiblePositionManager).staticcall(
+			abi.encodeWithSelector(INonfungiblePositionManager.positions.selector, tokenId)
+		);
+		require(ok && data.length >= 32 * 12, "UniswapV3AssetGuard: positions() failed");
+
+		// positions(uint256) returns 12 words:
+		// 0 nonce(uint96), 1 operator(address), 2 token0, 3 token1, 4 fee(uint24), 5 tickLower(int24), 6 tickUpper(int24),
+		// 7 liquidity(uint128), 8 feeGrowthInside0LastX128, 9 feeGrowthInside1LastX128, 10 tokensOwed0(uint128), 11 tokensOwed1(uint128)
+		assembly {
+			let p := add(data, 32)
+
+			// token0 (word2)
+			mstore(add(d, 0x00), shr(96, mload(add(p, 0x40))))
+			// token1 (word3)
+			mstore(add(d, 0x20), shr(96, mload(add(p, 0x60))))
+
+			// fee (word4) - uint24
+			mstore(add(d, 0x40), and(mload(add(p, 0x80)), 0xffffff))
+
+			// tickLower (word5) - int24 (already sign-extended in ABI word)
+			mstore(add(d, 0x60), mload(add(p, 0xa0)))
+			// tickUpper (word6) - int24
+			mstore(add(d, 0x80), mload(add(p, 0xc0)))
+
+			// liquidity (word7) - uint128
+			mstore(add(d, 0xa0), and(mload(add(p, 0xe0)), 0xffffffffffffffffffffffffffffffff))
+
+			// feeGrowthInside0LastX128 (word8)
+			mstore(add(d, 0xc0), mload(add(p, 0x100)))
+			// feeGrowthInside1LastX128 (word9)
+			mstore(add(d, 0xe0), mload(add(p, 0x120)))
+
+			// tokensOwed0 (word10) - uint128
+			mstore(add(d, 0x100), and(mload(add(p, 0x140)), 0xffffffffffffffffffffffffffffffff))
+			// tokensOwed1 (word11) - uint128
+			mstore(add(d, 0x120), and(mload(add(p, 0x160)), 0xffffffffffffffffffffffffffffffff))
+		}
 	}
 
 	/// @dev Helper to reduce stack usage in _calcDecreaseLiquidity.
@@ -274,6 +343,99 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		) = nonfungiblePositionManager.positions(tokenId);
 	}
 
+	/// @dev Time-safe pool resolution that avoids PoolAddress.computeAddress() entirely.
+	function _getV3Pool(address uniswapFactory, address token0, address token1, uint24 fee) internal view returns (address pool) {
+		pool = IUniswapV3Factory(uniswapFactory).getPool(token0, token1, fee);
+		if (pool == address(0) || pool.code.length == 0) return address(0);
+	}
+
+	/// @dev Compute feeGrowthInside using the real pool from factory.getPool().
+	function _feeGrowthInside(IUniswapV3Pool pool, int24 tickLower, int24 tickUpper) internal view returns (uint256 inside0, uint256 inside1) {
+		(, int24 tickCurrent, , , , , ) = pool.slot0();
+
+		(, , uint256 lower0, uint256 lower1, , , , ) = pool.ticks(tickLower);
+		(, , uint256 upper0, uint256 upper1, , , , ) = pool.ticks(tickUpper);
+
+		if (tickCurrent < tickLower) {
+			unchecked {
+				inside0 = lower0 - upper0;
+				inside1 = lower1 - upper1;
+			}
+		} else if (tickCurrent < tickUpper) {
+			uint256 global0 = pool.feeGrowthGlobal0X128();
+			uint256 global1 = pool.feeGrowthGlobal1X128();
+			unchecked {
+				inside0 = global0 - lower0 - upper0;
+				inside1 = global1 - lower1 - upper1;
+			}
+		} else {
+			unchecked {
+				inside0 = upper0 - lower0;
+				inside1 = upper1 - lower1;
+			}
+		}
+	}
+
+	/// @dev Computes total uncollected fees for a position using factory.getPool() (no PoolAddress.computeAddress()).
+	function _positionFees(INonfungiblePositionManager nonfungiblePositionManager, uint256 tokenId)
+		internal
+		view
+		returns (uint256 feeAmount0, uint256 feeAmount1)
+	{
+		FeeData memory d = _loadFeeData(nonfungiblePositionManager, tokenId);
+
+		address poolAddr = _getV3Pool(nonfungiblePositionManager.factory(), d.token0, d.token1, d.fee);
+		if (poolAddr == address(0)) return (0, 0);
+
+		(uint256 inside0, uint256 inside1) = _feeGrowthInside(IUniswapV3Pool(poolAddr), d.tickLower, d.tickUpper);
+
+		uint256 delta0;
+		uint256 delta1;
+		unchecked {
+			delta0 = inside0 - d.feeGrowthInside0LastX128;
+			delta1 = inside1 - d.feeGrowthInside1LastX128;
+		}
+
+		feeAmount0 = FullMath.mulDiv(delta0, d.liquidity, 1 << 128) + uint256(d.tokensOwed0);
+		feeAmount1 = FullMath.mulDiv(delta1, d.liquidity, 1 << 128) + uint256(d.tokensOwed1);
+	}
+
+	/// @dev Replacement for PositionValue.total() that uses factory.getPool() rather than PoolAddress.computeAddress().
+	function _positionTotalAmounts(INonfungiblePositionManager nonfungiblePositionManager, uint256 tokenId, uint160 sqrtPriceX96)
+		internal
+		view
+		returns (uint256 amount0, uint256 amount1)
+	{
+		(
+			,
+			,
+			,
+			,
+			,
+			int24 tickLower,
+			int24 tickUpper,
+			uint128 liquidity,
+			,
+			,
+			,
+
+		) = nonfungiblePositionManager.positions(tokenId);
+
+		// Principal amounts for full liquidity at sqrtPriceX96
+		(uint256 principal0, uint256 principal1) = LiquidityAmounts.getAmountsForLiquidity(
+			sqrtPriceX96,
+			TickMath.getSqrtRatioAtTick(tickLower),
+			TickMath.getSqrtRatioAtTick(tickUpper),
+			liquidity
+		);
+
+		// Fees (uncollected) using the real pool from getPool()
+		(uint256 fee0, uint256 fee1) = _positionFees(nonfungiblePositionManager, tokenId);
+
+		amount0 = principal0 + fee0;
+		amount1 = principal1 + fee1;
+	}
+
 	/// @dev Helper to reduce stack usage in _calcDecreaseLiquidity.
 	function _calcAmountsIncludingFees(
 		INonfungiblePositionManager nonfungiblePositionManager,
@@ -283,7 +445,8 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		uint256 principal1
 	) internal view returns (uint256 amount0, uint256 amount1) {
 		// Include proportional share of uncollected fees
-		(uint256 feeAmount0, uint256 feeAmount1) = nonfungiblePositionManager.fees(tokenId);
+		(uint256 feeAmount0, uint256 feeAmount1) = _positionFees(nonfungiblePositionManager, tokenId);
+
 		amount0 = principal0 + ((feeAmount0 * portion) / 1e18);
 		amount1 = principal1 + ((feeAmount1 * portion) / 1e18);
 	}
@@ -299,16 +462,11 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		uint256 tokenId,
 		uint256 portion
 	) internal view returns (DecreaseLiquidity memory dec) {
-		(address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity) = _getPositionParams(
-			nonfungiblePositionManager,
-			tokenId
-		);
+		(address token0, address token1, uint24 fee, int24 tickLower, int24 tickUpper, uint128 liquidity) =
+			_getPositionParams(nonfungiblePositionManager, tokenId);
 
 		// LP portion to remove
-		require(
-			(uint256(liquidity) * portion) / 1e18 <= type(uint128).max,
-			"UniswapV3AssetGuard: lpAmount overflow"
-		);
+		require((uint256(liquidity) * portion) / 1e18 <= type(uint128).max, "UniswapV3AssetGuard: lpAmount overflow");
 		dec.lpAmount = uint128((uint256(liquidity) * portion) / 1e18);
 
 		// Current pool sqrtPrice
@@ -328,12 +486,7 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		);
 
 		// Include proportional share of uncollected fees
-		(dec.amount0, dec.amount1) = _calcAmountsIncludingFees(
-			nonfungiblePositionManager,
-			tokenId,
-			portion,
-			dec.principal0,
-			dec.principal1
-		);
+		(dec.amount0, dec.amount1) =
+			_calcAmountsIncludingFees(nonfungiblePositionManager, tokenId, portion, dec.principal0, dec.principal1);
 	}
 }
