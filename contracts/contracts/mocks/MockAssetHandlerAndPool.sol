@@ -123,7 +123,7 @@ contract MockAssetHandlerAndPool is IPoolLogic, IHasAssetInfo, IHasGuardInfo {
 		_assetPrices[asset] = price;
 	}
 
-	function isValidAsset(address asset) external view override returns (bool) {
+	function validateAsset(address asset) external view override returns (bool) {
 		return _isValidAsset[asset];
 	}
 

@@ -85,7 +85,7 @@ contract TestUniswapV3AssetGuardStubbed {
 
 	/// @notice Internal helper copied from UniswapV3AssetGuard._assetValue logic.
 	function _assetValue(address factory, address token, uint256 amount) internal view returns (uint256) {
-		if (IHasAssetInfo(factory).isValidAsset(token)) {
+		if (IHasAssetInfo(factory).validateAsset(token)) {
 			uint256 tokenPriceInUsd = IHasAssetInfo(factory).getAssetPrice(token);
 			uint256 dec = IERC20Extended(token).decimals();
 			return (tokenPriceInUsd * amount) / (10 ** dec);
@@ -110,7 +110,7 @@ contract TestUniswapV3AssetGuardStubbed {
 			address token1 = token1Override[tokenId];
 
 			// Skip NFTs where either underlying token is not supported by the factory
-			if (!IHasAssetInfo(factory).isValidAsset(token0) || !IHasAssetInfo(factory).isValidAsset(token1)) {
+			if (!IHasAssetInfo(factory).validateAsset(token0) || !IHasAssetInfo(factory).validateAsset(token1)) {
 				continue;
 			}
 
