@@ -326,11 +326,16 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	function stake(uint256 amountFusd) external nonReentrant updateFeesAndRewards(msg.sender) {
 		// Backward-compatible wrapper: no minimum output enforced by the user
-		stake(amountFusd, 0);
+		// NOTE: must not call another nonReentrant function (would revert).
+		_stake(amountFusd, 0);
 	}
 
 	/// @notice Stake with user-defined minimum shares
 	function stake(uint256 amountFusd, uint256 minShares) public nonReentrant updateFeesAndRewards(msg.sender) {
+		_stake(amountFusd, minShares);
+	}
+
+	function _stake(uint256 amountFusd, uint256 minShares) internal {
 		require(amountFusd > 0, "PoolLogic: zero amount");
 
 		// Pull FUSD from user

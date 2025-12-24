@@ -277,7 +277,7 @@ contract TokenLogic is
 	 */
 	function deposit(address asset, uint256 amount, address to) external nonReentrant whenNotPaused {
 		// Backward-compatible wrapper: no minimum output enforced by the user
-		deposit(asset, amount, to, 0);
+		_deposit(asset, amount, to, 0);
 	}
 
 	/**
@@ -290,6 +290,10 @@ contract TokenLogic is
 	 * @param minFusdAmount Minimum FUSD the user is willing to receive (18 decimals).
 	 */
 	function deposit(address asset, uint256 amount, address to, uint256 minFusdAmount) public nonReentrant whenNotPaused {
+		_deposit(asset, amount, to, minFusdAmount);
+	}
+
+	function _deposit(address asset, uint256 amount, address to, uint256 minFusdAmount) internal {
 		AssetConfig storage cfg = assetConfigs[asset];
 		require(cfg.allowed_, "TokenLogic: asset not allowed");
 		require(amount > 0, "TokenLogic: zero amount");
