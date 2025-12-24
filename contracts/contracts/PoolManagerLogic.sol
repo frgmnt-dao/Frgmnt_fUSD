@@ -330,7 +330,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 		if (!validateAsset(asset)) revert InvalidAsset();
 
-		if (validateAsset(poolLogic) && _isPool[asset]) revert CannotAddPoolAsset();
+		if (_isPool[asset]) revert CannotAddPoolAsset();
 
 		address guard = _assetGuard[asset];
 		if (guard != address(0)) {
