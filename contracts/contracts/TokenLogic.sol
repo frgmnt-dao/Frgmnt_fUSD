@@ -30,11 +30,10 @@ import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol
 import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-
 import "./interfaces/IPoolManagerLogic.sol";
 
 contract TokenLogic is
@@ -79,6 +78,16 @@ contract TokenLogic is
 	/// @notice Snapshot of user's FUSD balance at the time of their last deposit.
 	/// @dev Used to prevent cooldown skew via temporary balance inflation.
 	mapping(address => uint256) public lastDepositBalance;
+
+	// Exempt addresses bypass the transfer cooldown check in _update().
+	mapping(address => bool) public cooldownExempt;
+
+	// Recipient authorization for third-party deposits (opt-in).
+	mapping(address => uint256) public depositNonces;
+
+	// EIP-712 typed data for deposit authorization by the recipient.
+	bytes32 private constant DEPOSIT_AUTH_TYPEHASH =
+		keccak256("DepositAuth(address depositor,address asset,uint256 amount,address to,uint256 minFusdAmount,uint256 nonce,uint256 deadline)");
 
 	/// @notice Collateral asset configuration.
 	struct AssetConfig {
@@ -135,6 +144,9 @@ contract TokenLogic is
 	/// @param fusdMinted Amount of FUSD minted (18 decimals).
 	event Deposited(address indexed user, address indexed asset, uint256 assetAmount, uint256 fusdMinted);
 
+	// emit changes to exemption list for transparency/auditing.
+	event CooldownExemptUpdated(address indexed account, bool isExempt);
+
 	// ---------------------------------------------------------------------
 	//                            INITIALIZATION
 	// ---------------------------------------------------------------------
@@ -178,6 +190,10 @@ contract TokenLogic is
 		poolLogic = _poolLogic;
 		poolManagerLogic = IPoolManagerLogic(_poolManagerLogic);
 		cooldownPeriod = _cooldown;
+
+		// poolLogic is a system contract; exempt it from transfer cooldown enforcement
+		cooldownExempt[_poolLogic] = true;
+		emit CooldownExemptUpdated(_poolLogic, true);
 	}
 
 	// ---------------------------------------------------------------------
@@ -190,7 +206,14 @@ contract TokenLogic is
 	 */
 	function setPoolLogic(address newPoolLogic) external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(newPoolLogic != address(0), "TokenLogic: poolLogic=0");
+
+		// maintain exemption on poolLogic
+		address oldPoolLogic = poolLogic;
+		cooldownExempt[oldPoolLogic] = false;
+		cooldownExempt[newPoolLogic] = true;
 		poolLogic = newPoolLogic;
+		emit CooldownExemptUpdated(oldPoolLogic, false);
+		emit CooldownExemptUpdated(newPoolLogic, true);
 		emit PoolLogicUpdated(newPoolLogic);
 	}
 
@@ -260,6 +283,13 @@ contract TokenLogic is
 		emit AssetCapUpdated(asset, old, newCap);
 	}
 
+	// Optional governance hook to exempt other system contracts or addresses if needed.
+	function setCooldownExempt(address account, bool isExempt) external onlyRole(DEFAULT_ADMIN_ROLE) {
+		require(account != address(0), "TokenLogic: zero address");
+		cooldownExempt[account] = isExempt;
+		emit CooldownExemptUpdated(account, isExempt);
+	}
+
 	// ---------------------------------------------------------------------
 	//                          DEPOSIT & MINT
 	// ---------------------------------------------------------------------
@@ -277,6 +307,11 @@ contract TokenLogic is
 	 */
 	function deposit(address asset, uint256 amount, address to) external nonReentrant whenNotPaused {
 		// Backward-compatible wrapper: no minimum output enforced by the user
+
+		// prevent arbitrary users from setting cooldown state for other users/system contracts.
+		// Third-party deposits must use depositWithAuthorization().
+		require(to == msg.sender, "TokenLogic: use depositWithAuthorization");
+
 		_deposit(asset, amount, to, 0);
 	}
 
@@ -290,7 +325,73 @@ contract TokenLogic is
 	 * @param minFusdAmount Minimum FUSD the user is willing to receive (18 decimals).
 	 */
 	function deposit(address asset, uint256 amount, address to, uint256 minFusdAmount) public nonReentrant whenNotPaused {
+
+		// prevent arbitrary users from setting cooldown state for other users/system contracts.
+		// Third-party deposits must use depositWithAuthorization().
+		require(to == msg.sender, "TokenLogic: use depositWithAuthorization");
+
 		_deposit(asset, amount, to, minFusdAmount);
+	}
+
+	/**
+	 * @notice Deposit a supported collateral asset and receive FUSD with recipient authorization.
+	 * @dev Same logic as deposit(), but allows deposit to a different recipient with authorization.
+	 *
+	 * @param asset Address of the collateral asset to deposit.
+	 * @param amount Amount of collateral to deposit (raw units).
+	 * @param to Address that will receive the minted FUSD.
+	 * @param minFusdAmount Minimum FUSD the user is willing to receive (18 decimals).
+	 * @param deadline Authorization expiration timestamp.
+	 * @param v ECDSA v.
+	 * @param r ECDSA r.
+	 * @param s ECDSA s.
+	 */
+	function depositWithAuthorization(
+		address asset,
+		uint256 amount,
+		address to,
+		uint256 minFusdAmount,
+		uint256 deadline,
+		uint8 v,
+		bytes32 r,
+		bytes32 s
+	) external nonReentrant whenNotPaused {
+		_verifyDepositAuth(msg.sender, asset, amount, to, minFusdAmount, deadline, v, r, s);
+		_deposit(asset, amount, to, minFusdAmount);
+	}
+
+	function _verifyDepositAuth(
+		address depositor,
+		address asset,
+		uint256 amount,
+		address to,
+		uint256 minFusdAmount,
+		uint256 deadline,
+		uint8 v,
+		bytes32 r,
+		bytes32 s
+	) internal {
+		require(block.timestamp <= deadline, "TokenLogic: auth expired");
+
+		uint256 nonce = depositNonces[to];
+        unchecked { depositNonces[to] = nonce + 1; }
+
+		bytes32 structHash = keccak256(
+			abi.encode(
+				DEPOSIT_AUTH_TYPEHASH,
+				depositor,
+				asset,
+				amount,
+				to,
+				minFusdAmount,
+				nonce,
+				deadline
+			)
+		);
+
+		bytes32 digest = _hashTypedDataV4(structHash);
+		address signer = ECDSA.recover(digest, v, r, s);
+		require(signer == to, "TokenLogic: invalid auth");
 	}
 
 	function _deposit(address asset, uint256 amount, address to, uint256 minFusdAmount) internal {
@@ -455,16 +556,19 @@ contract TokenLogic is
     {
         // Apply cooldown check only to transfers (from != 0 and to != 0)
         if (from != address(0) && to != address(0)) {
-            uint256 ts = averageMintTimestamp[from];
 
-            if (ts != 0 && cooldownPeriod != 0) {
-                uint256 end = ts + cooldownPeriod;
+			if (!cooldownExempt[from]) {
+				uint256 ts = averageMintTimestamp[from];
 
-                require(
-                    block.timestamp >= end,
-                    "TokenLogic: cooldown transfer"
-                );
-            }
+				if (ts != 0 && cooldownPeriod != 0) {
+					uint256 end = ts + cooldownPeriod;
+
+					require(
+						block.timestamp >= end,
+						"TokenLogic: cooldown transfer"
+					);
+				}
+			}
         }
 
         super._update(from, to, amount);
