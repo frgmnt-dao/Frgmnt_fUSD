@@ -613,4 +613,11 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	function isMemberAllowed(address _member) public view override returns (bool) {
 		return _isMemberAllowed(_member) || isNftMemberAllowed(_member);
 	}
+
+	function changeManager(address _newManager, string memory _newManagerName) external onlyManager {
+		if (poolLogic != address(0)) {
+			IPoolLogic(poolLogic).mintManagerFee();
+		}
+		_changeManager(_newManager, _newManagerName);
+	}
 }

@@ -145,7 +145,7 @@ contract Managed is IManaged {
 	/// @notice Changes the manager address and name.
 	/// @param _newManager The address of the new manager.
 	/// @param _newManagerName The name of the new manager.
-	function changeManager(address _newManager, string memory _newManagerName) external onlyManager {
+	function _changeManager(address _newManager, string memory _newManagerName) internal {
 		if (_newManager == address(0)) revert InvalidManager();
 		manager = _newManager;
 		managerName = _newManagerName;
