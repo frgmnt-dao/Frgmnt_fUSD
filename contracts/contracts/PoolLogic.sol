@@ -602,11 +602,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		require(ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) == 0, "PoolLogic: cooldown");
 
-		// lock FUSD in this contract
-		IERC20(fusd).safeTransferFrom(msg.sender, address(this), fusdAmount);
-
 		(uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
 		require(netFusd > 0, "PoolLogic: netFusd=0");
+		// prevent creating requests that can never be finalized due to rounding to zero.
+        require(_fusdToAssetAmount(netFusd, asset) > 0, "PoolLogic: amount too small");
 
 		requestId = ++lastRequestId;
 		cashWithdrawRequests[requestId] = CashWithdrawRequest({
@@ -620,6 +619,9 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		});
 
 		userRequests[msg.sender].push(requestId);
+
+		// lock FUSD in this contract
+		IERC20(fusd).safeTransferFrom(msg.sender, address(this), fusdAmount);
 
 		emit CashWithdrawRequested(requestId, msg.sender, fusdAmount, netFusd, feeFusd, asset);
 	}
