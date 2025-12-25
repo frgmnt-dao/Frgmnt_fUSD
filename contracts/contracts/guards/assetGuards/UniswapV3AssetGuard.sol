@@ -291,9 +291,9 @@ contract UniswapV3AssetGuard is ERC20Guard {
 			let p := add(data, 32)
 
 			// token0 (word2)
-			mstore(add(d, 0x00), shr(96, mload(add(p, 0x40))))
+			mstore(add(d, 0x00), and(mload(add(p, 0x40)), 0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff))
 			// token1 (word3)
-			mstore(add(d, 0x20), shr(96, mload(add(p, 0x60))))
+			mstore(add(d, 0x20), and(mload(add(p, 0x60)), 0x000000000000000000000000ffffffffffffffffffffffffffffffffffffffff))
 
 			// fee (word4) - uint24
 			mstore(add(d, 0x40), and(mload(add(p, 0x80)), 0xffffff))
