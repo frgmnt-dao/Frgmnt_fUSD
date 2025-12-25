@@ -79,8 +79,11 @@ contract TokenLogic is
 	/// @dev Used to prevent cooldown skew via temporary balance inflation.
 	mapping(address => uint256) public lastDepositBalance;
 
-	// Exempt addresses bypass the transfer cooldown check in _update().
-	mapping(address => bool) public cooldownExempt;
+	// Exempt addresses bypass the transfer cooldown check in _update() (sender-side).
+	mapping(address => bool) public cooldownExemptSender;
+
+	// Exempt addresses bypass the transfer cooldown check in _update() (recipient-side).
+	mapping(address => bool) public cooldownExemptRecipient;
 
 	// Recipient authorization for third-party deposits (opt-in).
 	mapping(address => uint256) public depositNonces;
@@ -144,8 +147,11 @@ contract TokenLogic is
 	/// @param fusdMinted Amount of FUSD minted (18 decimals).
 	event Deposited(address indexed user, address indexed asset, uint256 assetAmount, uint256 fusdMinted);
 
-	// emit changes to exemption list for transparency/auditing.
-	event CooldownExemptUpdated(address indexed account, bool isExempt);
+	// emit changes to sender exemption list for transparency/auditing.
+	event CooldownExemptSenderUpdated(address indexed account, bool isExempt);
+
+	// emit changes to recipient exemption list for transparency/auditing.
+	event CooldownExemptRecipientUpdated(address indexed account, bool isExempt);
 
 	// ---------------------------------------------------------------------
 	//                            INITIALIZATION
@@ -192,8 +198,10 @@ contract TokenLogic is
 		cooldownPeriod = _cooldown;
 
 		// poolLogic is a system contract; exempt it from transfer cooldown enforcement
-		cooldownExempt[_poolLogic] = true;
-		emit CooldownExemptUpdated(_poolLogic, true);
+		cooldownExemptSender[_poolLogic] = true;
+		cooldownExemptRecipient[_poolLogic] = true;
+		emit CooldownExemptSenderUpdated(_poolLogic, true);
+		emit CooldownExemptRecipientUpdated(_poolLogic, true);
 	}
 
 	// ---------------------------------------------------------------------
@@ -209,11 +217,15 @@ contract TokenLogic is
 
 		// maintain exemption on poolLogic
 		address oldPoolLogic = poolLogic;
-		cooldownExempt[oldPoolLogic] = false;
-		cooldownExempt[newPoolLogic] = true;
+		cooldownExemptSender[oldPoolLogic] = false;
+		cooldownExemptRecipient[oldPoolLogic] = false;
+		cooldownExemptSender[newPoolLogic] = true;
+		cooldownExemptRecipient[newPoolLogic] = true;
 		poolLogic = newPoolLogic;
-		emit CooldownExemptUpdated(oldPoolLogic, false);
-		emit CooldownExemptUpdated(newPoolLogic, true);
+		emit CooldownExemptSenderUpdated(oldPoolLogic, false);
+		emit CooldownExemptRecipientUpdated(oldPoolLogic, false);
+		emit CooldownExemptSenderUpdated(newPoolLogic, true);
+		emit CooldownExemptRecipientUpdated(newPoolLogic, true);
 		emit PoolLogicUpdated(newPoolLogic);
 	}
 
@@ -284,10 +296,17 @@ contract TokenLogic is
 	}
 
 	// Optional governance hook to exempt other system contracts or addresses if needed.
-	function setCooldownExempt(address account, bool isExempt) external onlyRole(DEFAULT_ADMIN_ROLE) {
+	function setCooldownExemptSender(address account, bool isExempt) external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(account != address(0), "TokenLogic: zero address");
-		cooldownExempt[account] = isExempt;
-		emit CooldownExemptUpdated(account, isExempt);
+		cooldownExemptSender[account] = isExempt;
+		emit CooldownExemptSenderUpdated(account, isExempt);
+	}
+
+	// Optional governance hook to exempt recipients if needed.
+	function setCooldownExemptRecipient(address account, bool isExempt) external onlyRole(DEFAULT_ADMIN_ROLE) {
+		require(account != address(0), "TokenLogic: zero address");
+		cooldownExemptRecipient[account] = isExempt;
+		emit CooldownExemptRecipientUpdated(account, isExempt);
 	}
 
 	// ---------------------------------------------------------------------
@@ -557,7 +576,7 @@ contract TokenLogic is
         // Apply cooldown check only to transfers (from != 0 and to != 0)
         if (from != address(0) && to != address(0)) {
 
-			if (!cooldownExempt[from]) {
+			if (!cooldownExemptSender[from] && !cooldownExemptRecipient[to]) {
 				uint256 ts = averageMintTimestamp[from];
 
 				if (ts != 0 && cooldownPeriod != 0) {
