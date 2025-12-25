@@ -371,7 +371,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 		address guard = _assetGuard[_asset];
 		if (guard != address(0)) {
-			require(assetBalance(_asset) == 0, "non-empty asset");
+			// Don't rely on on-chain wallet balance as a safe-removal condition.
+            // Let the guard decide using protocol-aware checks (including external positions).
 			IAssetGuard(guard).removeAssetCheck(poolLogic, _asset);
 		}
 
