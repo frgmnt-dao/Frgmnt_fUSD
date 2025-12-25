@@ -136,6 +136,13 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	mapping(address => bool) public allowedCallbackSenders;
 
 	// ============================================================
+	// =                         ERRORS                           =
+	// ============================================================
+
+	/// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
+    error ComplexWithdrawFailed(address asset, address guard);
+
+	// ============================================================
 	// =                         EVENTS                           =
 	// ============================================================
 
@@ -694,6 +701,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// =           dHEDGE-STYLE WITHDRAW PROCESSING                =
 	// ============================================================
 
+	// NOTE:
+    // When `withdrawData` is provided, the asset guard MUST implement `IComplexAssetGuard`.
+    // Standard ERC20 guards and Uniswap V3 asset guards do NOT support this interface.
+    // Passing non-empty `withdrawData` for such assets will intentionally revert.
 	function _withdrawProcessing(
 		address asset,
 		address to,
@@ -714,16 +725,18 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		if (complexData.withdrawData.length > 0) {
 			require(asset == complexData.supportedAsset, "PoolLogic: invalid asset data");
-
-			(withdrawAsset, withdrawAmount, v.transactions) = IComplexAssetGuard(v.guard).withdrawProcessing(
-				address(this),
-				asset,
-				portion,
-				to,
-				complexData.withdrawData
-			);
-
-			v.regularProcessing = false;
+		    try IComplexAssetGuard(v.guard).withdrawProcessing(
+                address(this),
+                asset,
+                portion,
+                to,
+                complexData.withdrawData) 
+			returns (address wa, uint256 wamt, IAssetGuard.MultiTransaction[] memory txs) {
+            (withdrawAsset, withdrawAmount, v.transactions) = (wa, wamt, txs);
+            } catch {
+                revert ComplexWithdrawFailed(asset, v.guard);
+            }
+            v.regularProcessing = false;
 		} else {
 			(withdrawAsset, withdrawAmount, v.transactions) = IAssetGuard(v.guard).withdrawProcessing(
 				address(this),
