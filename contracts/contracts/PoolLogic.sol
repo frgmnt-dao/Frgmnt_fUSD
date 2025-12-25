@@ -581,8 +581,12 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 			(bool ok, uint256 bal0) = _tryBalanceOf(a0, address(this));
 			if (ok) {
+				// FRG-42: snapshot only the available (unreserved) balance for ERC20 assets
+				uint256 reserved0 = reservedAssetBalance[a0];
+				require(bal0 >= reserved0, "PoolLogic: bad reserved");
+
 				erc20Assets[erc20Count] = a0;
-				erc20BalanceBefore[erc20Count] = bal0;
+				erc20BalanceBefore[erc20Count] = bal0 - reserved0;
 				erc20Count++;
 			}
 		}
@@ -657,20 +661,26 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			return originalWithdrawAmount;
 		}
 
-		uint256 beforeBal = erc20BalanceBefore[idx];
+		// FRG-42: all computations are on *available* balances (excluding reserved)
+		uint256 beforeAvail = erc20BalanceBefore[idx];
+
 		uint256 currentBal = IERC20(withdrawAsset).balanceOf(address(this));
-		require(currentBal >= beforeBal, "PoolLogic: bad erc20 delta");
+		uint256 reserved = reservedAssetBalance[withdrawAsset];
+		require(currentBal >= reserved, "PoolLogic: bad reserved");
 
-		uint256 delta = currentBal - beforeBal;
-		uint256 basePortion = (beforeBal * portion) / 1e18;
+		uint256 currentAvail = currentBal - reserved;
+		require(currentAvail >= beforeAvail, "PoolLogic: bad erc20 delta");
 
-		uint256 adjusted = basePortion + delta;
-		if (adjusted > currentBal) {
-			adjusted = currentBal;
+		uint256 deltaAvail = currentAvail - beforeAvail;
+		uint256 basePortion = (beforeAvail * portion) / 1e18;
+
+		uint256 adjusted = basePortion + deltaAvail;
+		if (adjusted > currentAvail) {
+			adjusted = currentAvail;
 		}
 
 		// Update baseline defensively (in case the same ERC20 is encountered again)
-		erc20BalanceBefore[idx] = currentBal - adjusted;
+		erc20BalanceBefore[idx] = currentAvail - adjusted;
 
 		return adjusted;
 	}
@@ -821,6 +831,19 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		require(v.guard != address(0), "PoolLogic: invalid guard");
 
 		v.balance = IAssetGuard(v.guard).getBalance(address(this), asset);
+
+		// FRG-42: exclude amounts reserved for finalized queued withdrawals (ERC20 only)
+		(bool ok, uint256 bal0) = _tryBalanceOf(asset, address(this));
+		if (ok) {
+			uint256 reserved = reservedAssetBalance[asset];
+			require(bal0 >= reserved, "PoolLogic: bad reserved");
+
+			uint256 available = bal0 - reserved;
+			if (v.balance > available) {
+				v.balance = available;
+			}
+		}
+
 		v.portionBalance = (v.balance * portion) / 1e18;
 
 		v.expectedValue = IPoolManagerLogic(poolManagerLogic).assetValue(asset, v.portionBalance);
