@@ -140,7 +140,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// ============================================================
 
 	/// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
-    error ComplexWithdrawFailed(address asset, address guard);
+	error ComplexWithdrawFailed(address asset, address guard);
 
 	// ============================================================
 	// =                         EVENTS                           =
@@ -558,6 +558,35 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		// Invariant-style check (dHEDGE-like): total value removed should not exceed netFusd (plus rounding tolerance)
 		valueBefore = fundValue;
 
+		// --------------------------------------------------------------------
+		// Important accounting note:
+		// Some non-ERC20 / complex assets may "realize" underlying ERC20s back to this contract
+		// as part of their guard transactions (e.g. a "collect" that transfers tokens to PoolLogic).
+		//
+		// Those realized underlying tokens have already been scaled by `portion` at the complex-asset level.
+		// When we later iterate ERC20 assets, we must avoid scaling these newly received tokens by `portion` again.
+		//
+		// To achieve this with minimal changes:
+		//   - Snapshot ERC20 balances of supported assets BEFORE any processing.
+		//   - When processing an ERC20, transfer:
+		//         (preBalance * portion) + (currentBalance - preBalance)
+		//     where (currentBalance - preBalance) is the amount realized during this withdraw.
+		// --------------------------------------------------------------------
+		address[] memory erc20Assets = new address[](supportedAssets.length);
+		uint256[] memory erc20BalanceBefore = new uint256[](supportedAssets.length);
+		uint256 erc20Count = 0;
+
+		for (uint256 i = 0; i < supportedAssets.length; ++i) {
+			address a0 = supportedAssets[i].asset;
+
+			(bool ok, uint256 bal0) = _tryBalanceOf(a0, address(this));
+			if (ok) {
+				erc20Assets[erc20Count] = a0;
+				erc20BalanceBefore[erc20Count] = bal0;
+				erc20Count++;
+			}
+		}
+
 		for (uint256 i = 0; i < supportedAssets.length; ++i) {
 			address a = supportedAssets[i].asset;
 
@@ -576,6 +605,18 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			(address withdrawAsset, uint256 withdrawAmount, ) = _withdrawProcessing(a, address(this), portion, cd);
 
 			if (withdrawAsset != address(0) && withdrawAmount > 0) {
+				// If `withdrawAsset` is an ERC20 supported asset, adjust the amount:
+				// - apply `portion` only to the balance that existed before processing started
+				// - plus send the full delta that arrived during processing (already portioned at source)
+				withdrawAmount = _adjustErc20WithdrawAmount(
+					withdrawAsset,
+					portion,
+					erc20Assets,
+					erc20BalanceBefore,
+					erc20Count,
+					withdrawAmount
+				);
+
 				IERC20(withdrawAsset).safeTransfer(msg.sender, withdrawAmount);
 
 				outAssets[outCount] = withdrawAsset;
@@ -589,6 +630,69 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			mstore(outAssets, outCount)
 			mstore(outAmounts, outCount)
 		}
+	}
+
+	/// @dev Adjust ERC20 withdraw amount to avoid scaling newly realized tokens by `portion` again.
+	///      Works on in-memory snapshots and updates the baseline defensively.
+	function _adjustErc20WithdrawAmount(
+		address withdrawAsset,
+		uint256 portion,
+		address[] memory erc20Assets,
+		uint256[] memory erc20BalanceBefore,
+		uint256 erc20Count,
+		uint256 originalWithdrawAmount
+	) internal view returns (uint256 withdrawAmount) {
+		uint256 idx = 0;
+		bool found = false;
+
+		for (uint256 i = 0; i < erc20Count; ++i) {
+			if (erc20Assets[i] == withdrawAsset) {
+				idx = i;
+				found = true;
+				break;
+			}
+		}
+
+		if (!found) {
+			return originalWithdrawAmount;
+		}
+
+		uint256 beforeBal = erc20BalanceBefore[idx];
+		uint256 currentBal = IERC20(withdrawAsset).balanceOf(address(this));
+		require(currentBal >= beforeBal, "PoolLogic: bad erc20 delta");
+
+		uint256 delta = currentBal - beforeBal;
+		uint256 basePortion = (beforeBal * portion) / 1e18;
+
+		uint256 adjusted = basePortion + delta;
+		if (adjusted > currentBal) {
+			adjusted = currentBal;
+		}
+
+		// Update baseline defensively (in case the same ERC20 is encountered again)
+		erc20BalanceBefore[idx] = currentBal - adjusted;
+
+		return adjusted;
+	}
+
+	/// @dev Best-effort ERC20 balanceOf(asset, who). Returns (success, balance).
+	///      Uses staticcall so non-ERC20 assets (e.g., NFTs) don't revert the whole withdraw.
+	function _tryBalanceOf(address asset, address who) internal view returns (bool success, uint256 bal) {
+		(bool ok, bytes memory ret) = asset.staticcall(abi.encodeWithSignature("balanceOf(address)", who));
+		if (!ok || ret.length != 32) return (false, 0);
+		return (true, abi.decode(ret, (uint256)));
+	}
+
+	/// @dev Linear search in-memory (supported assets list is typically small).
+	function _findAssetIndex(
+		address[] memory assets,
+		uint256 len,
+		address target
+	) internal pure returns (uint256 idx, bool found) {
+		for (uint256 i = 0; i < len; ++i) {
+			if (assets[i] == target) return (i, true);
+		}
+		return (0, false);
 	}
 
 	// ============================================================
@@ -612,7 +716,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		(uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
 		require(netFusd > 0, "PoolLogic: netFusd=0");
 		// prevent creating requests that can never be finalized due to rounding to zero.
-        require(_fusdToAssetAmount(netFusd, asset) > 0, "PoolLogic: amount too small");
+		require(_fusdToAssetAmount(netFusd, asset) > 0, "PoolLogic: amount too small");
 
 		requestId = ++lastRequestId;
 		cashWithdrawRequests[requestId] = CashWithdrawRequest({
@@ -702,9 +806,9 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// ============================================================
 
 	// NOTE:
-    // When `withdrawData` is provided, the asset guard MUST implement `IComplexAssetGuard`.
-    // Standard ERC20 guards and Uniswap V3 asset guards do NOT support this interface.
-    // Passing non-empty `withdrawData` for such assets will intentionally revert.
+	// When `withdrawData` is provided, the asset guard MUST implement `IComplexAssetGuard`.
+	// Standard ERC20 guards and Uniswap V3 asset guards do NOT support this interface.
+	// Passing non-empty `withdrawData` for such assets will intentionally revert.
 	function _withdrawProcessing(
 		address asset,
 		address to,
@@ -725,18 +829,20 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		if (complexData.withdrawData.length > 0) {
 			require(asset == complexData.supportedAsset, "PoolLogic: invalid asset data");
-		    try IComplexAssetGuard(v.guard).withdrawProcessing(
-                address(this),
-                asset,
-                portion,
-                to,
-                complexData.withdrawData) 
+			try
+				IComplexAssetGuard(v.guard).withdrawProcessing(
+					address(this),
+					asset,
+					portion,
+					to,
+					complexData.withdrawData
+				)
 			returns (address wa, uint256 wamt, IAssetGuard.MultiTransaction[] memory txs) {
-            (withdrawAsset, withdrawAmount, v.transactions) = (wa, wamt, txs);
-            } catch {
-                revert ComplexWithdrawFailed(asset, v.guard);
-            }
-            v.regularProcessing = false;
+				(withdrawAsset, withdrawAmount, v.transactions) = (wa, wamt, txs);
+			} catch {
+				revert ComplexWithdrawFailed(asset, v.guard);
+			}
+			v.regularProcessing = false;
 		} else {
 			(withdrawAsset, withdrawAmount, v.transactions) = IAssetGuard(v.guard).withdrawProcessing(
 				address(this),
@@ -992,8 +1098,8 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	function factory() external view returns (address) {
-        return IPoolManagerLogic(poolManagerLogic).factory();
-    }
+		return IPoolManagerLogic(poolManagerLogic).factory();
+	}
 
 	// ============================================================
 	// =                     PRIVACY FLAG                          =
