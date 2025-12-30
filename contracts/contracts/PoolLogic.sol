@@ -93,6 +93,22 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 actualValue;
 	}
 
+	/// @dev Compact context for pro-rata withdrawal to avoid stack-too-deep.
+	struct WithdrawProRataContext {
+		address recipient;
+		uint256 portion;
+		address[] erc20Assets;
+		uint256[] erc20BalanceBefore;
+		uint256 erc20Count;
+	}
+
+	/// @dev Compact outputs for pro-rata withdrawal to avoid stack-too-deep.
+	struct WithdrawOutputs {
+		address[] assets;
+		uint256[] amounts;
+		uint256 count;
+	}
+
 	// ============================================================
 	// =                        STORAGE                           =
 	// ============================================================
@@ -158,9 +174,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		address indexed user,
 		uint256 fusdTotal,
 		uint256 fusdNet,
-		uint256 fusdFee,
-		address indexed asset,
-		uint256 assetAmount
+		uint256 fusdFee
 	);
 
 	event CashWithdrawRequested(
@@ -497,15 +511,52 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	 *  - burns FUSD from user
 	 *  - applies FUSD withdraw fee
 	 *  - converts net FUSD to portion of pool
-	 *  - uses guard-based withdrawProcessing (Option A)
+	 *  - uses guard-based withdrawProcessing
+	 *
+	 * NOTE: Pro-rata withdrawal is performed across all supported assets (dHedge-style).
 	 */
-	function withdrawCashImmediate(
-		uint256 fusdAmount,
-		address asset,
-		ComplexAsset calldata complexData
+
+	function withdrawCashImmediate(uint256 fusdAmount) external nonReentrant updateFeesAndRewards(msg.sender) {
+		IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
+		ComplexAsset[] memory complexAssetsData = new ComplexAsset[](supportedAssets.length);
+
+		_withdrawCashImmediateToSafe(msg.sender, fusdAmount, complexAssetsData);
+	}
+
+	function withdrawCashImmediateTo(
+		address recipient,
+		uint256 fusdAmount
 	) external nonReentrant updateFeesAndRewards(msg.sender) {
+		require(recipient != address(0), "PoolLogic: recipient=0");
+
+		IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
+		ComplexAsset[] memory complexAssetsData = new ComplexAsset[](supportedAssets.length);
+
+		_withdrawCashImmediateToSafe(recipient, fusdAmount, complexAssetsData);
+	}
+
+	function withdrawCashImmediateSafe(
+		uint256 fusdAmount,
+		ComplexAsset[] calldata complexAssetsData
+	) external nonReentrant updateFeesAndRewards(msg.sender) {
+		_withdrawCashImmediateToSafe(msg.sender, fusdAmount, complexAssetsData);
+	}
+
+	function withdrawCashImmediateToSafe(
+		address recipient,
+		uint256 fusdAmount,
+		ComplexAsset[] calldata complexAssetsData
+	) external nonReentrant updateFeesAndRewards(msg.sender) {
+		require(recipient != address(0), "PoolLogic: recipient=0");
+		_withdrawCashImmediateToSafe(recipient, fusdAmount, complexAssetsData);
+	}
+
+	function _withdrawCashImmediateToSafe(
+		address recipient,
+		uint256 fusdAmount,
+		ComplexAsset[] memory complexAssetsData
+	) internal {
 		require(fusdAmount > 0, "PoolLogic: zero fusd");
-		require(IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset), "PoolLogic: asset not supported");
 
 		// cooldown enforced only on CASH withdraw (not unstake)
 		require(ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) == 0, "PoolLogic: cooldown");
@@ -520,11 +571,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		// burn FUSD from user
 		ITokenLogic(fusd).burnFrom(msg.sender, netFusd);
 
-		// pro-rata withdrawal (dHEDGE-style) moved into helper to avoid stack-too-deep
 		(address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore) = _withdrawProRata(
-			asset,
+			recipient,
 			netFusd,
-			complexData
+			complexAssetsData
 		);
 
 		uint256 valueAfter = _totalValue();
@@ -532,15 +582,15 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		require(valueBefore - valueAfter <= netFusd + 1e15, "PoolLogic: value mismatch");
 
 		// Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
-		emit CashWithdrawImmediate(msg.sender, fusdAmount, netFusd, feeFusd, asset, 0);
+		emit CashWithdrawImmediate(msg.sender, fusdAmount, netFusd, feeFusd);
 		emit CashWithdrawImmediateProRata(msg.sender, fusdAmount, netFusd, feeFusd, outAssets, outAmounts);
 	}
 
 	/// @dev Helper to reduce stack usage in withdrawCashImmediate (compile fix: avoids "stack too deep")
 	function _withdrawProRata(
-		address selectedAsset,
+		address recipient,
 		uint256 netFusd,
-		ComplexAsset calldata complexData
+		ComplexAsset[] memory complexAssetsData
 	) internal returns (address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore) {
 		// compute portion in terms of totalFundValue
 		uint256 fundValue = _totalValue();
@@ -548,14 +598,16 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		uint256 portion = (netFusd * 1e18) / fundValue;
 
-		// dHEDGE-style: withdraw proportionally from ALL supported assets
+		// withdraw proportionally from ALL supported assets
 		IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
+		require(complexAssetsData.length == supportedAssets.length, "PoolLogic: bad complexAssetsData length");
 
-		outAssets = new address[](supportedAssets.length);
-		outAmounts = new uint256[](supportedAssets.length);
-		uint256 outCount = 0;
+		WithdrawOutputs memory out;
+		out.assets = new address[](supportedAssets.length);
+		out.amounts = new uint256[](supportedAssets.length);
+		out.count = 0;
 
-		// Invariant-style check (dHEDGE-like): total value removed should not exceed netFusd (plus rounding tolerance)
+		// Invariant-style check: total value removed should not exceed netFusd (plus rounding tolerance)
 		valueBefore = fundValue;
 
 		// --------------------------------------------------------------------
@@ -572,68 +624,89 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		//         (preBalance * portion) + (currentBalance - preBalance)
 		//     where (currentBalance - preBalance) is the amount realized during this withdraw.
 		// --------------------------------------------------------------------
-		address[] memory erc20Assets = new address[](supportedAssets.length);
-		uint256[] memory erc20BalanceBefore = new uint256[](supportedAssets.length);
-		uint256 erc20Count = 0;
+		WithdrawProRataContext memory ctx;
+		ctx.recipient = recipient;
+		ctx.portion = portion;
+		ctx.erc20Assets = new address[](supportedAssets.length);
+		ctx.erc20BalanceBefore = new uint256[](supportedAssets.length);
+		ctx.erc20Count = 0;
 
 		for (uint256 i = 0; i < supportedAssets.length; ++i) {
 			address a0 = supportedAssets[i].asset;
 
 			(bool ok, uint256 bal0) = _tryBalanceOf(a0, address(this));
 			if (ok) {
-				// FRG-42: snapshot only the available (unreserved) balance for ERC20 assets
+				// snapshot only the available (unreserved) balance for ERC20 assets
 				uint256 reserved0 = reservedAssetBalance[a0];
 				require(bal0 >= reserved0, "PoolLogic: bad reserved");
 
-				erc20Assets[erc20Count] = a0;
-				erc20BalanceBefore[erc20Count] = bal0 - reserved0;
-				erc20Count++;
+				ctx.erc20Assets[ctx.erc20Count] = a0;
+				ctx.erc20BalanceBefore[ctx.erc20Count] = bal0 - reserved0;
+				ctx.erc20Count++;
 			}
 		}
 
-		for (uint256 i = 0; i < supportedAssets.length; ++i) {
-			address a = supportedAssets[i].asset;
+		_withdrawProRataInternal(ctx, supportedAssets, complexAssetsData, out);
 
-			// Apply complex withdraw data ONLY to the chosen `asset`, other assets use empty data
-			ComplexAsset memory cd;
-			if (a == selectedAsset) {
-				cd = ComplexAsset({
-					supportedAsset: complexData.supportedAsset,
-					withdrawData: complexData.withdrawData,
-					slippageTolerance: complexData.slippageTolerance
-				});
-			} else {
-				cd = ComplexAsset({ supportedAsset: address(0), withdrawData: "", slippageTolerance: 0 });
-			}
+		outAssets = out.assets;
+		outAmounts = out.amounts;
 
-			(address withdrawAsset, uint256 withdrawAmount, ) = _withdrawProcessing(a, address(this), portion, cd);
-
-			if (withdrawAsset != address(0) && withdrawAmount > 0) {
-				// If `withdrawAsset` is an ERC20 supported asset, adjust the amount:
-				// - apply `portion` only to the balance that existed before processing started
-				// - plus send the full delta that arrived during processing (already portioned at source)
-				withdrawAmount = _adjustErc20WithdrawAmount(
-					withdrawAsset,
-					portion,
-					erc20Assets,
-					erc20BalanceBefore,
-					erc20Count,
-					withdrawAmount
-				);
-
-				IERC20(withdrawAsset).safeTransfer(msg.sender, withdrawAmount);
-
-				outAssets[outCount] = withdrawAsset;
-				outAmounts[outCount] = withdrawAmount;
-				outCount++;
-			}
-		}
-
-		// shrink arrays to actual length
+		uint256 outCount = out.count;
 		assembly {
 			mstore(outAssets, outCount)
 			mstore(outAmounts, outCount)
 		}
+	}
+
+	function _withdrawProRataInternal(
+		WithdrawProRataContext memory ctx,
+		IHasSupportedAsset.Asset[] memory supportedAssets,
+		ComplexAsset[] memory complexAssetsData,
+		WithdrawOutputs memory out
+	) internal {
+		for (uint256 i = 0; i < supportedAssets.length; ++i) {
+			address a = supportedAssets[i].asset;
+
+			ComplexAsset memory cd = complexAssetsData[i];
+			if (cd.withdrawData.length > 0) {
+				require(a == cd.supportedAsset, "PoolLogic: invalid asset data");
+			}
+
+			(address withdrawAsset, uint256 withdrawAmount) = _withdrawOne(ctx, a, cd);
+
+			if (withdrawAsset != address(0) && withdrawAmount > 0) {
+				out.assets[out.count] = withdrawAsset;
+				out.amounts[out.count] = withdrawAmount;
+				out.count++;
+			}
+		}
+	}
+
+	function _withdrawOne(
+		WithdrawProRataContext memory ctx,
+		address asset,
+		ComplexAsset memory cd
+	) internal returns (address withdrawAsset, uint256 withdrawAmount) {
+		(address wa, uint256 wamt, ) = _withdrawProcessing(asset, address(this), ctx.portion, cd);
+		withdrawAsset = wa;
+		withdrawAmount = wamt;
+
+		if (withdrawAsset == address(0) || withdrawAmount == 0) {
+			return (address(0), 0);
+		}
+
+		withdrawAmount = _adjustErc20WithdrawAmount(
+			withdrawAsset,
+			ctx.portion,
+			ctx.erc20Assets,
+			ctx.erc20BalanceBefore,
+			ctx.erc20Count,
+			withdrawAmount
+		);
+
+		IERC20(withdrawAsset).safeTransfer(ctx.recipient, withdrawAmount);
+
+		return (withdrawAsset, withdrawAmount);
 	}
 
 	/// @dev Adjust ERC20 withdraw amount to avoid scaling newly realized tokens by `portion` again.
@@ -661,7 +734,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			return originalWithdrawAmount;
 		}
 
-		// FRG-42: all computations are on *available* balances (excluding reserved)
+		// all computations are on *available* balances (excluding reserved)
 		uint256 beforeAvail = erc20BalanceBefore[idx];
 
 		uint256 currentBal = IERC20(withdrawAsset).balanceOf(address(this));
@@ -691,18 +764,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		(bool ok, bytes memory ret) = asset.staticcall(abi.encodeWithSignature("balanceOf(address)", who));
 		if (!ok || ret.length != 32) return (false, 0);
 		return (true, abi.decode(ret, (uint256)));
-	}
-
-	/// @dev Linear search in-memory (supported assets list is typically small).
-	function _findAssetIndex(
-		address[] memory assets,
-		uint256 len,
-		address target
-	) internal pure returns (uint256 idx, bool found) {
-		for (uint256 i = 0; i < len; ++i) {
-			if (assets[i] == target) return (i, true);
-		}
-		return (0, false);
 	}
 
 	// ============================================================
@@ -832,7 +893,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		v.balance = IAssetGuard(v.guard).getBalance(address(this), asset);
 
-		// FRG-42: exclude amounts reserved for finalized queued withdrawals (ERC20 only)
+		// exclude amounts reserved for finalized queued withdrawals (ERC20 only)
 		(bool ok, uint256 bal0) = _tryBalanceOf(asset, address(this));
 		if (ok) {
 			uint256 reserved = reservedAssetBalance[asset];
