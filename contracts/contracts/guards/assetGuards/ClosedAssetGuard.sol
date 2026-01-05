@@ -34,7 +34,7 @@ abstract contract ClosedAssetGuard is TxDataUtils, IGuard, IAssetGuard {
 	 * @dev Must be implemented by the concrete guard.
 	 */
 	function getBalance(address, address) public view virtual override returns (uint256) {
-		revert("ClosedAssetGuard: not implemented");
+		//revert("ClosedAssetGuard: not implemented");
 	}
 
 	/**

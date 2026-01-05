@@ -17,14 +17,28 @@ import { IComplexAssetGuard } from "./interfaces/guards/IComplexAssetGuard.sol";
 import { IGuard } from "./interfaces/guards/IGuard.sol";
 import { ITxTrackingGuard } from "./interfaces/guards/ITxTrackingGuard.sol";
 
+import { IFlashLoanReceiver } from "./interfaces/aave/IFlashLoanReceiver.sol";
+import { IMorphoFlashLoanCallback } from "./interfaces/IMorphoFlashLoanCallback.sol";
+import { PoolLogicFlashloanAave } from "./utils/PoolLogicFlashloanAave.sol";
+import { PoolLogicFlashloanMorpho } from "./utils/PoolLogicFlashloanMorpho.sol";
+import { PoolTxExecutor } from "./utils/PoolTxExecutor.sol";
+
+
+
+
 interface ITokenLogic is IERC20 {
 	function burnFrom(address account, uint256 amount) external;
 	function burn(uint256 amount) external;
 	function getExitRemainingCooldown(address user) external view returns (uint256);
 }
 
-contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable {
+contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable,
+    IFlashLoanReceiver,
+    IMorphoFlashLoanCallback,
+    PoolLogicFlashloanAave,
+    PoolLogicFlashloanMorpho {
 	using SafeERC20 for IERC20;
+
 
 	// ============================================================
 	// =                        STRUCTS                           =
@@ -45,6 +59,11 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 exitFeeDenominator;
 		uint256 entryFeeNumerator;
 	}
+
+	//struct TxToExecute { 
+	//	address to; 
+	//	bytes data; 
+	//}
 
 	struct UserReward {
 		uint256 rewardDebt;
@@ -73,11 +92,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 requestedAt;
 		uint256 assetAmount; // amount of asset claimable
 		RequestStatus status;
-	}
-
-	struct TxToExecute {
-		address to;
-		bytes data;
 	}
 
 	struct WithdrawProcessingLocalVars {
@@ -122,9 +136,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	/// @notice Pool creation time
 	uint256 public creationTime;
 
-	/// @notice For compatibility / UI only
-	bool public privatePool;
-
 	/// @notice Reward per share in FUSD (scaled 1e18)
 	uint256 public rewardPerShare;
 
@@ -147,13 +158,36 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	///      committed to Finalized requests and not yet released via claim.
 	mapping(address => uint256) public reservedAssetBalance;
 
-	/// @notice Contracts allowed to invoke callback-style calls (e.g., Morpho).
-	/// @dev Used by fallback to accept only known protocol callbacks.
-	mapping(address => bool) public allowedCallbackSenders;
 
 	// ============================================================
 	// =                         ERRORS                           =
 	// ============================================================
+
+	error ZeroAmount();
+	error ZeroAddress();
+	error OnlyManager();
+	error OnlyManagerLogic();
+	error CooldownActive();
+	error AssetNotSupported();
+	error InvalidRecipient();
+	error NothingToHarvest();
+	error InsufficientShares();
+	error NoStakers();
+	error SlippageExceeded();
+	error EmptyFund();
+	error InvalidReservedBalance();
+	error InsufficientAssetBalance();
+	error InvalidTransaction();
+    error TxFailed();
+    error InvalidGuard();
+    error AssetDisabled();
+	error InvalidAssetData();
+	error CallbackSenderNotAllowed();
+	error InvalidFundValue();
+	error InvalidWithdrawRequest();
+	error NonTransferable();
+
+	    
 
 	/// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
 	error ComplexWithdrawFailed(address asset, address guard);
@@ -196,8 +230,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	event CashWithdrawClaimed(uint256 indexed requestId, address indexed user, address indexed asset, uint256 amount);
 
-	event PoolPrivacyUpdated(bool isPoolPrivate);
-
 	event TransactionExecuted(address pool, address actor, uint16 transactionType, uint256 time);
 
 	/// @notice Pro-rata immediate cash-out results across multiple assets
@@ -220,9 +252,9 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	function initialize(address _fusd, address _poolManagerLogic, address _owner) external initializer {
-		require(_fusd != address(0), "PoolLogic: fusd=0");
-		require(_poolManagerLogic != address(0), "PoolLogic: managerLogic=0");
-		require(_owner != address(0), "PoolLogic: owner=0");
+		if (_fusd == address(0)) revert ZeroAddress();
+	    if (_poolManagerLogic == address(0)) revert ZeroAddress();
+	    if (_owner == address(0)) revert ZeroAddress();
 
 		__ERC20_init("Staked Frgmnt USD", "SFUSD");
 		__Ownable_init(_owner);
@@ -234,7 +266,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		creationTime = block.timestamp;
 		lastFeeMintTime = block.timestamp;
 		tokenPriceAtLastFeeMint = 1e18;
-		privatePool = false;
 	}
 
 	// ============================================================
@@ -337,7 +368,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	/// @notice Called by PoolManagerLogic.commitFeeIncrease()
 	function mintManagerFee() external nonReentrant {
-		require(msg.sender == poolManagerLogic, "PoolLogic: only managerLogic");
+		if (msg.sender != poolManagerLogic) revert OnlyManagerLogic();
 		_accrueManagementFee();
 	}
 
@@ -357,7 +388,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	function _stake(uint256 amountFusd, uint256 minShares) internal {
-		require(amountFusd > 0, "PoolLogic: zero amount");
+		if (amountFusd == 0) revert ZeroAmount();
 
 		// Pull FUSD from user
 		IERC20(fusd).safeTransferFrom(msg.sender, address(this), amountFusd);
@@ -374,10 +405,11 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		}
 
 		uint256 netFusd = amountFusd - feeFusd;
-		require(netFusd > 0, "PoolLogic: netFusd=0");
+		if (netFusd == 0) revert ZeroAmount();
 
 		// Minimum shares protection (sharesMinted == netFusd in this implementation)
-		require(netFusd >= minShares, "PoolLogic: slippage");
+		if (netFusd < minShares) revert SlippageExceeded();
+
 
 		_mint(msg.sender, netFusd);
 
@@ -397,8 +429,8 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// ============================================================
 
 	function unstake(uint256 shareAmount) external nonReentrant updateFeesAndRewards(msg.sender) {
-		require(shareAmount > 0, "PoolLogic: zero shares");
-		require(balanceOf(msg.sender) >= shareAmount, "PoolLogic: not enough shares");
+		if (shareAmount == 0) revert ZeroAmount();
+		if (balanceOf(msg.sender) < shareAmount) revert InsufficientShares();
 
 		_burn(msg.sender, shareAmount);
 
@@ -421,11 +453,11 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		nonReentrant
 		updateFeesAndRewards(address(0)) // global update
 	{
-		require(msg.sender == _manager(), "PoolLogic: only manager");
-		require(amountFusd > 0, "PoolLogic: zero reward");
+		if (msg.sender != _manager()) revert OnlyManager();
+		if (amountFusd == 0) revert ZeroAmount();
 
 		uint256 supply = totalSupply();
-		require(supply > 0, "PoolLogic: no stakers");
+		if (supply == 0) revert NoStakers();
 
 		// Pull FUSD from manager
 		IERC20(fusd).safeTransferFrom(msg.sender, address(this), amountFusd);
@@ -454,7 +486,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	function harvest() external nonReentrant updateFeesAndRewards(msg.sender) {
 		UserReward storage ur = userRewards[msg.sender];
 		uint256 amount = ur.pending;
-		require(amount > 0, "PoolLogic: nothing to harvest");
+		if (amount == 0) revert NothingToHarvest();
 
 		ur.pending = 0;
 		IERC20(fusd).safeTransfer(msg.sender, amount);
@@ -469,10 +501,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	function _fusdToAssetAmount(uint256 fusdAmount, address asset) internal view returns (uint256 assetAmount) {
 		if (fusdAmount == 0) return 0;
 
-		require(IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset), "PoolLogic: asset not supported");
+		if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset)) revert AssetNotSupported();
 
 		uint256 price = IPoolManagerLogic(poolManagerLogic).getAssetPrice(asset);
-		require(price > 0, "PoolLogic: bad asset price");
+		if (price == 0) revert ZeroAmount();
 
 		uint256 _decimals = IPoolManagerLogic(poolManagerLogic).assetDecimal(asset);
 
@@ -527,7 +559,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		address recipient,
 		uint256 fusdAmount
 	) external nonReentrant updateFeesAndRewards(msg.sender) {
-		require(recipient != address(0), "PoolLogic: recipient=0");
+		if (recipient == address(0)) revert InvalidRecipient();
 
 		IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
 		ComplexAsset[] memory complexAssetsData = new ComplexAsset[](supportedAssets.length);
@@ -547,7 +579,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 fusdAmount,
 		ComplexAsset[] calldata complexAssetsData
 	) external nonReentrant updateFeesAndRewards(msg.sender) {
-		require(recipient != address(0), "PoolLogic: recipient=0");
+		if (recipient == address(0)) revert InvalidRecipient();
 		_withdrawCashImmediateToSafe(recipient, fusdAmount, complexAssetsData);
 	}
 
@@ -556,13 +588,13 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 fusdAmount,
 		ComplexAsset[] memory complexAssetsData
 	) internal {
-		require(fusdAmount > 0, "PoolLogic: zero fusd");
+		if (fusdAmount == 0) revert ZeroAmount();
 
 		// cooldown enforced only on CASH withdraw (not unstake)
-		require(ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) == 0, "PoolLogic: cooldown");
+		if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0) revert CooldownActive();
 
 		(uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
-		require(netFusd > 0, "PoolLogic: netFusd=0");
+		if (netFusd == 0) revert ZeroAmount();
 
 		if (feeFusd > 0) {
 			IERC20(fusd).safeTransferFrom(msg.sender, _manager(), feeFusd);
@@ -578,8 +610,8 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		);
 
 		uint256 valueAfter = _totalValue();
-		require(valueBefore >= valueAfter, "PoolLogic: bad value");
-		require(valueBefore - valueAfter <= netFusd + 1e15, "PoolLogic: value mismatch");
+		if (valueBefore < valueAfter) revert InvalidFundValue();
+        if (valueBefore - valueAfter > netFusd + 1e15) revert InvalidFundValue();
 
 		// Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
 		emit CashWithdrawImmediate(msg.sender, fusdAmount, netFusd, feeFusd);
@@ -594,13 +626,16 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	) internal returns (address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore) {
 		// compute portion in terms of totalFundValue
 		uint256 fundValue = _totalValue();
-		require(fundValue > 0, "PoolLogic: fund=0");
+		if (fundValue == 0) revert EmptyFund();
+
 
 		uint256 portion = (netFusd * 1e18) / fundValue;
 
 		// withdraw proportionally from ALL supported assets
 		IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
-		require(complexAssetsData.length == supportedAssets.length, "PoolLogic: bad complexAssetsData length");
+		if (complexAssetsData.length != supportedAssets.length) {
+	        revert InvalidAssetData();
+        }
 
 		WithdrawOutputs memory out;
 		out.assets = new address[](supportedAssets.length);
@@ -638,7 +673,8 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			if (ok) {
 				// snapshot only the available (unreserved) balance for ERC20 assets
 				uint256 reserved0 = reservedAssetBalance[a0];
-				require(bal0 >= reserved0, "PoolLogic: bad reserved");
+				if (bal0 < reserved0) revert InvalidReservedBalance();
+
 
 				ctx.erc20Assets[ctx.erc20Count] = a0;
 				ctx.erc20BalanceBefore[ctx.erc20Count] = bal0 - reserved0;
@@ -669,7 +705,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 			ComplexAsset memory cd = complexAssetsData[i];
 			if (cd.withdrawData.length > 0) {
-				require(a == cd.supportedAsset, "PoolLogic: invalid asset data");
+				if (a != cd.supportedAsset) revert InvalidAssetData();
 			}
 
 			(address withdrawAsset, uint256 withdrawAmount) = _withdrawOne(ctx, a, cd);
@@ -739,10 +775,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		uint256 currentBal = IERC20(withdrawAsset).balanceOf(address(this));
 		uint256 reserved = reservedAssetBalance[withdrawAsset];
-		require(currentBal >= reserved, "PoolLogic: bad reserved");
+		if (currentBal < reserved) revert InvalidReservedBalance();
 
 		uint256 currentAvail = currentBal - reserved;
-		require(currentAvail >= beforeAvail, "PoolLogic: bad erc20 delta");
+		if (currentAvail < beforeAvail) revert InvalidReservedBalance();
 
 		uint256 deltaAvail = currentAvail - beforeAvail;
 		uint256 basePortion = (beforeAvail * portion) / 1e18;
@@ -779,15 +815,19 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 fusdAmount,
 		address asset
 	) external nonReentrant updateFeesAndRewards(msg.sender) returns (uint256 requestId) {
-		require(fusdAmount > 0, "PoolLogic: zero fusd");
-		require(IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset), "PoolLogic: asset not supported");
+		if (fusdAmount== 0) revert ZeroAmount();
+		if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset)) {
+	        revert AssetNotSupported();
+        }
 
-		require(ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) == 0, "PoolLogic: cooldown");
+		if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0) {
+	        revert CooldownActive();
+        }
 
 		(uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
-		require(netFusd > 0, "PoolLogic: netFusd=0");
+		if (netFusd == 0) revert ZeroAmount();
 		// prevent creating requests that can never be finalized due to rounding to zero.
-		require(_fusdToAssetAmount(netFusd, asset) > 0, "PoolLogic: amount too small");
+		if (_fusdToAssetAmount(netFusd, asset) == 0) revert ZeroAmount();
 
 		requestId = ++lastRequestId;
 		cashWithdrawRequests[requestId] = CashWithdrawRequest({
@@ -809,14 +849,14 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	function finalizeCashWithdraw(uint256 requestId) external nonReentrant {
-		require(msg.sender == _manager(), "PoolLogic: only manager");
+		if (msg.sender != _manager()) revert OnlyManager();
 
 		CashWithdrawRequest storage r = cashWithdrawRequests[requestId];
-		require(r.status == RequestStatus.Pending, "PoolLogic: not pending");
-		require(r.user != address(0), "PoolLogic: invalid request");
+		if (r.status != RequestStatus.Pending) revert InvalidWithdrawRequest();
+        if (r.user == address(0)) revert InvalidWithdrawRequest();
 
 		uint256 totalFusd = r.fusdAmountTotal;
-		require(totalFusd > 0, "PoolLogic: zero fusd");
+		if (totalFusd == 0) revert ZeroAmount();
 
 		uint256 feeFusd = totalFusd - r.fusdNetForAsset;
 		if (feeFusd > 0) {
@@ -828,7 +868,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		// convert netFusd to assetAmount using price
 		uint256 assetAmount = _fusdToAssetAmount(r.fusdNetForAsset, r.asset);
-		require(assetAmount > 0, "PoolLogic: assetAmount=0");
+		if (assetAmount == 0) revert ZeroAmount();
 
 		// Finalization does not transfer assets to the user; assets remain on the contract until claim.
 		// Therefore we must account for other finalized-but-unclaimed requests to avoid over-allocating
@@ -837,11 +877,12 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 reserved = reservedAssetBalance[r.asset];
 
 		// Defensive: reserved should never exceed the actual on-chain balance.
-		require(bal >= reserved, "PoolLogic: bad reserved");
+		if (bal < reserved) revert InvalidReservedBalance();
 
 		// Only the unreserved portion of the balance can be used for a new finalization.
 		uint256 available = bal - reserved;
-		require(available >= assetAmount, "PoolLogic: insufficient asset");
+		if (available < assetAmount) revert InsufficientAssetBalance();
+
 
 		// Reserve the amount for this request until it is claimed.
 		reservedAssetBalance[r.asset] = reserved + assetAmount;
@@ -854,11 +895,11 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	function claimCashWithdraw(uint256 requestId) external nonReentrant updateFeesAndRewards(msg.sender) {
 		CashWithdrawRequest storage r = cashWithdrawRequests[requestId];
-		require(r.user == msg.sender, "PoolLogic: not owner");
-		require(r.status == RequestStatus.Finalized, "PoolLogic: not finalized");
+		if (r.user != msg.sender) revert InvalidWithdrawRequest();
+        if (r.status != RequestStatus.Finalized) revert InvalidWithdrawRequest();
 
 		uint256 amount = r.assetAmount;
-		require(amount > 0, "PoolLogic: zero asset");
+		if (amount == 0) revert ZeroAmount();
 
 		// Release the reserved amount for this request.
 		// If safeTransfer reverts, the whole tx reverts and the reservation remains intact.
@@ -889,7 +930,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		WithdrawProcessingLocalVars memory v;
 
 		v.guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-		require(v.guard != address(0), "PoolLogic: invalid guard");
+		if (v.guard == address(0)) revert InvalidGuard();
 
 		v.balance = IAssetGuard(v.guard).getBalance(address(this), asset);
 
@@ -897,7 +938,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		(bool ok, uint256 bal0) = _tryBalanceOf(asset, address(this));
 		if (ok) {
 			uint256 reserved = reservedAssetBalance[asset];
-			require(bal0 >= reserved, "PoolLogic: bad reserved");
+			if (bal0 < reserved) revert InvalidReservedBalance();
 
 			uint256 available = bal0 - reserved;
 			if (v.balance > available) {
@@ -906,13 +947,14 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		}
 
 		v.portionBalance = (v.balance * portion) / 1e18;
+		
 
 		v.expectedValue = IPoolManagerLogic(poolManagerLogic).assetValue(asset, v.portionBalance);
 
 		v.regularProcessing = true;
 
 		if (complexData.withdrawData.length > 0) {
-			require(asset == complexData.supportedAsset, "PoolLogic: invalid asset data");
+			if (asset != complexData.supportedAsset) revert InvalidAssetData();
 			try
 				IComplexAssetGuard(v.guard).withdrawProcessing(
 					address(this),
@@ -944,7 +986,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 			for (uint256 i = 0; i < v.txCount; ++i) {
 				(bool success, ) = v.transactions[i].to.call(v.transactions[i].txData);
-				require(success, "PoolLogic: withdraw tx failed");
+				if (!success) revert TxFailed();
 				externalProcessed = true;
 			}
 
@@ -959,10 +1001,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		if (v.regularProcessing && complexData.slippageTolerance != 0 && withdrawAsset != address(0)) {
 			v.actualValue = IPoolManagerLogic(poolManagerLogic).assetValue(withdrawAsset, withdrawAmount);
 
-			require(
-				v.actualValue >= (v.expectedValue * (10_000 - complexData.slippageTolerance)) / 10_000,
-				"PoolLogic: high withdraw slippage"
-			);
+			if (
+			    v.actualValue <
+			    (v.expectedValue * (10_000 - complexData.slippageTolerance)) / 10_000
+			)  revert SlippageExceeded();
 		}
 
 		return (withdrawAsset, withdrawAmount, externalProcessed);
@@ -972,74 +1014,31 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// =           GUARDED TX EXECUTION (LIKE dHEDGE)              =
 	// ============================================================
 
-	function _resolveGuard(
-		address to,
-		bytes memory data
-	) internal returns (address guard, uint16 txType, bool isPublic) {
-		// 1) Try contract guard
-		address contractGuard = IPoolManagerLogic(poolManagerLogic).getContractGuard(to);
+	function _execTx(address to, bytes memory data) internal returns (bool) {
+	    PoolTxExecutor.ExecContext memory ctx = PoolTxExecutor.ExecContext({
+		    pool: address(this),
+		    poolManagerLogic: poolManagerLogic,
+		    manager: _manager(),
+		    trader: _trader()
+	    });
 
-		if (contractGuard != address(0)) {
-			guard = contractGuard;
-			(txType, isPublic) = IGuard(guard).txGuard(poolManagerLogic, to, data);
-		}
+	    bool success = PoolTxExecutor.exec(ctx, to, data);
 
-		// 2) If no valid txType, fallback to asset guard
-		if (txType == 0) {
-			address assetGuard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(to);
+	    emit TransactionExecuted(address(this), msg.sender, 0, block.timestamp);
 
-			if (assetGuard == address(0)) {
-				revert("PoolLogic: no guard");
-			}
+	    return success;
+    }
 
-			require(IHasSupportedAsset(poolManagerLogic).isSupportedAsset(to), "PoolLogic: asset disabled");
-
-			guard = assetGuard;
-			(txType, isPublic) = IGuard(guard).txGuard(poolManagerLogic, to, data);
-		}
-	}
-
-	function _afterTxGuard(address guard, address to, bytes memory data) internal {
-		(bool hasFn, bytes memory ret) = guard.call(abi.encodeWithSignature("isTxTrackingGuard()"));
-
-		if (!hasFn || ret.length != 32) {
-			return;
-		}
-
-		bool tracking = abi.decode(ret, (bool));
-		if (!tracking) return;
-
-		ITxTrackingGuard(guard).afterTxGuard(poolManagerLogic, to, data);
-	}
-
-	function _execTransaction(address to, bytes memory data) private nonReentrant returns (bool success) {
-		require(to != address(0), "PoolLogic: to=0");
-
-		(address guard, uint16 txType, bool isPublic) = _resolveGuard(to, data);
-
-		require(txType > 0, "PoolLogic: invalid transaction");
-		require(
-			isPublic || msg.sender == _manager() || msg.sender == _trader(),
-			"PoolLogic: only manager/trader/public"
-		);
-
-		(success, ) = to.call(data);
-		require(success, "PoolLogic: tx failed");
-
-		_afterTxGuard(guard, to, data);
-
-		emit TransactionExecuted(address(this), msg.sender, txType, block.timestamp);
-	}
-
+	
 	function execTransaction(address to, bytes calldata data) external returns (bool) {
-		return _execTransaction(to, data);
+		return _execTx(to, data);
 	}
 
-	function execTransactions(TxToExecute[] calldata txs) external {
-		for (uint256 i; i < txs.length; ++i) {
-			require(_execTransaction(txs[i].to, txs[i].data), "PoolLogic: tx failed");
-		}
-	}
+	//function execTransactions(TxToExecute[] calldata txs) external {
+	//	for (uint256 i; i < txs.length; ++i) {
+	//		_execTx(txs[i].to, txs[i].data);
+	//	}
+	//}
 
 	// ============================================================
 	// =                         VIEWS                             =
@@ -1171,7 +1170,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 				manager: _manager(),
 				managerName: IManaged(poolManagerLogic).managerName(),
 				creationTime: creationTime,
-				privatePool: privatePool,
+				privatePool: IPoolManagerLogic(poolManagerLogic).privatePool(),
 				performanceFeeNumerator: performanceFeeNumerator,
 				managerFeeNumerator: managerFeeNumerator,
 				managerFeeDenominator: denominator,
@@ -1185,28 +1184,75 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		return IPoolManagerLogic(poolManagerLogic).factory();
 	}
 
-	// ============================================================
-	// =                     PRIVACY FLAG                          =
+
+    // ============================================================
+	// = AAVE FLASHLOAN =
 	// ============================================================
 
-	function setPoolPrivate(bool _privatePool) external {
-		require(msg.sender == _manager(), "PoolLogic: only manager");
-		privatePool = _privatePool;
-		emit PoolPrivacyUpdated(_privatePool);
+	/// @notice Executes operations after receiving a flashloan from Aave
+	/// @param assets Array of asset addresses that were flash loaned
+	/// @param amounts Array of amounts that were flash loaned
+	/// @param premiums Array of premiums to pay for each borrowed asset
+	/// @param initiator Address that initiated the flash loan
+	/// @param params Arbitrary bytes passed to the receiver
+	/// @return success Boolean indicating whether the operation was successful
+	function executeOperation(
+		address[] calldata assets,
+		uint256[] calldata amounts,
+		uint256[] calldata premiums,
+		address initiator,
+		bytes calldata params
+	) external override returns (bool) {
+		return _executeAaveFlashloan(
+			assets,
+			amounts,
+			premiums,
+			initiator,
+			params
+		);
 	}
 
 	// ============================================================
-	// =                 CALLBACK SENDER WHITELIST                 =
+	// = MORPHO FLASHLOAN =
 	// ============================================================
 
-	/// @notice Allow/deny protocol contracts that call back into this PoolLogic (e.g., Morpho callbacks).
-	/// @dev Whitelist the protocol contract address that performs the callback (e.g., Morpho),
-	///      NOT the guard contract.
-	function setAllowedCallbackSender(address protocol, bool allowed) external {
-		require(msg.sender == _manager(), "PoolLogic: only manager");
-		require(protocol != address(0), "PoolLogic: protocol=0");
-		allowedCallbackSenders[protocol] = allowed;
+	/// @notice Executes operations after receiving a flashloan from Morpho
+	/// @param assets Amount that was flash loaned
+	/// @param params Arbitrary bytes passed to the receiver
+	function onMorphoFlashLoan(
+		uint256 assets,
+		bytes calldata params
+	) external override {
+		_executeMorphoFlashloan(assets, params);
 	}
+
+
+
+	// ============================================================
+	// =  NEW HOOKS (REQUIRED BY STATELESS MODULES) =
+	// ============================================================
+
+	function _getPoolManagerLogic()
+		internal
+		view
+		override(
+        PoolLogicFlashloanAave,
+        PoolLogicFlashloanMorpho
+    )
+		returns (address)
+	{
+		return poolManagerLogic;
+	}
+
+	function _isAllowedCallbackSender(address sender)
+		internal
+		view
+		override
+		returns (bool)
+	{
+		return IPoolManagerLogic(poolManagerLogic).getAllowedCallbackSenders(sender);
+	}
+
 
 	// ============================================================
 	// =                 NON-TRANSFERABLE sFUSD                    =
@@ -1215,18 +1261,18 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	/// @notice sFUSD Token: a non-transferable receipt token received when users stake their fUSD.
 	///         It gives direct access to protocol yields and compounds returns automatically.
 	function transfer(address, uint256) public pure override returns (bool) {
-		revert("PoolLogic: sFUSD is non-transferable");
+		revert NonTransferable();
 	}
 
 	/// @notice sFUSD Token: a non-transferable receipt token received when users stake their fUSD.
 	///         It gives direct access to protocol yields and compounds returns automatically.
 	function transferFrom(address, address, uint256) public pure override returns (bool) {
-		revert("PoolLogic: sFUSD is non-transferable");
+		revert NonTransferable();
 	}
 
 	/// @notice Disable approvals to prevent indirect transfers.
 	function approve(address, uint256) public pure override returns (bool) {
-		revert("PoolLogic: sFUSD is non-transferable");
+		revert NonTransferable();
 	}
 
 	// ============================================================
@@ -1238,7 +1284,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	///         to implement optional callback interfaces.
 	/// @dev Prevents unintended reverts during protocol interactions.
 	fallback() external {
-		require(allowedCallbackSenders[msg.sender], "PoolLogic: callback sender not allowed");
+		if (!_isAllowedCallbackSender(msg.sender)) {
+	        revert CallbackSenderNotAllowed();
+        }
+
 		// Intentionally empty — simply prevents revert on unknown function selectors for allowed senders
 	}
 }

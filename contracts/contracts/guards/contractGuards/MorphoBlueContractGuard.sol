@@ -96,6 +96,7 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 
 		IHasSupportedAsset mgr = IHasSupportedAsset(_poolManagerLogic);
 
+		// Morpho core contract must be enabled as a supported asset
 		require(mgr.isSupportedAsset(to), "MorphoGuard: morpho not enabled");
 
 		if (method == SEL_SUPPLY) txType = _handleSupply(poolLogic, mgr, params);
@@ -117,7 +118,7 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 	}
 
 	/// @inheritdoc ITxTrackingGuard
-	function isTxTrackingGuard() external view override returns (bool) {
+	function isTxTrackingGuard() external pure override returns (bool) {
 		return true;
 	}
 

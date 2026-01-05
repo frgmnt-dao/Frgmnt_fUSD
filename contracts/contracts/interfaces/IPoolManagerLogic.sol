@@ -34,4 +34,9 @@ interface IPoolManagerLogic {
 	function getAssetGuard(address _asset) external view returns (address);
 
 	function getContractGuard(address _contract) external view returns (address);
+
+	function privatePool() external view returns (bool);
+
+	function getAllowedCallbackSenders(address protocol) external view returns (bool); 
+
 }

@@ -53,12 +53,14 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	);
 	event TraderAssetChangeDisabledSet(bool disabled);
 	event NftMembershipCollectionAddressSet(address indexed previous, address indexed current);
+	event PoolPrivacyUpdated(bool isPoolPrivate);
 
 	// Core
 	address public override poolLogic;
 
 	Asset[] public supportedAssets;
 	mapping(address => uint256) public assetPosition;
+	mapping(address => bool) private allowedCallbackSenders; 
 
 	uint256 public announcedPerformanceFeeNumerator;
 	uint256 public announcedFeeIncreaseTimestamp;
@@ -74,6 +76,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	uint256 public exitFeeNumerator;
 
 	bool public traderAssetChangeDisabled;
+	bool public privatePool;
 
 	// Governance
 	address public factoryOwner;
@@ -589,6 +592,21 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		return true;
 	}
 
+
+	function setPoolPrivate(bool _privatePool) external onlyManager {
+		privatePool = _privatePool;
+		emit PoolPrivacyUpdated(_privatePool);
+	}
+
+	/// @notice Allow/deny protocol contracts that call back into the PoolLogic (e.g., Morpho callbacks).
+	/// @dev Whitelist the protocol contract address that performs the callback (e.g., Morpho),
+	///      NOT the guard contract.
+	function setAllowedCallbackSender(address protocol, bool allowed) external onlyManager {
+		require(protocol != address(0), "PoolLogic: protocol=0");
+		allowedCallbackSenders[protocol] = allowed;
+	}
+
+
 	function setNftMembershipCollectionAddress(address addr) external onlyManager {
 		address previous = nftMembershipCollectionAddress;
 
@@ -609,6 +627,11 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		return
 			nftMembershipCollectionAddress != address(0) &&
 			ERC721Upgradeable(nftMembershipCollectionAddress).balanceOf(_member) > 0;
+	}
+
+
+	function getAllowedCallbackSenders(address protocol) external view returns (bool) {
+		return allowedCallbackSenders[protocol];
 	}
 
 	function isMemberAllowed(address _member) public view override returns (bool) {
