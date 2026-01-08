@@ -78,6 +78,7 @@ contract Managed is IManaged {
 		if (_newManager == address(0)) revert InvalidManager();
 		manager = _newManager;
 		managerName = _newManagerName;
+		emit ManagerUpdated(_newManager, _newManagerName);
 	}
 
 	// =====================================================

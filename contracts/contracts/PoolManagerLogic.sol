@@ -54,6 +54,11 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	event TraderAssetChangeDisabledSet(bool disabled);
 	event NftMembershipCollectionAddressSet(address indexed previous, address indexed current);
 	event PoolPrivacyUpdated(bool isPoolPrivate);
+	event AllowedCallbackSenderSet(address indexed caller, bool allowed);
+    event ManagerFeeIncreaseCommitted(uint256 performanceFeeNumerator,
+    uint256 managerFeeNumerator,
+    uint256 entryFeeNumerator,
+    uint256 exitFeeNumerator);
 
 	// Core
 	address public override poolLogic;
@@ -557,6 +562,12 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 			announcedExitFeeNumerator
 		);
 
+		emit ManagerFeeIncreaseCommitted(
+        announcedPerformanceFeeNumerator,
+        announcedManagerFeeNumerator,
+        announcedEntryFeeNumerator,
+        announcedExitFeeNumerator);
+
 		announcedPerformanceFeeNumerator = 0;
 		announcedManagerFeeNumerator = 0;
 		announcedEntryFeeNumerator = 0;
@@ -601,9 +612,11 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	/// @notice Allow/deny protocol contracts that call back into the PoolLogic (e.g., Morpho callbacks).
 	/// @dev Whitelist the protocol contract address that performs the callback (e.g., Morpho),
 	///      NOT the guard contract.
-	function setAllowedCallbackSender(address protocol, bool allowed) external onlyManager {
-		require(protocol != address(0), "PoolLogic: protocol=0");
-		allowedCallbackSenders[protocol] = allowed;
+	function setAllowedCallbackSender(address caller, bool allowed) external onlyManager {
+		require(caller != address(0), "caller=0");
+		allowedCallbackSenders[caller] = allowed;
+		emit AllowedCallbackSenderSet(caller, allowed);
+
 	}
 
 
