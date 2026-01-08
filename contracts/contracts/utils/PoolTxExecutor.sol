@@ -29,14 +29,14 @@ library PoolTxExecutor {
 	}
 
 	// ============================================================
-	// =                  INTERNAL EXECUTION                      =
+	// =                  TRANSACTION EXECUTION                      =
 	// ============================================================
 
 	function exec(
 		ExecContext memory ctx,
 		address to,
 		bytes memory data
-	) internal returns (bool success) {
+	) external returns (bool success) {
 		if (to == address(0)) revert InvalidTransaction();
 
 		(address guard, uint16 txType, bool isPublic) =

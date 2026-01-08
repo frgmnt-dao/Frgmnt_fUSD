@@ -14,14 +14,14 @@ import { IHasSupportedAsset } from "./interfaces/IHasSupportedAsset.sol";
 
 import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
 import { IComplexAssetGuard } from "./interfaces/guards/IComplexAssetGuard.sol";
-import { IGuard } from "./interfaces/guards/IGuard.sol";
-import { ITxTrackingGuard } from "./interfaces/guards/ITxTrackingGuard.sol";
 
 import { IFlashLoanReceiver } from "./interfaces/aave/IFlashLoanReceiver.sol";
 import { IMorphoFlashLoanCallback } from "./interfaces/IMorphoFlashLoanCallback.sol";
 import { PoolLogicFlashloanAave } from "./utils/PoolLogicFlashloanAave.sol";
 import { PoolLogicFlashloanMorpho } from "./utils/PoolLogicFlashloanMorpho.sol";
 import { PoolTxExecutor } from "./utils/PoolTxExecutor.sol";
+import { FundCalculationLibrary } from "./utils/FundCalculationLibrary.sol";
+
 
 
 
@@ -326,12 +326,14 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			uint256 feeDenominator
 		) = _managerFees();
 
-		(uint256 performanceFee, uint256 streamingFee) = _availableManagerFee(
+		(uint256 performanceFee, uint256 streamingFee) = FundCalculationLibrary.availableManagerFee(
 			fundValue,
 			supply,
 			performanceFeeNumerator,
 			managementFeeNumerator,
-			feeDenominator
+			feeDenominator,
+			tokenPriceAtLastFeeMint,
+			lastFeeMintTime
 		);
 
 		uint256 feeShares = performanceFee + streamingFee;
@@ -494,31 +496,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		emit Harvest(msg.sender, amount);
 	}
 
-	// ============================================================
-	// =            FUSD → ASSET CONVERSION HELPERS                =
-	// ============================================================
-
-	function _fusdToAssetAmount(uint256 fusdAmount, address asset) internal view returns (uint256 assetAmount) {
-		if (fusdAmount == 0) return 0;
-
-		if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset)) revert AssetNotSupported();
-
-		uint256 price = IPoolManagerLogic(poolManagerLogic).getAssetPrice(asset);
-		if (price == 0) revert ZeroAmount();
-
-		uint256 _decimals = IPoolManagerLogic(poolManagerLogic).assetDecimal(asset);
-
-		// FUSD is USD-18
-		uint256 assetAmount18 = (fusdAmount * 1e18) / price;
-
-		if (_decimals == 18) {
-			assetAmount = assetAmount18;
-		} else if (_decimals < 18) {
-			assetAmount = assetAmount18 / (10 ** (18 - _decimals));
-		} else {
-			assetAmount = assetAmount18 * (10 ** (_decimals - 18));
-		}
-	}
 
 	function _applyWithdrawFeeFusd(uint256 fusdAmount) internal view returns (uint256 netFusd, uint256 feeFusd) {
 		(, , , uint256 exitFeeNumerator, uint256 feeDenominator) = _managerFees();
@@ -609,7 +586,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			complexAssetsData
 		);
 
-		uint256 valueAfter = _totalValue();
+		uint256 valueAfter = _withdrawableFundValue();
 		if (valueBefore < valueAfter) revert InvalidFundValue();
         if (valueBefore - valueAfter > netFusd + 1e15) revert InvalidFundValue();
 
@@ -625,7 +602,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		ComplexAsset[] memory complexAssetsData
 	) internal returns (address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore) {
 		// compute portion in terms of totalFundValue
-		uint256 fundValue = _totalValue();
+		uint256 fundValue = _withdrawableFundValue();
 		if (fundValue == 0) revert EmptyFund();
 
 
@@ -669,7 +646,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		for (uint256 i = 0; i < supportedAssets.length; ++i) {
 			address a0 = supportedAssets[i].asset;
 
-			(bool ok, uint256 bal0) = _tryBalanceOf(a0, address(this));
+			(bool ok, uint256 bal0) = FundCalculationLibrary.tryBalanceOf(a0, address(this));
 			if (ok) {
 				// snapshot only the available (unreserved) balance for ERC20 assets
 				uint256 reserved0 = reservedAssetBalance[a0];
@@ -794,14 +771,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		return adjusted;
 	}
 
-	/// @dev Best-effort ERC20 balanceOf(asset, who). Returns (success, balance).
-	///      Uses staticcall so non-ERC20 assets (e.g., NFTs) don't revert the whole withdraw.
-	function _tryBalanceOf(address asset, address who) internal view returns (bool success, uint256 bal) {
-		(bool ok, bytes memory ret) = asset.staticcall(abi.encodeWithSignature("balanceOf(address)", who));
-		if (!ok || ret.length != 32) return (false, 0);
-		return (true, abi.decode(ret, (uint256)));
-	}
-
 	// ============================================================
 	// =                 CASH WITHDRAW — QUEUED                    =
 	// ============================================================
@@ -827,7 +796,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		(uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
 		if (netFusd == 0) revert ZeroAmount();
 		// prevent creating requests that can never be finalized due to rounding to zero.
-		if (_fusdToAssetAmount(netFusd, asset) == 0) revert ZeroAmount();
+		if (FundCalculationLibrary.fusdToAssetAmount(poolManagerLogic, netFusd, asset) == 0) revert ZeroAmount();
 
 		requestId = ++lastRequestId;
 		cashWithdrawRequests[requestId] = CashWithdrawRequest({
@@ -867,7 +836,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		ITokenLogic(fusd).burn(r.fusdNetForAsset);
 
 		// convert netFusd to assetAmount using price
-		uint256 assetAmount = _fusdToAssetAmount(r.fusdNetForAsset, r.asset);
+		uint256 assetAmount = FundCalculationLibrary.fusdToAssetAmount(poolManagerLogic, r.fusdNetForAsset, r.asset);
 		if (assetAmount == 0) revert ZeroAmount();
 
 		// Finalization does not transfer assets to the user; assets remain on the contract until claim.
@@ -935,7 +904,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		v.balance = IAssetGuard(v.guard).getBalance(address(this), asset);
 
 		// exclude amounts reserved for finalized queued withdrawals (ERC20 only)
-		(bool ok, uint256 bal0) = _tryBalanceOf(asset, address(this));
+		(bool ok, uint256 bal0) = FundCalculationLibrary.tryBalanceOf(asset, address(this));
 		if (ok) {
 			uint256 reserved = reservedAssetBalance[asset];
 			if (bal0 < reserved) revert InvalidReservedBalance();
@@ -1073,84 +1042,40 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			uint256 managementFeeNumerator,
 			,
 			,
-			uint256 denominator
+			uint256 feeDenominator
 		) = _managerFees();
 
-		(uint256 performanceFee, uint256 streamingFee) = _availableManagerFee(
+		(uint256 performanceFee, uint256 streamingFee) = FundCalculationLibrary.availableManagerFee(
 			_fundValue,
 			totalSupply(),
 			performanceFeeNumerator,
 			managementFeeNumerator,
-			denominator
+			feeDenominator,
+			tokenPriceAtLastFeeMint,
+			lastFeeMintTime
 		);
 
 		return performanceFee + streamingFee;
 	}
 
-	/// @notice Get available manager fee of the pool internal call
-	/// @param _fundValue The total fund value of the pool
-	/// @param _tokenSupply The total token supply of the pool
-	/// @param _performanceFeeNumerator Performance fee numerator
-	/// @param _managerFeeNumerator Management fee numerator
-	/// @param _feeDenominator Fee denominator
-	/// @return performanceFee Performance fee generated by the pool (in pool tokens)
-	/// @return streamingFee Management fee generated by the pool (in pool tokens)
-	function _availableManagerFee(
-		uint256 _fundValue,
-		uint256 _tokenSupply,
-		uint256 _performanceFeeNumerator,
-		uint256 _managerFeeNumerator,
-		uint256 _feeDenominator
-	) internal view returns (uint256 performanceFee, uint256 streamingFee) {
-		if (_tokenSupply == 0 || _fundValue == 0) return (0, 0);
-
-		uint256 currentTokenPrice = (_fundValue * 1e18) / _tokenSupply;
-
-		// Performance fee based on price increase since last fee mint
-		if (currentTokenPrice > tokenPriceAtLastFeeMint) {
-			uint256 feeUsdAmount = (
-				(currentTokenPrice - tokenPriceAtLastFeeMint) *
-					_performanceFeeNumerator *
-					_tokenSupply
-			) / (_feeDenominator * 1e18);
-
-			// Convert USD fee amount to pool token amount
-			// performanceFee = feeUsdAmount / (fundValue - feeUsdAmount) * tokenSupply
-			performanceFee = (feeUsdAmount * _tokenSupply) / (_fundValue - feeUsdAmount);
-		}
-
-		// Streaming (management) fee from lastFeeMintTime to now
-		if (lastFeeMintTime != 0) {
-			uint256 timeChange = block.timestamp - lastFeeMintTime;
-			streamingFee =
-				(_tokenSupply * timeChange * _managerFeeNumerator) /
-				_feeDenominator /
-				365 days;
-		}
-	}
-
+	
 	// ============================================================
 	// =                TOKEN PRICE / FUND SUMMARY                 =
 	// ============================================================
-
-	function _tokenPrice(uint256 fundValue, uint256 tokenSupply) internal pure returns (uint256 price) {
-		if (tokenSupply == 0 || fundValue == 0) return 0;
-		price = (fundValue * 1e18) / tokenSupply;
-	}
 
 	/// @notice Get price of the pool token adjusted for any unminted manager fees
 	/// @return price A price of the pool
 	function tokenPrice() external view returns (uint256 price) {
 		uint256 fundValue = _totalValue();
 		uint256 tokenSupply = totalSupply() + calculateAvailableManagerFee(fundValue);
-		price = _tokenPrice(fundValue, tokenSupply);
+		price = FundCalculationLibrary.tokenPrice(fundValue, tokenSupply);
 	}
 
 	/// @notice Get price of the pool token ignoring unminted manager fees
 	function tokenPriceWithoutManagerFee() external view returns (uint256 price) {
 		uint256 fundValue = _totalValue();
 		uint256 supply = totalSupply();
-		price = _tokenPrice(fundValue, supply);
+		price = FundCalculationLibrary.tokenPrice(fundValue, supply);
 	}
 
 	function getFundSummary() external view returns (FundSummary memory) {
@@ -1290,4 +1215,55 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 		// Intentionally empty — simply prevents revert on unknown function selectors for allowed senders
 	}
+
+	 /**
+    * @dev Computes the total *withdrawable* fund value for immediate withdrawals.
+    *
+    * DESIGN:
+    * - AssetGuards define the total (gross) balance of each asset.
+    * - PoolLogic owns `reservedAssetBalance`, which represents liquidity
+    *   locked for finalized queued withdrawals.
+    * - Immediate withdrawals must NOT use reserved liquidity.
+	- `reservedAssetBalance` ONLY applies to ERC20 assets directly held by PoolLogic.
+    * - Complex assets (Aave, Morpho, NFTs, wrappers, etc.):
+    *     - do NOT expose balanceOf(pool)
+    *     - MUST have reservedAssetBalance == 0
+    *
+    * This function computes the sum of :
+    *   withdrawable balance = guardBalance - reservedBalance
+    *
+    */
+    function _withdrawableFundValue() internal view returns (uint256 value) {
+	    IHasSupportedAsset.Asset[] memory assets =
+		    IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
+
+	    for (uint256 i = 0; i < assets.length; ++i) {
+		    address asset = assets[i].asset;
+		    address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
+            // Gross balance as defined by the AssetGuard
+		    uint256 withdrawableBalance =
+			    IAssetGuard(guard).getBalance(address(this), asset);
+            // Check if the asset exposes an ERC20 balanceOf(pool)
+		    (bool isErc20, uint256 onchainBal) =
+			   FundCalculationLibrary.tryBalanceOf(asset, address(this));
+		    if (isErc20) {
+			    uint256 reserved = reservedAssetBalance[asset];
+		// Defensive: reserved should never exceed on-chain balance
+			    if (onchainBal <= reserved) {
+				    withdrawableBalance = 0;
+			    } else {
+				    uint256 available = onchainBal - reserved;
+				    // Cap guard balance to transferable amount
+				    if (withdrawableBalance > available) {
+					    withdrawableBalance = available;
+				    }
+			    }
+		    }
+
+	        value += IPoolManagerLogic(poolManagerLogic)
+			.assetValue(asset, withdrawableBalance);
+        }
+
+    }
+
 }
