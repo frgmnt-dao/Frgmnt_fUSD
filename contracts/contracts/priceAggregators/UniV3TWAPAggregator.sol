@@ -62,8 +62,10 @@ contract UniV3TWAPAggregator is IAggregatorV3Interface {
     require(_mainToken != address(0), "mainToken=0");
     require(address(_pairTokenUsdAggregator) != address(0), "agg=0");
     require(_updateInterval > 0, "interval=0");
-    require(_priceLowerLimit < _priceUpperLimit, "invalid price limit");
-
+    require(
+    (_priceLowerLimit == 0 && _priceUpperLimit == 0) ||
+    (_priceLowerLimit > 0 && _priceUpperLimit > 0 && _priceLowerLimit < _priceUpperLimit),
+    "invalid price limit");
     pool = _pool;
     mainToken = _mainToken;
     pairTokenUsdAggregator = _pairTokenUsdAggregator;
