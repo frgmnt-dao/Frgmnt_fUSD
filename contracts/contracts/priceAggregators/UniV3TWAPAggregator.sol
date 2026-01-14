@@ -115,6 +115,7 @@ contract UniV3TWAPAggregator is IAggregatorV3Interface {
   {
     // 1) Uniswap TWAP tick
     (int24 tick, ) = OracleLibrary.consult(address(pool), updateInterval);
+    require(mainTokenUnit <= uint256(type(uint128).max), "mainTokenUnit overflow");
 
     // 2) Quote 1 mainToken into pairToken amount (in smallest units)
     uint256 quoteAmount = OracleLibrary.getQuoteAtTick(
@@ -133,6 +134,7 @@ contract UniV3TWAPAggregator is IAggregatorV3Interface {
     (, pairUsdPrice, , updatedAt, ) = pairTokenUsdAggregator.latestRoundData();
     require(pairUsdPrice > 0, "bad pair price");
     require(updatedAt != 0, "stale feed");
+    require(pairTokenUnit <=  uint256(type(int256).max), "pairTokenUnit overflow");
 
     // 4) Convert to USD(main):
     //    raw = pairUsdPrice (10^pairUsdDecimals) * quoteAmount / pairTokenUnit
