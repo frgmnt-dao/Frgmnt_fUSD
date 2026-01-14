@@ -48,6 +48,10 @@ contract UniswapV3AssetGuard is ERC20Guard {
 
 	uint256 private constant BPS_DENOMINATOR = 10_000;
 
+	event WithdrawalSlippageBpsUpdated(uint256 oldValue, uint256 newValue);
+    event WithdrawalTwapWindowUpdated(uint32 oldValue, uint32 newValue);
+    event AdminUpdated(address oldAdmin, address newAdmin);
+
 	constructor() {
 		admin = msg.sender;
 	}
@@ -61,19 +65,25 @@ contract UniswapV3AssetGuard is ERC20Guard {
 	/// @dev 0 bps = no buffer; 10_000 bps = 100% (not recommended). We cap it for safety.
 	function setWithdrawalSlippageBps(uint256 _withdrawalSlippageBps) external onlyAdmin {
 		require(_withdrawalSlippageBps <= 2_000, "UniswapV3AssetGuard: slippage too high"); // max 20%
+		uint256 oldValue = withdrawalSlippageBps;
 		withdrawalSlippageBps = _withdrawalSlippageBps;
+		emit WithdrawalSlippageBpsUpdated(oldValue, _withdrawalSlippageBps);
 	}
 
 	/// @notice Updates the TWAP window (seconds) used during withdrawal construction.
 	function setWithdrawalTwapWindow(uint32 _withdrawalTwapWindow) external onlyAdmin {
 		require(_withdrawalTwapWindow >= 60, "UniswapV3AssetGuard: twap too small"); // minimum 1 minute
+		uint32 oldValue = withdrawalTwapWindow;
 		withdrawalTwapWindow = _withdrawalTwapWindow;
+		emit WithdrawalTwapWindowUpdated(oldValue, _withdrawalTwapWindow);
 	}
 
 	/// @notice Transfers admin role.
 	function setAdmin(address _admin) external onlyAdmin {
 		require(_admin != address(0), "UniswapV3AssetGuard: zero admin");
+		address oldAdmin = admin;
 		admin = _admin;
+		emit AdminUpdated(oldAdmin, _admin);
 	}
 
 	/**
