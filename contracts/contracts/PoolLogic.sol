@@ -193,9 +193,9 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	error NonTransferable();
 	error ImmediateWithdrawalDisabled();
 	error QueuedWithdrawalDisabled();
+	error OnlyMemberAllowed();
 
 	    
-
 	/// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
 	error ComplexWithdrawFailed(address asset, address guard);
 
@@ -402,6 +402,11 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	function _stake(uint256 amountFusd, uint256 minShares) internal {
+
+		if (!( msg.sender == _manager() || !  IPoolManagerLogic(poolManagerLogic).privatePool() 
+		    ||  IPoolManagerLogic(poolManagerLogic).isMemberAllowed(msg.sender))) 
+		    revert OnlyMemberAllowed();
+		
 		if (amountFusd == 0) revert ZeroAmount();
 
 		// Pull FUSD from user
