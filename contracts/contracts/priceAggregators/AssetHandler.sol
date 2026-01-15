@@ -27,8 +27,15 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	/// @inheritdoc IAssetHandler
 	mapping(address => address) public override priceAggregators;
 
+	/// @notice Chainlink L2 sequencer uptime feed (for Base, OP, Arbitrum, etc.)
+	IAggregatorV3Interface public sequencerUptimeFeed; 
+
+	/// @notice Grace period after sequencer recovery (seconds)
+	uint256 public constant SEQUENCER_GRACE_PERIOD = 3600; // 1 hour 
+
 	event SetDefaultChainlinkTimeout(uint256 chainlinkTimeout_);
 	event SetChainlinkTimeout(address indexed asset, uint256 chainlinkTimeout_);
+	event SetSequencerUptimeFeed(address indexed feed); 
 
 	/// @notice Initializer (upgradeable pattern).
 	/// @param assets Array of assets to add on deploy.
@@ -50,10 +57,14 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	 *           - no aggregator registered
 	 *           - data is stale beyond `chainlinkTimeout`
 	 *           - price <= 0 or feed call fails
+	 *           - sequencer down or grace period not over (FRG-52)
 	 */
 	function getUSDPrice(address asset) external view override returns (uint256 price) {
 		address aggregator = priceAggregators[asset];
 		require(aggregator != address(0), "Frgmnt: aggregator not found");
+
+		//  L2 sequencer safety check
+		_checkSequencerUp();
 
 		// per-asset timeout overrides the default; fallback to default if unset
 		uint256 timeout = chainlinkTimeouts[asset];
@@ -85,6 +96,19 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 		require(price > 0, "Frgmnt: price not available");
 	}
 
+	/// @notice Checks sequencer status and grace period
+	function _checkSequencerUp() internal view {
+		if (address(sequencerUptimeFeed) == address(0)) return; // skip if unset (L1)
+
+		(, int256 answer, uint256 startedAt, , ) = sequencerUptimeFeed.latestRoundData();
+
+		// Sequencer down → revert
+		require(answer == 0, "Frgmnt: sequencer down");
+
+		// Grace period after recovery → revert if too early
+		require(block.timestamp - startedAt > SEQUENCER_GRACE_PERIOD, "Frgmnt: sequencer grace period");
+	}
+
 	/* ─────────────────────────── Owner actions ─────────────────────────── */
 
 	/// @notice Update default Chainlink freshness window.
@@ -98,6 +122,13 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 		require(asset != address(0), "Frgmnt: asset=0");
 		chainlinkTimeouts[asset] = newTimeout;
 		emit SetChainlinkTimeout(asset, newTimeout);
+	}
+
+	/// @notice Set L2 sequencer uptime feed address (FRG-52)
+	function setSequencerUptimeFeed(address feed) external onlyOwner {
+		require(feed != address(0), "Frgmnt: feed=0");
+		sequencerUptimeFeed = IAggregatorV3Interface(feed);
+		emit SetSequencerUptimeFeed(feed);
 	}
 
 	/// @notice Register a single asset with type and Chainlink aggregator.
