@@ -11,7 +11,6 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { IManaged } from "./interfaces/IManaged.sol";
 import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
 import { IHasSupportedAsset } from "./interfaces/IHasSupportedAsset.sol";
-
 import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
 import { IComplexAssetGuard } from "./interfaces/guards/IComplexAssetGuard.sol";
 
@@ -147,6 +146,11 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	/// @notice Token price at last fee mint (for performance fee calc)
 	uint256 public tokenPriceAtLastFeeMint;
 
+    /// @notice Defines the withdraw mode for the vault
+    /// @dev true  = immediate withdrawals are enabled
+    ///   false = withdrawals must go through the queue mechanism
+    bool public isImmediateWithdrawEnabled;
+
 	/// @notice Queued cash withdraw requests
 	uint256 public lastRequestId;
 	mapping(uint256 => CashWithdrawRequest) public cashWithdrawRequests;
@@ -169,6 +173,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	error OnlyManagerLogic();
 	error CooldownActive();
 	error AssetNotSupported();
+	error NotValidWithdrawableAsset();
 	error InvalidRecipient();
 	error NothingToHarvest();
 	error InsufficientShares();
@@ -186,6 +191,8 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	error InvalidFundValue();
 	error InvalidWithdrawRequest();
 	error NonTransferable();
+	error ImmediateWithdrawalDisabled();
+	error QueuedWithdrawalDisabled();
 
 	    
 
@@ -241,6 +248,10 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		address[] assets,
 		uint256[] amounts
 	);
+
+	/// @notice Emitted when the withdrawal mode is updated by the manager
+    /// @param immediateWithdrawEnabled Whether immediate withdrawals are enabled
+    event WithdrawModeUpdated(bool immediateWithdrawEnabled);
 
 	// ============================================================
 	// =                      INITIALIZATION                       =
@@ -515,6 +526,20 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// =                CASH WITHDRAW — IMMEDIATE                  =
 	// ============================================================
 
+
+	/**
+    * @notice Set the withdrawal mode of the vault
+    * @dev Can only be called by the manager
+    *      - true  : immediate withdrawals are enabled
+    *      - false : withdrawals must go through the queue mechanism
+    * @param enabled Whether immediate withdrawals are enabled
+    */
+    function setImmediateWithdrawEnabled(bool enabled) external {
+        if (msg.sender != _manager()) revert OnlyManager();
+        isImmediateWithdrawEnabled = enabled;
+		emit WithdrawModeUpdated(enabled);
+    }
+
 	/**
 	 * @notice Immediate cash-out:
 	 *  - burns FUSD from user
@@ -565,8 +590,8 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 fusdAmount,
 		ComplexAsset[] memory complexAssetsData
 	) internal {
+		if (!isImmediateWithdrawEnabled) revert ImmediateWithdrawalDisabled();
 		if (fusdAmount == 0) revert ZeroAmount();
-
 		// cooldown enforced only on CASH withdraw (not unstake)
 		if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0) revert CooldownActive();
 
@@ -775,18 +800,22 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// =                 CASH WITHDRAW — QUEUED                    =
 	// ============================================================
 
+	
 	/**
-	 * @notice Queued withdraw:
-	 *  - FUSD is held in the contract, fee applied
-	 *  - later manager finalizes & converts using price (no withdrawProcessing)
-	 */
+    * @notice Queued withdraw:
+    *  - FUSD is held in the contract; fees are applied
+    *  - Later, the manager finalizes and converts the equivalent value of `fusdAmount` into `asset`
+    *  - `asset` must be a deposited token; i.e., a simple withdrawable ERC20
+    */
 	function requestCashWithdraw(
 		uint256 fusdAmount,
 		address asset
 	) external nonReentrant updateFeesAndRewards(msg.sender) returns (uint256 requestId) {
+
+		if (isImmediateWithdrawEnabled) revert QueuedWithdrawalDisabled();
 		if (fusdAmount== 0) revert ZeroAmount();
-		if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset)) {
-	        revert AssetNotSupported();
+		if (!IPoolManagerLogic(poolManagerLogic).isDepositAsset(asset)) {
+	        revert NotValidWithdrawableAsset();
         }
 
 		if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0) {

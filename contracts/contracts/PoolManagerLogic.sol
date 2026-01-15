@@ -289,7 +289,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	function isSupportedAsset(address _asset) public view override returns (bool) {
 		return assetPosition[_asset] != 0;
 	}
-
+    
+	// @notice a deposited asset must be a "withdrawable" ERC20 token.
 	function isDepositAsset(address _asset) external view override returns (bool) {
 		uint256 index = assetPosition[_asset];
 		return index != 0 && supportedAssets[index - 1].isDeposit;
