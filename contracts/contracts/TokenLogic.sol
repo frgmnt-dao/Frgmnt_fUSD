@@ -269,7 +269,7 @@ contract TokenLogic is
 		uint256 _cap
 	) external onlyRole(DEFAULT_ADMIN_ROLE) {
 		require(_asset != address(0), "TokenLogic: asset=0");
-		require(poolManagerLogic.validateAsset(_asset), "TokenLogic: no validated asset");
+		require(poolManagerLogic.isDepositAsset(_asset), "TokenLogic: asset not valid");
 		uint256 _decimals = poolManagerLogic.assetDecimal(_asset);
 		require(_decimals != 0 , "TokenLogic: _decimals = 0");
 		AssetConfig storage cfg = assetConfigs[_asset];
@@ -287,7 +287,7 @@ contract TokenLogic is
 	function setAssetCap(address asset, uint256 newCap) external onlyRole(DEFAULT_ADMIN_ROLE) {
 		AssetConfig storage cfg = assetConfigs[asset];
 	    require(cfg.allowed_, "TokenLogic: not allowed");
-		require(poolManagerLogic.validateAsset(asset), "TokenLogic: no validated asset");
+		require(poolManagerLogic.isDepositAsset(asset), "TokenLogic: asset not valid");
 		uint256 _decimals = poolManagerLogic.assetDecimal(asset);
 		require(_decimals != 0 , "TokenLogic: _decimals = 0");
 		uint256 old = cfg.cap_;
@@ -415,6 +415,7 @@ contract TokenLogic is
 
 	function _deposit(address asset, uint256 amount, address to, uint256 minFusdAmount) internal {
 		AssetConfig storage cfg = assetConfigs[asset];
+		require(poolManagerLogic.isDepositAsset(asset), "TokenLogic: asset not valid");
 		require(cfg.allowed_, "TokenLogic: asset not allowed");
 		require(amount > 0, "TokenLogic: zero amount");
 		require( to != address(0), "TokenLogic: zero address");

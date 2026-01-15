@@ -111,7 +111,7 @@ contract UniswapV3AssetGuard is ERC20Guard {
 			(, , params.token0, params.token1, params.fee, , , , , , , ) = nonfungiblePositionManager.positions(tokenId);
 
 			// Skip NFTs where either underlying token is not supported by the factory
-			if (!IHasAssetInfo(factory).validateAsset(params.token0) || !IHasAssetInfo(factory).validateAsset(params.token1)) {
+			if (!IHasAssetInfo(factory).isSupportedAsset(params.token0) || !IHasAssetInfo(factory).isSupportedAsset(params.token1)) {
 				continue;
 			}
 
@@ -133,7 +133,7 @@ contract UniswapV3AssetGuard is ERC20Guard {
 
 	/// @dev Helper to convert a token amount to USD using the factory price + token decimals.
 	function _assetValue(address factory, address token, uint256 amount) internal view returns (uint256) {
-		if (IHasAssetInfo(factory).validateAsset(token)) {
+		if (IHasAssetInfo(factory).isSupportedAsset(token)) {
 			uint256 tokenPriceInUsd = IHasAssetInfo(factory).getAssetPrice(token);
 			uint256 dec = IERC20Extended(token).decimals();
 			return (tokenPriceInUsd * amount) / (10 ** dec);
