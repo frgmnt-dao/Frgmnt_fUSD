@@ -73,11 +73,11 @@ contract TokenLogic is
 
 	/// @notice Time-weighted average mint timestamp per user, used to compute
 	///         the remaining cooldown.
-	mapping(address => uint256) public averageMintTimestamp;
-
-	/// @notice Snapshot of user's FUSD balance at the time of their last deposit.
-	/// @dev Used to prevent cooldown skew via temporary balance inflation.
-	mapping(address => uint256) public lastDepositBalance;
+	mapping(address => uint256) public cooldownTimestamp;
+    
+	/// Amount of protocol-minted FUSD still owned by the user
+    /// and subject to cooldown accounting.
+	mapping(address => uint256) public cooldownPrincipal;
 
 	// Exempt addresses bypass the transfer cooldown check in _update() (sender-side).
 	mapping(address => bool) public cooldownExemptSender;
@@ -429,11 +429,11 @@ contract TokenLogic is
 		require(fusdAmount >= minFusdAmount, "TokenLogic: slippage");
 
 		// Record previous FUSD balance BEFORE mint (snapshot from last deposit)
-		uint256 prevBalance = lastDepositBalance[to];
-		uint256 previousTs = averageMintTimestamp[to];
+		uint256 prevBalance = cooldownPrincipal[to];
+		uint256 previousTs = cooldownTimestamp[to];
 
 		// Update time-weighted average mint timestamp for the user
-		averageMintTimestamp[to] = _updateAverageMintTimestamp(previousTs, fusdAmount, prevBalance);
+		cooldownTimestamp[to] = _updateCooldownTimestamp(previousTs, fusdAmount, prevBalance);
 
 		// Update total deposited for this asset
 		cfg.totalDeposited_ += amount;
@@ -445,7 +445,7 @@ contract TokenLogic is
 		_mint(to, fusdAmount);
 
 		// Update balance snapshot for next deposit
-		lastDepositBalance[to] = balanceOf(to);
+		cooldownPrincipal[to] =  prevBalance + fusdAmount;
 
 		emit Deposited(to, asset, amount, fusdAmount);
 	}
@@ -457,13 +457,13 @@ contract TokenLogic is
 	/**
 	 * @dev Helper to update the user's time-weighted average mint timestamp.
 	 *
-	 * @param oldTimestamp Previous averageMintTimestamp[user].
+	 * @param oldTimestamp Previous cooldownTimestamp[user].
 	 * @param newMint Amount of FUSD just minted (18 decimals).
 	 * @param userBalanceBefore FUSD balance before minting `newMint`.
 	 *
 	 * @return newTimestamp New average timestamp after including this mint.
 	 */
-	function _updateAverageMintTimestamp(
+	function _updateCooldownTimestamp(
 		uint256 oldTimestamp,
 		uint256 newMint,
 		uint256 userBalanceBefore
@@ -485,7 +485,7 @@ contract TokenLogic is
 	 * @return remainingCooldown Remaining cooldown time in seconds.
 	 */
 	function getExitRemainingCooldown(address user) external view returns (uint256 remainingCooldown) {
-		uint256 ts = averageMintTimestamp[user];
+		uint256 ts = cooldownTimestamp[user];
 		if (ts == 0 || cooldownPeriod == 0) {
 			return 0;
 		}
@@ -577,7 +577,7 @@ contract TokenLogic is
         if (from != address(0) && to != address(0)) {
 
 			if (!cooldownExemptSender[from] && !cooldownExemptRecipient[to]) {
-				uint256 ts = averageMintTimestamp[from];
+				uint256 ts = cooldownTimestamp[from];
 
 				if (ts != 0 && cooldownPeriod != 0) {
 					uint256 end = ts + cooldownPeriod;
@@ -589,6 +589,19 @@ contract TokenLogic is
 				}
 			}
         }
+
+		// Synchronize cooldown balance
+        if (from != address(0)) {
+            uint256 fromBal = cooldownPrincipal[from];
+            if (fromBal > 0) {
+                uint256 delta = amount > fromBal ? fromBal : amount;
+				uint256 remaining = fromBal  - delta;
+                cooldownPrincipal[from] = remaining;
+			    if (remaining == 0) {
+                    cooldownTimestamp[from] = 0;
+                }
+            }
+		}
 
         super._update(from, to, amount);
     }
