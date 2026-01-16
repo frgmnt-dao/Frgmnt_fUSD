@@ -147,11 +147,6 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		decimals = 18;
 	}
 
-	/// @dev Safe uint256 -> uint128 conversion used to avoid revert on collect param casting.
-	function _toUint128(uint256 x) internal pure returns (uint128) {
-		return x > type(uint128).max ? type(uint128).max : uint128(x);
-	}
-
 	/**
 	 * @notice Builds transactions to withdraw a portion of all Uniswap V3 NFT positions.
 	 * @dev For each NFT owned by the pool:
@@ -219,7 +214,11 @@ contract UniswapV3AssetGuard is ERC20Guard {
 				txCount++;
 			}
 
-			// 2) Collect fees + principals to `to`, if any
+			// NOTE:
+			// Collect requests are intentionally uncapped (uint128.max) to ensure that all owed
+            // principal and fee amounts are paid out. The actual amounts owed are determined
+            // by the pool's spot price at execution time, not by the TWAP-based estimates used
+            // for decreaseLiquidity slippage protection.
 			if (dec.amount0 != 0 || dec.amount1 != 0) {
 				transactions[txCount].to = address(nonfungiblePositionManager);
 				transactions[txCount].txData = abi.encodeWithSelector(
@@ -227,8 +226,8 @@ contract UniswapV3AssetGuard is ERC20Guard {
 					INonfungiblePositionManager.CollectParams(
 						tokenIds[i],
 						to,
-						_toUint128(dec.amount0),
-						_toUint128(dec.amount1)
+						type(uint128).max,
+                        type(uint128).max
 					)
 				);
 				txCount++;
