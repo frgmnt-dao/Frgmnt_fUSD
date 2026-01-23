@@ -125,8 +125,6 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 	/// @notice Reward per share in FUSD (scaled 1e18)
 	uint256 public rewardPerShare;
 
-	uint256 public lastTotalValue;
-
 	/// assets that users already have a claim on
     uint256 public accountedAssets;
 
@@ -489,7 +487,6 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 	// ============================================================
 
 	function unstake(uint256 shareAmount) external nonReentrant updateFeesAndRewards(msg.sender) {
-		require (msg.sender != _manager(),  "PoolLogic: not valid user");
 		if (shareAmount == 0) revert ZeroAmount();
 		if (balanceOf(msg.sender) < shareAmount) revert InsufficientShares();
 

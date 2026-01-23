@@ -38,6 +38,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	event PoolStatusSet(address indexed pool, bool value);
 	event FactoryOwnerUpdated(address indexed previousOwner, address indexed newOwner);
 	event AssetHandlerUpdated(address indexed previousAssetHandler, address indexed newAssetHandler);
+	event GovernanceUpdated(address indexed previousGovernance, address indexed newGovernance);
 	event FactoryConfigUpdated(
 		uint256 maximumSupportedAssetCount,
 		uint256 maxPerf,
@@ -267,6 +268,13 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		address previousAssetHandler = assetHandler;
 		assetHandler = _assetHandler;
 		emit AssetHandlerUpdated(previousAssetHandler, _assetHandler);
+	}
+
+	function setGovernance(address _governance) external onlyFactoryOwner {
+		require(_governance != address(0), "invalid governance");
+		address previousGovernance = governance;
+		governance = _governance;
+		emit GovernanceUpdated(previousGovernance, _governance);
 	}
 
 	// -----------------------------------------------------------------------
