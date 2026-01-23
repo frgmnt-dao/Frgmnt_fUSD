@@ -12,6 +12,13 @@ import "../interfaces/IAssetHandler.sol";
  * @dev    Returns USD prices scaled to 18 decimals.
  * @custom:project Frgmnt
  */
+// Asset types:
+// 0 = ERC20 with Chainlink direct USD price feed
+// 1 = Morpho Lending Pool Asset
+// 2 = Aave V3 Lending Pool Asset
+// 4 = Lending/borrow Enable Asset
+// 5 = Uniswap V3 NFT Position Asset
+
 contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	/// @notice Chainlink oracle freshness window in seconds (default ~25 hours).
 	uint256 public defaultChainlinkTimeout;

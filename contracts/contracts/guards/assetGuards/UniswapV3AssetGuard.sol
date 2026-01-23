@@ -20,7 +20,7 @@ import "../../utils/UniswapV3PriceLibrary.sol";
 /**
  * @title Frgmnt Uniswap V3 Asset Guard
  * @notice Values and withdraws Uniswap V3 LP NFT positions held by a pool.
- * @dev Asset type = 7
+ * @dev Asset type = 5
  *      - Aggregates USD value of all owned Uniswap V3 NFT positions (token0 + token1).
  *      - For withdrawals, proportionally decreases liquidity and collects fees/principals to the recipient.
  *      - Skips NFTs whose underlying tokens are not valid assets in the factory.
