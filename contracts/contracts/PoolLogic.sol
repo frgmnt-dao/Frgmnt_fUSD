@@ -10,6 +10,7 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 
 import { IManaged } from "./interfaces/IManaged.sol";
 import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
+import { IPoolLogic } from "./interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "./interfaces/IHasSupportedAsset.sol";
 import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
 import { IComplexAssetGuard } from "./interfaces/guards/IComplexAssetGuard.sol";
@@ -29,9 +30,10 @@ interface ITokenLogic is IERC20 {
 	function burnFrom(address account, uint256 amount) external;
 	function burn(uint256 amount) external;
 	function getExitRemainingCooldown(address user) external view returns (uint256);
+	function mintFromPool(address to, uint256 amount) external;
 }
 
-contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable,
+contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgradeable,
     IFlashLoanReceiver,
     IMorphoFlashLoanCallback,
     PoolLogicFlashloanAave,
@@ -53,10 +55,9 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		bool privatePool;
 		uint256 performanceFeeNumerator;
 		uint256 managerFeeNumerator;
-		uint256 managerFeeDenominator;
 		uint256 exitFeeNumerator;
-		uint256 exitFeeDenominator;
 		uint256 entryFeeNumerator;
+		uint256 feeDenominator;
 	}
 
 	//struct TxToExecute { 
@@ -69,12 +70,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 pending;
 	}
 
-	/// @notice Complex withdraw parameters (like IPoolLogic.ComplexAsset)
-	struct ComplexAsset {
-		address supportedAsset;
-		bytes withdrawData;
-		uint256 slippageTolerance; // in bps, e.g. 100 = 1%
-	}
 
 	enum RequestStatus {
 		None,
@@ -106,15 +101,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 actualValue;
 	}
 
-	/// @dev Compact context for pro-rata withdrawal to avoid stack-too-deep.
-	struct WithdrawProRataContext {
-		address recipient;
-		uint256 portion;
-		address[] erc20Assets;
-		uint256[] erc20BalanceBefore;
-		uint256 erc20Count;
-	}
-
+	
 	/// @dev Compact outputs for pro-rata withdrawal to avoid stack-too-deep.
 	struct WithdrawOutputs {
 		address[] assets;
@@ -137,6 +124,21 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	/// @notice Reward per share in FUSD (scaled 1e18)
 	uint256 public rewardPerShare;
+
+	uint256 public lastTotalValue;
+
+	/// assets that users already have a claim on
+    uint256 public accountedAssets;
+
+	// Total rewards ever accrued by the protocol (USD-denominated, via rewardPerShare)
+    uint256 public totalRewardAccrued;
+
+    // Total rewards harvested (claimed) by users
+    uint256 public totalRewardHarvested;
+
+	uint256 public totalManagementFee;
+
+	uint256 public totalPerformanceFee;
 
 	mapping(address => UserReward) public userRewards;
 
@@ -239,6 +241,8 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	event TransactionExecuted(address pool, address actor, uint16 transactionType, uint256 time);
 
+	event AccountedAssetsIncremented(uint256 amount);
+
 	/// @notice Pro-rata immediate cash-out results across multiple assets
 	event CashWithdrawImmediateProRata(
 		address indexed user,
@@ -309,62 +313,100 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// ============================================================
 
 	modifier updateFeesAndRewards(address user) {
-		_accrueManagementFee();
+		_accrueYield();
 		_updateUserReward(user);
 		_;
 	}
 
-	function _accrueManagementFee() internal {
-		uint256 ts = block.timestamp;
+    /**
+     * @dev Accrues protocol yield and manager fees, and updates reward accounting.
+     *
+     * This function is responsible for synchronizing the fund state with the
+     * latest total value and FUSD supply, computing performance and management
+     * fees, and distributing net yield to stakers.
+     *
+     * High-level flow:
+     * 1) Read current fund value and total SFUSD supply.
+     * 2) Compute incremental performance yield and performance fee using
+     *    FundCalculationLibrary.calculatePerformanceFee().
+     *    - Yield is computed in USD terms.
+     *    - Performance fee is converted to SFUSD.
+     * 3) Compute time-based management fee using
+     *    FundCalculationLibrary.calculateManagementFee().
+     * 4) Settle the manager's pending rewards BEFORE modifying rewardPerShare
+     *    or minting new shares, to avoid retroactive reward dilution.
+     * 5) Distribute net yield (after management fee) to existing stakers by
+     *    increasing rewardPerShare.
+     * 6) Mint performance and management fee shares to the manager.
+     * 7) Update manager reward debt and persist accounting checkpoints
+     *    (lastTotalValue, lastTotalFusd, lastFeeMintTime).
+     *
+     * IMPORTANT:
+     * - Performance yield and net yield are accounted in USD terms.
+     * - Fees are minted in SFUSD.
+     * - The ordering of operations is critical to ensure fair reward
+     *   distribution and to prevent fee minting from capturing past rewards.
+     */
 
-		// If no supply, nothing to mint, but still move the clock forward
-		uint256 supply = totalSupply();
-		if (supply == 0) {
-			lastFeeMintTime = ts;
-			return;
-		}
+    function _accrueYield() internal {
 
-		uint256 fundValue = _totalValue();
-		if (fundValue == 0) {
-			lastFeeMintTime = ts;
-			return;
-		}
+        uint256 totalValue = _totalValue();
+		uint256 _totalFusd = IERC20(fusd).totalSupply();
 
-		(
-			uint256 performanceFeeNumerator,
-			uint256 managementFeeNumerator,
-			,
-			,
-			uint256 feeDenominator
-		) = _managerFees();
+        (
+            uint256 _performanceFeeNumerator,
+            uint256 _managementFeeNumerator,
+            ,
+            ,
+            uint256 _feeDenominator) = _managerFees();
+       
+	       (
+            uint256 _performanceFee,
+            uint256 _netYield) = FundCalculationLibrary.calculatePerformanceFee(
+            totalValue,
+            accountedAssets,
+            _performanceFeeNumerator,
+            _feeDenominator);
 
-		(uint256 performanceFee, uint256 streamingFee) = FundCalculationLibrary.availableManagerFee(
-			fundValue,
-			supply,
-			performanceFeeNumerator,
-			managementFeeNumerator,
-			feeDenominator,
-			tokenPriceAtLastFeeMint,
-			lastFeeMintTime
-		);
+        (
+            uint256 _managementFee,
+            uint256 _lastFeeMintTime) = FundCalculationLibrary.calculateManagementFee(
+            _totalFusd,
+            lastFeeMintTime,
+            _managementFeeNumerator,
+            _feeDenominator
+        );
 
-		uint256 feeShares = performanceFee + streamingFee;
+        address mgr = _manager();
 
-		if (feeShares > 0) {
-			address mgr = _manager();
-			_updateUserReward(mgr);
+        // 0) Settle manager pending rewards BEFORE changing rewardPerShare or balance
+        _updateUserReward(mgr);
 
-			_mint(mgr, feeShares);
-			emit ManagementFeesAccrued(feeShares, ts);
-
-			UserReward storage ur = userRewards[mgr];
-			ur.rewardDebt = (balanceOf(mgr) * rewardPerShare) / 1e18;
-
-			tokenPriceAtLastFeeMint = (fundValue * 1e18) / supply;
-		}
-
-		lastFeeMintTime = ts;
-	}
+        // 1) distribute net yield to stakers
+        uint256 _supply = totalSupply();
+		if ( _managementFee > _netYield) {
+            _managementFee = _netYield;
+        }
+		_netYield = _netYield - _managementFee;
+		totalRewardAccrued += _netYield;
+	    totalManagementFee += totalManagementFee;
+		totalPerformanceFee += totalPerformanceFee;
+		accountedAssets = totalValue;
+        if (_supply > 0 && _netYield > 0) {
+            rewardPerShare += (_netYield * 1e18) / _supply;
+        }
+		
+		// 2) mint performance and management fee shares to manager
+		uint256 _fee = _performanceFee + _managementFee;
+        if (_fee > 0) {
+            ITokenLogic(fusd).mintFromPool(mgr, _fee);
+        }
+        // 4) Update manager rewardDebt after minting shares
+        UserReward storage ur = userRewards[mgr];
+        ur.rewardDebt = (balanceOf(mgr) * rewardPerShare) / 1e18;
+        // 5) update state
+        lastFeeMintTime = _lastFeeMintTime;
+    }
 
 	function _updateUserReward(address user) internal {
 		if (user == address(0)) return;
@@ -377,13 +419,13 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 			ur.pending += (accumulated - ur.rewardDebt);
 		}
 
-		ur.rewardDebt = (balance * rewardPerShare) / 1e18;
+		ur.rewardDebt = accumulated;
 	}
 
-	/// @notice Called by PoolManagerLogic.commitFeeIncrease()
+		/// @notice Called by PoolManagerLogic.commitFeeIncrease()
 	function mintManagerFee() external nonReentrant {
 		if (msg.sender != poolManagerLogic) revert OnlyManagerLogic();
-		_accrueManagementFee();
+		_accrueYield() ;
 	}
 
 	// ============================================================
@@ -392,7 +434,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	function stake(uint256 amountFusd) external nonReentrant updateFeesAndRewards(msg.sender) {
 		// Backward-compatible wrapper: no minimum output enforced by the user
-		// NOTE: must not call another nonReentrant function (would revert).
 		_stake(amountFusd, 0);
 	}
 
@@ -403,7 +444,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	function _stake(uint256 amountFusd, uint256 minShares) internal {
 
-		if (!( msg.sender == _manager() || !  IPoolManagerLogic(poolManagerLogic).privatePool() 
+		if (!( msg.sender == _manager() || ! IPoolManagerLogic(poolManagerLogic).privatePool() 
 		    ||  IPoolManagerLogic(poolManagerLogic).isMemberAllowed(msg.sender))) 
 		    revert OnlyMemberAllowed();
 		
@@ -448,6 +489,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	// ============================================================
 
 	function unstake(uint256 shareAmount) external nonReentrant updateFeesAndRewards(msg.sender) {
+		require (msg.sender != _manager(),  "PoolLogic: not valid user");
 		if (shareAmount == 0) revert ZeroAmount();
 		if (balanceOf(msg.sender) < shareAmount) revert InsufficientShares();
 
@@ -461,58 +503,16 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		emit Unstake(msg.sender, shareAmount, shareAmount);
 	}
 
-	// ============================================================
-	// =                       REWARD LOGIC                        =
-	// ============================================================
-
-	function distributeReward(
-		uint256 amountFusd
-	)
-		external
-		nonReentrant
-		updateFeesAndRewards(address(0)) // global update
-	{
-		if (msg.sender != _manager()) revert OnlyManager();
-		if (amountFusd == 0) revert ZeroAmount();
-
-		uint256 supply = totalSupply();
-		if (supply == 0) revert NoStakers();
-
-		// Pull FUSD from manager
-		IERC20(fusd).safeTransferFrom(msg.sender, address(this), amountFusd);
-
-		(uint256 performanceFeeNumerator, , , , uint256 feeDenominator) = _managerFees();
-
-		uint256 perfFee = 0;
-		if (performanceFeeNumerator > 0) {
-			perfFee = (amountFusd * performanceFeeNumerator) / feeDenominator;
-			if (perfFee > amountFusd) {
-				perfFee = amountFusd;
-			}
-		}
-
-		uint256 toStakers = amountFusd - perfFee;
-
-		if (perfFee > 0) {
-			IERC20(fusd).safeTransfer(_manager(), perfFee);
-		}
-
-		rewardPerShare += (toStakers * 1e18) / supply;
-
-		emit RewardDistributed(msg.sender, amountFusd, toStakers, perfFee);
-	}
 
 	function harvest() external nonReentrant updateFeesAndRewards(msg.sender) {
 		UserReward storage ur = userRewards[msg.sender];
 		uint256 amount = ur.pending;
 		if (amount == 0) revert NothingToHarvest();
-
 		ur.pending = 0;
-		IERC20(fusd).safeTransfer(msg.sender, amount);
-
+		totalRewardHarvested += amount;
+		ITokenLogic(fusd).mintFromPool(msg.sender, amount);
 		emit Harvest(msg.sender, amount);
 	}
-
 
 	function _applyWithdrawFeeFusd(uint256 fusdAmount) internal view returns (uint256 netFusd, uint256 feeFusd) {
 		(, , , uint256 exitFeeNumerator, uint256 feeDenominator) = _managerFees();
@@ -565,50 +565,56 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	function withdrawCashImmediateTo(
 		address recipient,
-		uint256 fusdAmount
+		uint256 amount
 	) external nonReentrant updateFeesAndRewards(msg.sender) {
 		if (recipient == address(0)) revert InvalidRecipient();
 
 		IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
 		ComplexAsset[] memory complexAssetsData = new ComplexAsset[](supportedAssets.length);
 
-		_withdrawCashImmediateToSafe(recipient, fusdAmount, complexAssetsData);
+		_withdrawCashImmediateToSafe(recipient, amount, complexAssetsData);
 	}
 
 	function withdrawCashImmediateSafe(
-		uint256 fusdAmount,
+		uint256 amount,
 		ComplexAsset[] calldata complexAssetsData
 	) external nonReentrant updateFeesAndRewards(msg.sender) {
-		_withdrawCashImmediateToSafe(msg.sender, fusdAmount, complexAssetsData);
+		_withdrawCashImmediateToSafe(msg.sender, amount, complexAssetsData);
 	}
 
 	function withdrawCashImmediateToSafe(
 		address recipient,
-		uint256 fusdAmount,
+		uint256 amount,
 		ComplexAsset[] calldata complexAssetsData
 	) external nonReentrant updateFeesAndRewards(msg.sender) {
 		if (recipient == address(0)) revert InvalidRecipient();
-		_withdrawCashImmediateToSafe(recipient, fusdAmount, complexAssetsData);
+		_withdrawCashImmediateToSafe(recipient, amount, complexAssetsData);
 	}
 
 	function _withdrawCashImmediateToSafe(
 		address recipient,
-		uint256 fusdAmount,
+		uint256 amount,
 		ComplexAsset[] memory complexAssetsData
 	) internal {
 		if (!isImmediateWithdrawEnabled) revert ImmediateWithdrawalDisabled();
-		if (fusdAmount == 0) revert ZeroAmount();
-		// cooldown enforced only on CASH withdraw (not unstake)
-		if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0) revert CooldownActive();
+		if (amount == 0) revert ZeroAmount();
+		uint256 netFusd;
+		uint256 feeFusd;
+        if(msg.sender == _manager()) {
+			netFusd = amount;
+			
+		} else {
+            // cooldown enforced only on CASH withdraw (not unstake)
+		    if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0) revert CooldownActive();
 
-		(uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
-		if (netFusd == 0) revert ZeroAmount();
+		    (netFusd, feeFusd) = _applyWithdrawFeeFusd(amount);
+		    if (netFusd == 0) revert ZeroAmount();
 
-		if (feeFusd > 0) {
-			IERC20(fusd).safeTransferFrom(msg.sender, _manager(), feeFusd);
+		    if (feeFusd > 0) {
+			    IERC20(fusd).safeTransferFrom(msg.sender, _manager(), feeFusd);
+		    }
 		}
-
-		// burn FUSD from user
+		// burn FUSD 
 		ITokenLogic(fusd).burnFrom(msg.sender, netFusd);
 
 		(address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore) = _withdrawProRata(
@@ -620,10 +626,12 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		uint256 valueAfter = _withdrawableFundValue();
 		if (valueBefore < valueAfter) revert InvalidFundValue();
         if (valueBefore - valueAfter > netFusd + 1e15) revert InvalidFundValue();
+		if (accountedAssets < valueBefore - valueAfter) revert InvalidFundValue();
+		accountedAssets -= valueBefore - valueAfter;
 
 		// Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
-		emit CashWithdrawImmediate(msg.sender, fusdAmount, netFusd, feeFusd);
-		emit CashWithdrawImmediateProRata(msg.sender, fusdAmount, netFusd, feeFusd, outAssets, outAmounts);
+		emit CashWithdrawImmediate(msg.sender, amount, netFusd, feeFusd);
+		emit CashWithdrawImmediateProRata(msg.sender, amount, netFusd, feeFusd, outAssets, outAmounts);
 	}
 
 	/// @dev Helper to reduce stack usage in withdrawCashImmediate (compile fix: avoids "stack too deep")
@@ -649,48 +657,9 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		out.assets = new address[](supportedAssets.length);
 		out.amounts = new uint256[](supportedAssets.length);
 		out.count = 0;
-
-		// Invariant-style check: total value removed should not exceed netFusd (plus rounding tolerance)
 		valueBefore = fundValue;
 
-		// --------------------------------------------------------------------
-		// Important accounting note:
-		// Some non-ERC20 / complex assets may "realize" underlying ERC20s back to this contract
-		// as part of their guard transactions (e.g. a "collect" that transfers tokens to PoolLogic).
-		//
-		// Those realized underlying tokens have already been scaled by `portion` at the complex-asset level.
-		// When we later iterate ERC20 assets, we must avoid scaling these newly received tokens by `portion` again.
-		//
-		// To achieve this with minimal changes:
-		//   - Snapshot ERC20 balances of supported assets BEFORE any processing.
-		//   - When processing an ERC20, transfer:
-		//         (preBalance * portion) + (currentBalance - preBalance)
-		//     where (currentBalance - preBalance) is the amount realized during this withdraw.
-		// --------------------------------------------------------------------
-		WithdrawProRataContext memory ctx;
-		ctx.recipient = recipient;
-		ctx.portion = portion;
-		ctx.erc20Assets = new address[](supportedAssets.length);
-		ctx.erc20BalanceBefore = new uint256[](supportedAssets.length);
-		ctx.erc20Count = 0;
-
-		for (uint256 i = 0; i < supportedAssets.length; ++i) {
-			address a0 = supportedAssets[i].asset;
-
-			(bool ok, uint256 bal0) = FundCalculationLibrary.tryBalanceOf(a0, address(this));
-			if (ok) {
-				// snapshot only the available (unreserved) balance for ERC20 assets
-				uint256 reserved0 = reservedAssetBalance[a0];
-				if (bal0 < reserved0) revert InvalidReservedBalance();
-
-
-				ctx.erc20Assets[ctx.erc20Count] = a0;
-				ctx.erc20BalanceBefore[ctx.erc20Count] = bal0 - reserved0;
-				ctx.erc20Count++;
-			}
-		}
-
-		_withdrawProRataInternal(ctx, supportedAssets, complexAssetsData, out);
+		_withdrawProRataInternal(portion, recipient, supportedAssets, complexAssetsData, out);
 
 		outAssets = out.assets;
 		outAmounts = out.amounts;
@@ -703,7 +672,8 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	function _withdrawProRataInternal(
-		WithdrawProRataContext memory ctx,
+		uint256 portion, 
+		address recipient,
 		IHasSupportedAsset.Asset[] memory supportedAssets,
 		ComplexAsset[] memory complexAssetsData,
 		WithdrawOutputs memory out
@@ -716,7 +686,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 				if (a != cd.supportedAsset) revert InvalidAssetData();
 			}
 
-			(address withdrawAsset, uint256 withdrawAmount) = _withdrawOne(ctx, a, cd);
+			(address withdrawAsset, uint256 withdrawAmount) = _withdrawOne(portion, recipient, a, cd);
 
 			if (withdrawAsset != address(0) && withdrawAmount > 0) {
 				out.assets[out.count] = withdrawAsset;
@@ -727,79 +697,21 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	}
 
 	function _withdrawOne(
-		WithdrawProRataContext memory ctx,
+		uint256 portion, 
+		address recipient,
 		address asset,
 		ComplexAsset memory cd
 	) internal returns (address withdrawAsset, uint256 withdrawAmount) {
-		(address wa, uint256 wamt, ) = _withdrawProcessing(asset, address(this), ctx.portion, cd);
+		(address wa, uint256 wamt, ) = _withdrawProcessing(asset, recipient, portion, cd);
 		withdrawAsset = wa;
 		withdrawAmount = wamt;
 
 		if (withdrawAsset == address(0) || withdrawAmount == 0) {
-			return (address(0), 0);
+			    return (address(0), 0);
+		} else {
+                IERC20(withdrawAsset).safeTransfer(recipient, withdrawAmount);
+                return (withdrawAsset, withdrawAmount);
 		}
-
-		withdrawAmount = _adjustErc20WithdrawAmount(
-			withdrawAsset,
-			ctx.portion,
-			ctx.erc20Assets,
-			ctx.erc20BalanceBefore,
-			ctx.erc20Count,
-			withdrawAmount
-		);
-
-		IERC20(withdrawAsset).safeTransfer(ctx.recipient, withdrawAmount);
-
-		return (withdrawAsset, withdrawAmount);
-	}
-
-	/// @dev Adjust ERC20 withdraw amount to avoid scaling newly realized tokens by `portion` again.
-	///      Works on in-memory snapshots and updates the baseline defensively.
-	function _adjustErc20WithdrawAmount(
-		address withdrawAsset,
-		uint256 portion,
-		address[] memory erc20Assets,
-		uint256[] memory erc20BalanceBefore,
-		uint256 erc20Count,
-		uint256 originalWithdrawAmount
-	) internal view returns (uint256 withdrawAmount) {
-		uint256 idx = 0;
-		bool found = false;
-
-		for (uint256 i = 0; i < erc20Count; ++i) {
-			if (erc20Assets[i] == withdrawAsset) {
-				idx = i;
-				found = true;
-				break;
-			}
-		}
-
-		if (!found) {
-			return originalWithdrawAmount;
-		}
-
-		// all computations are on *available* balances (excluding reserved)
-		uint256 beforeAvail = erc20BalanceBefore[idx];
-
-		uint256 currentBal = IERC20(withdrawAsset).balanceOf(address(this));
-		uint256 reserved = reservedAssetBalance[withdrawAsset];
-		if (currentBal < reserved) revert InvalidReservedBalance();
-
-		uint256 currentAvail = currentBal - reserved;
-		if (currentAvail < beforeAvail) revert InvalidReservedBalance();
-
-		uint256 deltaAvail = currentAvail - beforeAvail;
-		uint256 basePortion = (beforeAvail * portion) / 1e18;
-
-		uint256 adjusted = basePortion + deltaAvail;
-		if (adjusted > currentAvail) {
-			adjusted = currentAvail;
-		}
-
-		// Update baseline defensively (in case the same ERC20 is encountered again)
-		erc20BalanceBefore[idx] = currentAvail - adjusted;
-
-		return adjusted;
 	}
 
 	// ============================================================
@@ -810,33 +722,37 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 	/**
     * @notice Queued withdraw:
     *  - FUSD is held in the contract; fees are applied
-    *  - Later, the manager finalizes and converts the equivalent value of `fusdAmount` into `asset`
+    *  - Later, the manager finalizes and converts the equivalent value of `amount` into `asset`
     *  - `asset` must be a deposited token; i.e., a simple withdrawable ERC20
     */
 	function requestCashWithdraw(
-		uint256 fusdAmount,
+		uint256 amount,
 		address asset
 	) external nonReentrant updateFeesAndRewards(msg.sender) returns (uint256 requestId) {
 
 		if (isImmediateWithdrawEnabled) revert QueuedWithdrawalDisabled();
-		if (fusdAmount== 0) revert ZeroAmount();
+		if (amount== 0) revert ZeroAmount();
 		if (!IPoolManagerLogic(poolManagerLogic).isDepositAsset(asset)) {
 	        revert NotValidWithdrawableAsset();
         }
-
-		if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0) {
+        uint256 netFusd;
+		uint256 feeFusd;
+		if(msg.sender == _manager()) {
+			netFusd = amount;
+			
+		} else {
+			
+			if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0) 
 	        revert CooldownActive();
-        }
-
-		(uint256 netFusd, uint256 feeFusd) = _applyWithdrawFeeFusd(fusdAmount);
-		if (netFusd == 0) revert ZeroAmount();
-		// prevent creating requests that can never be finalized due to rounding to zero.
-		if (FundCalculationLibrary.fusdToAssetAmount(poolManagerLogic, netFusd, asset) == 0) revert ZeroAmount();
-
+			(netFusd, feeFusd) = _applyWithdrawFeeFusd(amount);
+		    if (netFusd == 0) revert ZeroAmount();
+		    // prevent creating requests that can never be finalized due to rounding to zero.
+		    if (FundCalculationLibrary.fusdToAssetAmount(poolManagerLogic, netFusd, asset) == 0) revert ZeroAmount();
+		}
 		requestId = ++lastRequestId;
 		cashWithdrawRequests[requestId] = CashWithdrawRequest({
 			user: msg.sender,
-			fusdAmountTotal: fusdAmount,
+			fusdAmountTotal: amount,
 			fusdNetForAsset: netFusd,
 			asset: asset,
 			requestedAt: block.timestamp,
@@ -847,9 +763,9 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		userRequests[msg.sender].push(requestId);
 
 		// lock FUSD in this contract
-		IERC20(fusd).safeTransferFrom(msg.sender, address(this), fusdAmount);
+		IERC20(fusd).safeTransferFrom(msg.sender, address(this), amount);
 
-		emit CashWithdrawRequested(requestId, msg.sender, fusdAmount, netFusd, feeFusd, asset);
+		emit CashWithdrawRequested(requestId, msg.sender, amount, netFusd, feeFusd, asset);
 	}
 
 	function finalizeCashWithdraw(uint256 requestId) external nonReentrant {
@@ -866,9 +782,6 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		if (feeFusd > 0) {
 			IERC20(fusd).safeTransfer(_manager(), feeFusd);
 		}
-
-		// burn the FUSD locked in contract
-		ITokenLogic(fusd).burn(r.fusdNetForAsset);
 
 		// convert netFusd to assetAmount using price
 		uint256 assetAmount = FundCalculationLibrary.fusdToAssetAmount(poolManagerLogic, r.fusdNetForAsset, r.asset);
@@ -912,7 +825,13 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		r.status = RequestStatus.Claimed;
 		r.assetAmount = 0;
 
+		// burn the FUSD locked in contract
+		ITokenLogic(fusd).burn(r.fusdNetForAsset);
+
 		IERC20(r.asset).safeTransfer(msg.sender, amount);
+
+		if (accountedAssets < r.fusdNetForAsset) revert InvalidFundValue();
+		accountedAssets -= r.fusdNetForAsset;
 
 		emit CashWithdrawClaimed(requestId, msg.sender, r.asset, amount);
 	}
@@ -937,24 +856,14 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		if (v.guard == address(0)) revert InvalidGuard();
 
 		v.balance = IAssetGuard(v.guard).getBalance(address(this), asset);
-
-		// exclude amounts reserved for finalized queued withdrawals (ERC20 only)
-		(bool ok, uint256 bal0) = FundCalculationLibrary.tryBalanceOf(asset, address(this));
-		if (ok) {
-			uint256 reserved = reservedAssetBalance[asset];
-			if (bal0 < reserved) revert InvalidReservedBalance();
-
-			uint256 available = bal0 - reserved;
-			if (v.balance > available) {
-				v.balance = available;
-			}
+		uint256 reserved = reservedAssetBalance[asset];
+		if (reserved > 0 ) {
+			if (v.balance < reserved) revert InvalidReservedBalance();
+			v.balance -= reserved;
 		}
 
 		v.portionBalance = (v.balance * portion) / 1e18;
-		
-
 		v.expectedValue = IPoolManagerLogic(poolManagerLogic).assetValue(asset, v.portionBalance);
-
 		v.regularProcessing = true;
 
 		if (complexData.withdrawData.length > 0) {
@@ -1014,6 +923,30 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		return (withdrawAsset, withdrawAmount, externalProcessed);
 	}
 
+
+	/**
+    * @notice Increase the accounted assets of the vault.
+    * @dev This function is intended to be called only by TokenLogic.
+    *      
+    *
+    * @param amount The amount of assets in USD to add to the accountedAssets.
+    *
+	*/              
+    
+	function incrementAccountedAssets(uint256 amount) external {
+        // Only the TokenLogic contract can adjust accountedAssets.
+        require(msg.sender == fusd, "PoolLogic: only tokenLogic");
+
+        // Prevent accidental zero-value updates.
+        require(amount > 0, "PoolLogic: zero amount");
+
+        // Increase the accounting baseline by the specified amount.
+        accountedAssets += amount;
+
+        // Emit event for off-chain tracking and auditing.
+        emit AccountedAssetsIncremented(amount);
+    }
+
 	// ============================================================
 	// =           GUARDED TX EXECUTION (LIKE dHEDGE)              =
 	// ============================================================
@@ -1069,49 +1002,41 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 
 	/// @notice Get available manager fee of the pool
 	/// @dev Can be used on the frontend by passing in fund value
-	/// @param _fundValue The total fund value of the pool
-	/// @return fee available manager fee of the pool (in pool tokens)
-	function calculateAvailableManagerFee(uint256 _fundValue) public view returns (uint256 fee) {
-		(
-			uint256 performanceFeeNumerator,
-			uint256 managementFeeNumerator,
-			,
-			,
-			uint256 feeDenominator
-		) = _managerFees();
-
-		(uint256 performanceFee, uint256 streamingFee) = FundCalculationLibrary.availableManagerFee(
-			_fundValue,
-			totalSupply(),
-			performanceFeeNumerator,
-			managementFeeNumerator,
-			feeDenominator,
-			tokenPriceAtLastFeeMint,
-			lastFeeMintTime
-		);
-
-		return performanceFee + streamingFee;
-	}
-
 	
-	// ============================================================
-	// =                TOKEN PRICE / FUND SUMMARY                 =
-	// ============================================================
+	/// @return fee available manager fee of the pool (in pool tokens)
+	function calculateAvailableManagerFee() public view returns (uint256 fee) {
 
-	/// @notice Get price of the pool token adjusted for any unminted manager fees
-	/// @return price A price of the pool
-	function tokenPrice() external view returns (uint256 price) {
-		uint256 fundValue = _totalValue();
-		uint256 tokenSupply = totalSupply() + calculateAvailableManagerFee(fundValue);
-		price = FundCalculationLibrary.tokenPrice(fundValue, tokenSupply);
+        uint256 totalValue = _totalValue();
+		uint256 _totalFusd = IERC20(fusd).totalSupply();
+
+        (
+            uint256 _performanceFeeNumerator,
+            uint256 _managementFeeNumerator,
+            ,
+            ,
+            uint256 _feeDenominator) = _managerFees();
+       
+	    (
+            uint256 _performanceFee,
+           
+            ) = FundCalculationLibrary.calculatePerformanceFee(
+            totalValue,
+            accountedAssets,
+            _performanceFeeNumerator,
+            _feeDenominator);
+
+        (
+            uint256 _managementFee,
+            ) = FundCalculationLibrary.calculateManagementFee(
+            _totalFusd,
+            lastFeeMintTime,
+            _managementFeeNumerator,
+            _feeDenominator
+        );
+
+		return _performanceFee + _managementFee;
 	}
 
-	/// @notice Get price of the pool token ignoring unminted manager fees
-	function tokenPriceWithoutManagerFee() external view returns (uint256 price) {
-		uint256 fundValue = _totalValue();
-		uint256 supply = totalSupply();
-		price = FundCalculationLibrary.tokenPrice(fundValue, supply);
-	}
 
 	function getFundSummary() external view returns (FundSummary memory) {
 		(
@@ -1125,7 +1050,7 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 		return
 			FundSummary({
 				name: name(),
-				totalSupply: totalSupply(),
+				totalSupply:  IERC20(fusd).totalSupply(),
 				totalFundValue: _totalValue(),
 				manager: _manager(),
 				managerName: IManaged(poolManagerLogic).managerName(),
@@ -1133,10 +1058,9 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
 				privatePool: IPoolManagerLogic(poolManagerLogic).privatePool(),
 				performanceFeeNumerator: performanceFeeNumerator,
 				managerFeeNumerator: managerFeeNumerator,
-				managerFeeDenominator: denominator,
 				exitFeeNumerator: exitFeeNumerator,
-				exitFeeDenominator: denominator,
-				entryFeeNumerator: entryFeeNumerator
+				entryFeeNumerator: entryFeeNumerator,
+				feeDenominator: denominator
 			});
 	}
 
@@ -1278,22 +1202,11 @@ contract PoolLogic is ERC20Upgradeable, OwnableUpgradeable, ReentrancyGuardUpgra
             // Gross balance as defined by the AssetGuard
 		    uint256 withdrawableBalance =
 			    IAssetGuard(guard).getBalance(address(this), asset);
-            // Check if the asset exposes an ERC20 balanceOf(pool)
-		    (bool isErc20, uint256 onchainBal) =
-			   FundCalculationLibrary.tryBalanceOf(asset, address(this));
-		    if (isErc20) {
-			    uint256 reserved = reservedAssetBalance[asset];
-		// Defensive: reserved should never exceed on-chain balance
-			    if (onchainBal <= reserved) {
-				    withdrawableBalance = 0;
-			    } else {
-				    uint256 available = onchainBal - reserved;
-				    // Cap guard balance to transferable amount
-				    if (withdrawableBalance > available) {
-					    withdrawableBalance = available;
-				    }
-			    }
-		    }
+			uint256 reserved = reservedAssetBalance[asset];
+		    if (reserved > 0) {
+				if (withdrawableBalance < reserved) revert InvalidReservedBalance();
+                withdrawableBalance -= reserved ;
+			}
 
 	        value += IPoolManagerLogic(poolManagerLogic)
 			.assetValue(asset, withdrawableBalance);

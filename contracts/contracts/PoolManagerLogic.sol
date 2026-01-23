@@ -6,6 +6,7 @@ import { ERC721Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC
 
 import { IPoolLogic } from "./interfaces/IPoolLogic.sol";
 import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
+import { IGovernance } from "./interfaces/IGovernance.sol";
 import { IHasSupportedAsset } from "./interfaces/IHasSupportedAsset.sol";
 import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
 import { IAddAssetCheckGuard } from "./interfaces/guards/IAddAssetCheckGuard.sol";
@@ -34,10 +35,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	event ManagerFeeIncreaseRenounced();
 	event PoolLogicSet(address poolLogic, address from);
 	event MinDepositUpdated(uint256 minDepositUSD);
-
-	// FRG-24: Events for access-control / governance state changes
-	event ContractGuardSet(address indexed contractAddress, address indexed guard);
-	event AssetGuardSet(address indexed asset, address indexed guard);
 	event PoolStatusSet(address indexed pool, bool value);
 	event FactoryOwnerUpdated(address indexed previousOwner, address indexed newOwner);
 	event AssetHandlerUpdated(address indexed previousAssetHandler, address indexed newAssetHandler);
@@ -85,13 +82,10 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 	// Governance
 	address public factoryOwner;
+	address public governance;
 
 	// Asset info
 	uint256 private _maximumSupportedAssetCount;
-
-	// Guards (Option 3)
-	mapping(address => address) private _assetGuard;
-	mapping(address => address) private _contractGuard;
 
 	// Fee caps
 	uint256 private _maximumPerformanceFeeNumerator;
@@ -110,6 +104,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 	error InvalidFactory();
 	error InvalidPoolLogic();
+	error InvalidGovernance();
 	error CannotAddPoolAsset();
 	error InvalidAsset();
 	error AssetNotSupported();
@@ -125,15 +120,18 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		string calldata _managerName,
 		address _poolLogic,
 		address _assetHandler,
+		address _governance,
 		uint256 _performanceFeeNumerator,
 		uint256 _managerFeeNumerator
 	) external initializer {
 		if (_factoryOwner == address(0)) revert InvalidFactory();
 		if (_manager == address(0)) revert InvalidManager();
 		if (_poolLogic == address(0)) revert InvalidPoolLogic();
+		if (_governance == address(0)) revert InvalidGovernance();
 		_initialize(_manager, _managerName);
 		factoryOwner = _factoryOwner;
 		poolLogic = _poolLogic;
+		governance = _governance;
 		require(_assetHandler != address(0), "invalid assetHandler");
 		assetHandler = _assetHandler;
 		_setFactoryConfig(50, 5000, 300, 100, 100, 10000, 0, 3 days); // Default factory config
@@ -162,25 +160,20 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	/// @notice Return type of the asset
 	/// @param _asset The address of the asset
 	/// @return assetType The type of the asset
-	function getAssetType(address _asset) external view override returns (uint16 assetType) {
+	function getAssetType(address _asset) public view override returns (uint16 assetType) {
 		assetType = IAssetHandler(assetHandler).assetTypes(_asset);
 	}
 
-	function getAssetGuard(address _asset) external view returns (address) {
-		return _assetGuard[_asset];
+	function getAssetGuard(address _asset) public view returns (address) {
+		uint16 _assetType = getAssetType(_asset);
+		return IGovernance(governance).assetGuards(_assetType);
 	}
 
-	// NEW FOR OPTION 3
-	function getContractGuard(address _contract) external view returns (address) {
-		return _contractGuard[_contract];
+	function getContractGuard(address _contract) public view returns (address) {
+		return IGovernance(governance).contractGuards(_contract);
 	}
 
-	function setContractGuard(address _contract, address _guard) external onlyFactoryOwner {
-		require(_contract != address(0), "Frgmnt: invalid contract");
-		require(_guard != address(0), "Frgmnt: invalid _guard");
-		_contractGuard[_contract] = _guard;
-		emit ContractGuardSet(_contract, _guard);
-	}
+	
 
 	function getMaximumFee() public view returns (uint256, uint256, uint256, uint256, uint256) {
 		return (
@@ -255,12 +248,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		_managerFeeDenominator = feeDenominator_;
 		_maximumPerformanceFeeNumeratorChange = maxPerfChange_;
 		_performanceFeeNumeratorChangeDelay = perfChangeDelay_;
-	}
-
-	function setAssetGuard(address _asset, address _guard) external onlyFactoryOwner {
-		require(_guard != address(0), "Frgmnt: invalid _guard");
-		_assetGuard[_asset] = _guard;
-		emit AssetGuardSet(_asset, _guard);
 	}
 
 	function setIsPool(address _pool, bool value) external onlyFactoryOwner {
@@ -341,7 +328,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
 		if (_isPool[asset]) revert CannotAddPoolAsset();
 
-		address guard = _assetGuard[asset];
+		address guard = getAssetGuard(asset);
 		if (guard != address(0)) {
 			(bool hasFn, bytes memory data) = guard.staticcall(abi.encodeWithSignature("isAddAssetCheckGuard()"));
 			if (hasFn && abi.decode(data, (bool))) {
@@ -378,7 +365,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	function _removeAsset(address _asset) internal {
 		if (!isSupportedAsset(_asset)) revert AssetNotSupported();
 
-		address guard = _assetGuard[_asset];
+		address guard = getAssetGuard(_asset);
 		if (guard != address(0)) {
 			// Don't rely on on-chain wallet balance as a safe-removal condition.
             // Let the guard decide using protocol-aware checks (including external positions).
@@ -443,13 +430,13 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	// -----------------------------------------------------------------------
 
 	function assetBalance(address _asset) public view override returns (uint256) {
-		address guard = _assetGuard[_asset];
+		address guard = getAssetGuard(_asset);
 		if (guard == address(0)) return 0;
 		return IAssetGuard(guard).getBalance(poolLogic, _asset);
 	}
 
 	function assetDecimal(address _asset) public view returns (uint256) {
-		address guard = _assetGuard[_asset];
+		address guard = getAssetGuard(_asset);
 		require(guard != address(0), "no guard");
 		return IAssetGuard(guard).getDecimals(_asset);
 	}

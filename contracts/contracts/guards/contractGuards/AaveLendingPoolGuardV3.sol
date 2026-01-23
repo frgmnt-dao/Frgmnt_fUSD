@@ -250,7 +250,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
 
 		// Must be a recognized “lending-enabled” asset (V2/V3 use 4 or 14)
 		uint16 assetType = IHasAssetInfo(factory).getAssetType(depositAsset);
-		require(assetType == 4 || assetType == 14, "Frgmnt: not lending-enabled");
+		require(assetType == 4, "Frgmnt: not lending-enabled");
 
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 		require(mgr.isSupportedAsset(depositAsset), "Frgmnt: unsupported deposit asset");
@@ -301,7 +301,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
 
 		// Must be borrow-enabled
 		uint16 assetType = IHasAssetInfo(factory).getAssetType(asset);
-		require(assetType == 4 || assetType == 14, "Frgmnt: not borrow-enabled");
+		require(assetType == 4, "Frgmnt: not borrow-enabled");
 
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 		require(mgr.isSupportedAsset(asset), "Frgmnt: unsupported asset");
@@ -332,7 +332,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
 		require(interestRateMode == 2, "Frgmnt: only variable rate");
 
 		uint16 assetType = IHasAssetInfo(factory).getAssetType(borrowAsset);
-		require(assetType == 4 || assetType == 14, "Frgmnt: not borrow-enabled");
+		require(assetType == 4, "Frgmnt: not borrow-enabled");
 
 		IHasSupportedAsset mgr = IHasSupportedAsset(poolManagerLogic);
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
@@ -388,7 +388,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
 		require(mgr.isSupportedAsset(repayAsset), "Frgmnt: unsupported repay asset");
 
 		uint16 assetType = IHasAssetInfo(factory).getAssetType(repayAsset);
-		require(assetType == 4 || assetType == 14, "Frgmnt: not borrow-enabled");
+		require(assetType == 4, "Frgmnt: not borrow-enabled");
 		require(onBehalfOf == poolLogic, "Frgmnt: recipient not pool");
 
 		emit Repay(poolLogic, repayAsset, to, amount, block.timestamp);
@@ -418,7 +418,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
 		require(mgr.isSupportedAsset(repayAsset), "Frgmnt: unsupported repay asset");
 
 		uint16 assetType = IHasAssetInfo(factory).getAssetType(repayAsset);
-		require(assetType == 4 || assetType == 14, "Frgmnt: not borrow-enabled");
+		require(assetType == 4, "Frgmnt: not borrow-enabled");
 
 		emit Repay(poolLogic, repayAsset, to, amount, block.timestamp);
 		txType = uint16(TransactionType.AaveRepay);
