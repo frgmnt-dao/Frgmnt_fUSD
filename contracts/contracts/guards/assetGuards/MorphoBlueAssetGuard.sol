@@ -493,7 +493,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     address pool,
     FlashloanParams memory fp
   ) internal view returns (MultiTransaction[] memory txs) {
-    txs = new MultiTransaction[](fp.debts.length);
+    txs =  new MultiTransaction[](fp.debts.length * 3);
     uint256 n;
 
     for (uint256 i; i < fp.debts.length; i++) {
@@ -510,8 +510,22 @@ contract MorphoBlueLendingPoolAssetGuard is
           fp.slippageBps
         );
 
-      txs[n].to = swapRouter;
-      txs[n++].txData = abi.encodeWithSelector(
+      if (requiresApproveReset[fp.settlementToken]) {
+        txs[n] = MultiTransaction({
+        to: fp.settlementToken,
+        txData: abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, 0)});
+        n++;
+      }
+
+
+      txs[n] = MultiTransaction({
+      to: fp.settlementToken,
+      txData: abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, type(uint256).max)});
+      n++;
+
+      txs[n] = MultiTransaction({
+      to: swapRouter,
+      txData: abi.encodeWithSelector(
         IV3SwapRouter.exactOutputSingle.selector,
         IV3SwapRouter.ExactOutputSingleParams({
           tokenIn: fp.settlementToken,
@@ -520,9 +534,9 @@ contract MorphoBlueLendingPoolAssetGuard is
           recipient: pool,
           amountOut: d.repayAssetsEst,
           amountInMaximum: maxIn,
-          sqrtPriceLimitX96: 0
-        })
-      );
+          sqrtPriceLimitX96: 0}))});
+
+      n++;
     }
 
     assembly { mstore(txs, n) }
@@ -604,7 +618,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256[] memory amounts,
     FlashloanParams memory fp
   ) internal view returns (MultiTransaction[] memory txs) {
-    txs = new MultiTransaction[](tokens.length);
+    txs = new MultiTransaction[](tokens.length * 3);
     uint256 n;
 
     for (uint256 i; i < tokens.length; i++) {
@@ -619,8 +633,24 @@ contract MorphoBlueLendingPoolAssetGuard is
           fp.slippageBps
         );
 
-      txs[n].to = swapRouter;
-      txs[n++].txData = abi.encodeWithSelector(
+      if (requiresApproveReset[tokens[i]]) {
+          txs[n] = MultiTransaction({
+            to: tokens[i],
+            txData: abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, 0)});
+
+          n++;
+      }
+
+      txs[n] = MultiTransaction({
+            to: tokens[i],
+            txData: abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, type(uint256).max)
+      });
+
+      n++;
+
+      txs[n] = MultiTransaction({
+        to: swapRouter,
+        txData: abi.encodeWithSelector(
         IV3SwapRouter.exactInputSingle.selector,
         IV3SwapRouter.ExactInputSingleParams({
           tokenIn: tokens[i],
@@ -629,9 +659,11 @@ contract MorphoBlueLendingPoolAssetGuard is
           recipient: pool,
           amountIn: amounts[i],
           amountOutMinimum: minOut,
-          sqrtPriceLimitX96: 0
-        })
-      );
+          sqrtPriceLimitX96: 0}))
+      });
+
+      n++;
+
     }
 
     assembly { mstore(txs, n) }
