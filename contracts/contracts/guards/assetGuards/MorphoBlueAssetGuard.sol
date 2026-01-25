@@ -543,10 +543,10 @@ contract MorphoBlueLendingPoolAssetGuard is
       txs[n++].txData = abi.encodeWithSelector(
         IMorphoBase.repay.selector,
         debts[i].mp,
-        debts[i].repayAssetsEst,
-        debts[i].repayBorrowShares,
+        0,        // assets = 0
+        debts[i].repayBorrowShares, //  repay by shares
         pool,
-        pool
+        bytes("")   // empty data
       );
     }
 
