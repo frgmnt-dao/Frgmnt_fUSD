@@ -174,6 +174,8 @@ contract MorphoBlueLendingPoolAssetGuard is
   {
     Id[] memory mids = poolMarkets[pool];
     address factory = IPoolLogic(pool).factory();
+    uint256 totalCollateralUsd18;
+    uint256 totalDebtUsd18;
 
     for (uint256 i; i < mids.length; i++) {
       Position memory p = IMorpho(morpho).position(mids[i], pool);
@@ -186,7 +188,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       if (p.collateral > 0) {
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.collateralToken);
         uint256 unit = 10 ** IERC20Extended(mp.collateralToken).decimals();
-        balanceUsd18 += (uint256(p.collateral) * price) / unit;
+        totalCollateralUsd18 += (uint256(p.collateral) * price) / unit;
       }
 
       // Supplied assets increase balance
@@ -195,7 +197,7 @@ contract MorphoBlueLendingPoolAssetGuard is
           _sharesToAssetsDown(p.supplyShares, m.totalSupplyAssets, m.totalSupplyShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
         uint256 unit = 10 ** IERC20Extended(mp.loanToken).decimals();
-        balanceUsd18 += (assets * price) / unit;
+        totalCollateralUsd18 += (assets * price) / unit;
       }
 
       // Borrowed assets decrease balance
@@ -204,9 +206,14 @@ contract MorphoBlueLendingPoolAssetGuard is
           _sharesToAssetsUp(p.borrowShares, m.totalBorrowAssets, m.totalBorrowShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
         uint256 unit = 10 ** IERC20Extended(mp.loanToken).decimals();
-        balanceUsd18 -= (assets * price) / unit;
+        totalDebtUsd18 += (assets * price) / unit;
       }
     }
+    if (totalDebtUsd18 >= totalCollateralUsd18) {
+      return 0;
+    }
+
+    balanceUsd18 = totalCollateralUsd18 - totalDebtUsd18;
   }
 
   /// @notice AssetGuard balances are always expressed in USD (18 decimals)
