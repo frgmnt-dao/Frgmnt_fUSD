@@ -628,13 +628,36 @@ contract MorphoBlueLendingPoolAssetGuard is
     view
     returns (MultiTransaction[] memory txs)
   {
-    txs[0].to = token;
-    txs[0].txData = abi.encodeWithSelector(
-      IERC20Extended.approve.selector,
-      morpho,
-      amount
-    );
-  }
+    if (requiresApproveReset[token]) {
+        // Token type USDT → reset obligatoire
+        txs = new MultiTransaction[](2);
+
+        // 1 reset allowance
+        txs[0].to = token;
+        txs[0].txData = abi.encodeWithSelector(
+          IERC20Extended.approve.selector,
+          morpho,
+          0
+        );
+
+        // 2️ nouvelle allowance
+        txs[1].to = token;
+        txs[1].txData = abi.encodeWithSelector(
+        IERC20Extended.approve.selector,
+          morpho,
+          amount
+        );
+    } else {
+        // Token standard
+        txs = new MultiTransaction[](1);
+        txs[0].to = token;
+        txs[0].txData = abi.encodeWithSelector(
+          IERC20Extended.approve.selector,
+          morpho,
+          amount
+        );
+      }
+    }
 
   /*//////////////////////////////////////////////////////////////
                     ORACLE & MATH HELPERS
