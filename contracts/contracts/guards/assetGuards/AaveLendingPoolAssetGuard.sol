@@ -147,6 +147,7 @@ contract AaveV3LendingPoolAssetGuard is
   function setUniV3PathExactIn(address tokenIn, address tokenOut, bytes calldata path) external onlyOwner {
     require(tokenIn != address(0) && tokenOut != address(0), "Frgmnt: bad token");
     require(path.length > 0, "Frgmnt: empty path");
+    _validateUniV3Path(path);
     uniV3PathExactIn[tokenIn][tokenOut] = path;
     emit UniV3PathExactInSet(tokenIn, tokenOut, path);
   }
@@ -154,6 +155,7 @@ contract AaveV3LendingPoolAssetGuard is
   function setUniV3PathExactOut(address tokenIn, address tokenOut, bytes calldata reversedPath) external onlyOwner {
     require(tokenIn != address(0) && tokenOut != address(0), "Frgmnt: bad token");
     require(reversedPath.length > 0, "Frgmnt: empty path");
+    _validateUniV3Path(reversedPath);
     uniV3PathExactOut[tokenIn][tokenOut] = reversedPath;
     emit UniV3PathExactOutSet(tokenIn, tokenOut, reversedPath);
   }
@@ -835,6 +837,15 @@ contract AaveV3LendingPoolAssetGuard is
       sqrtPriceLimitX96: 0
     });
     return abi.encodeWithSelector(IV3SwapRouter.exactInputSingle.selector, p);
+  }
+
+
+  function _validateUniV3Path(bytes memory path) internal pure {
+    // Uniswap V3 path format:
+    // token0 (20 bytes) | fee0 (3 bytes) | token1 (20 bytes) | fee1 (3 bytes) | ... | tokenM (20 bytes)
+    // length = 20 + 23*M, with M >= 1
+    require(path.length >= 43, "Frgmnt: invalid uniV3 path length");
+    require((path.length - 20) % 23 == 0, "Frgmnt: invalid uniV3 path length");
   }
 
   function _concat2(
