@@ -17,6 +17,7 @@ import { IERC20Extended } from "../../interfaces/IERC20Extended.sol";
 import { IHasAssetInfo } from "../../interfaces/IHasAssetInfo.sol";
 import { IV3SwapRouter } from "../../interfaces/IV3SwapRouter.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
 /*//////////////////////////////////////////////////////////////
                 MORPHO BLUE LENDING POOL ASSET GUARD
@@ -30,6 +31,7 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///  - Withdrawals are pro-rata
 ///  - Uses Morpho flashloans to safely unwind debt
 contract MorphoBlueLendingPoolAssetGuard is
+  Ownable,
   ClosedAssetGuard,
   IMorphoBlueLendingPoolAssetGuard,
   ISlippageCheckingGuard
@@ -63,9 +65,6 @@ contract MorphoBlueLendingPoolAssetGuard is
   /*//////////////////////////////////////////////////////////////
                             CONFIGURATION
   //////////////////////////////////////////////////////////////*/
-
-  /// @notice Contract owner (admin only)
-  address public owner;
 
   /// @notice Default slippage tolerance (bps)
   uint256 public defaultSlippageBps = 50; // 0.50%
@@ -136,12 +135,10 @@ contract MorphoBlueLendingPoolAssetGuard is
     address morpho_,
     address swapRouter_,
     address preferredSettlementAsset_
-  ) {
+  )  Ownable(msg.sender)  {
     require(morpho_ != address(0), "MBAG: morpho=0");
     require(swapRouter_ != address(0), "MBAG: router=0");
     require(preferredSettlementAsset_ != address(0), "MBAG: settlement=0");
-
-    owner = msg.sender;
     morpho = morpho_;
     swapRouter = swapRouter_;
     preferredSettlementAsset = preferredSettlementAsset_;
@@ -159,6 +156,17 @@ contract MorphoBlueLendingPoolAssetGuard is
   {
     poolMarkets[pool] = markets;
   }
+
+
+
+  /// @notice Sets Uniswap V3 fee tier for a token pair
+  /// @dev fee must be one of the valid Uniswap V3 fees (e.g., 500, 3000, 10000)
+  function setUniV3Fee(address tokenIn, address tokenOut, uint24 fee) external onlyOwner {
+    require(tokenIn != address(0) && tokenOut != address(0), "Invalid token");
+    require(fee == 500 || fee == 3000 || fee == 10000, "Invalid fee");
+    uniV3Fee[tokenIn][tokenOut] = fee;
+  }
+
 
   /*//////////////////////////////////////////////////////////////
                         BALANCE LOGIC
