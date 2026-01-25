@@ -194,6 +194,7 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 	error ImmediateWithdrawalDisabled();
 	error QueuedWithdrawalDisabled();
 	error OnlyMemberAllowed();
+	error WithdrawAmountTooSmall();
 
 	    
 	/// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
@@ -640,9 +641,8 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 		// compute portion in terms of totalFundValue
 		uint256 fundValue = _withdrawableFundValue();
 		if (fundValue == 0) revert EmptyFund();
-
-
 		uint256 portion = (netFusd * 1e18) / fundValue;
+		if (portion == 0) revert WithdrawAmountTooSmall();
 
 		// withdraw proportionally from ALL supported assets
 		IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
