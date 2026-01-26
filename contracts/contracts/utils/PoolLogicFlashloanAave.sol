@@ -57,12 +57,7 @@ abstract contract PoolLogicFlashloanAave {
 
 		require(guard != address(0), "invalid lending pool");
 
-		require(
-			msg.sender ==
-				IAaveLendingPoolAssetGuard(guard)
-					.aaveLendingPool(),
-			"invalid lending pool"
-		);
+        require(msg.sender == _validateAaveGuard(guard), "invalid lending pool");
 
 		uint256 withdrawAssetBalanceBefore =
 			IERC20(asset).balanceOf(address(this));
@@ -95,4 +90,19 @@ abstract contract PoolLogicFlashloanAave {
 
 		return true;
 	}
+
+    // Guard MUST implement IAaveLendingPoolAssetGuard.
+    // Using staticcall to avoid DoS if the guard is misconfigured.
+
+	function _validateAaveGuard(address guard) internal view returns (address) {
+        (bool ok, bytes memory data) = guard.staticcall(
+        abi.encodeWithSelector(
+            IAaveLendingPoolAssetGuard.aaveLendingPool.selector)
+        );
+
+        require(ok && data.length == 32, "invalid lending pool guard");
+        return abi.decode(data, (address));
+    }
+
+
 }

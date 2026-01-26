@@ -26,10 +26,7 @@ abstract contract PoolLogicFlashloanMorpho {
 		address guard = IPoolManagerLogic(pml).getContractGuard(msg.sender);
 		require(guard != address(0), "invalid morpho guard");
 
-		require(
-			msg.sender == IMorphoBlueLendingPoolAssetGuard(guard).morpho(),
-			"invalid morpho sender"
-		);
+		require(msg.sender == _validateMorphoGuard(guard), "invalid morpho sender");
 
 		(address repayAsset, bytes memory innerParams) = abi.decode(data, (address, bytes));
 		require(repayAsset != address(0), "repayAsset=0");
@@ -54,4 +51,18 @@ abstract contract PoolLogicFlashloanMorpho {
 			"high slippage"
 		);
 	}
+
+	// Guard MUST implement IMorphoBlueLendingPoolAssetGuard.
+    // Using staticcall to avoid DoS if the guard is misconfigured.
+
+	function _validateMorphoGuard(address guard) internal view returns (address) {
+        (bool ok, bytes memory data) = guard.staticcall(
+        abi.encodeWithSelector(
+            IMorphoBlueLendingPoolAssetGuard.morpho.selector)
+        );
+
+        require(ok && data.length == 32, "invalid morpho guard");
+        return abi.decode(data, (address));
+    }
+
 }
