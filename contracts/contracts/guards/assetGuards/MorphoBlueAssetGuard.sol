@@ -287,6 +287,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       supplies: supplies
     });
 
+    txs = new MultiTransaction[](1);
     txs[0].to = morpho;
     txs[0].txData = abi.encodeWithSelector(
       IMorphoBase.flashLoan.selector,
@@ -675,7 +676,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     returns (MultiTransaction[] memory txs)
   {
     if (requiresApproveReset[token]) {
-        // Token type USDT → reset obligatoire
+        // Token type USDT → reset 
         txs = new MultiTransaction[](2);
 
         // 1 reset allowance
@@ -686,7 +687,7 @@ contract MorphoBlueLendingPoolAssetGuard is
           0
         );
 
-        // 2️ nouvelle allowance
+        // 2️ new allowance
         txs[1].to = token;
         txs[1].txData = abi.encodeWithSelector(
         IERC20Extended.approve.selector,
@@ -694,7 +695,7 @@ contract MorphoBlueLendingPoolAssetGuard is
           amount
         );
     } else {
-        // Token standard
+        //  standard Token
         txs = new MultiTransaction[](1);
         txs[0].to = token;
         txs[0].txData = abi.encodeWithSelector(

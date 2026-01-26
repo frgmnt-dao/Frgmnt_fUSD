@@ -244,7 +244,7 @@ contract AaveV3LendingPoolAssetGuard is
     fp.slippageBps = slippageBps;
     fp.repayPlans = repayPlans;
 
-    // (Kept unchanged as requested)
+    transactions = new MultiTransaction[](1);
     transactions[0].to = aaveLendingPool;
     transactions[0].txData = _encodeFlashLoanTx(pool, settlementToken, flashAmount, fp);
 
@@ -311,14 +311,14 @@ contract AaveV3LendingPoolAssetGuard is
     uint256 flashAmount,
     FlashloanParams memory fp
   ) internal pure returns (bytes memory txData) {
-    // (Kept unchanged as requested)
-    address[] memory assets;
+    
+    address[] memory assets = new address[](1) ;
     assets[0] = settlementToken;
 
-    uint256[] memory amounts;
+    uint256[] memory amounts = new uint256[](1) ;
     amounts[0] = flashAmount;
 
-    uint256[] memory modes;
+    uint256[] memory modes = new uint256[](1) ;
     modes[0] = 0;
 
     bytes memory params = abi.encode(fp);
@@ -713,13 +713,15 @@ contract AaveV3LendingPoolAssetGuard is
     view
     returns (MultiTransaction[] memory txs)
   {
-    // (Kept unchanged as requested)
+
     if (requiresApproveReset[settlementToken]) {
+      txs = new MultiTransaction[](2);
       txs[0].to = settlementToken;
       txs[0].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, aaveLendingPool, 0);
       txs[1].to = settlementToken;
       txs[1].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, aaveLendingPool, approveAmount);
     } else {
+      txs = new MultiTransaction[](1);
       txs[0].to = settlementToken;
       txs[0].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, aaveLendingPool, approveAmount);
     }
