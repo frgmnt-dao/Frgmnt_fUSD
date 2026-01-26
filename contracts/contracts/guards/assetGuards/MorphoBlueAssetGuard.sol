@@ -293,7 +293,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       IMorphoBase.flashLoan.selector,
       settlementToken,
       flashAmount,
-      abi.encode(fp)
+      abi.encode(settlementToken, abi.encode(fp))
     );
 
     return (settlementToken, 0, txs);

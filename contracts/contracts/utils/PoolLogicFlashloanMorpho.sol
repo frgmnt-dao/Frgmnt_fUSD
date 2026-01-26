@@ -16,7 +16,7 @@ abstract contract PoolLogicFlashloanMorpho {
 	function _getPoolManagerLogic() internal view virtual returns (address);
 
 	function _executeMorphoFlashloan(
-		uint256 assets,
+		uint256  repayAmount,
 		bytes calldata data
 	) internal {
 		require(_isAllowedCallbackSender(msg.sender), "callback sender not allowed");
@@ -37,7 +37,7 @@ abstract contract PoolLogicFlashloanMorpho {
 			IMorphoBlueLendingPoolAssetGuard(guard).flashloanProcessing(
 				address(this),
 				repayAsset,
-				assets,
+				repayAmount,
 				innerParams
 			);
 
