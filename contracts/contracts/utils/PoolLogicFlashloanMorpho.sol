@@ -23,7 +23,7 @@ abstract contract PoolLogicFlashloanMorpho {
 		require(data.length >= 64, "bad morpho data");
 
 		address pml = _getPoolManagerLogic();
-		address guard = IPoolManagerLogic(pml).getContractGuard(msg.sender);
+		address guard = IPoolManagerLogic(pml).getAssetGuard(msg.sender);
 		require(guard != address(0), "invalid morpho guard");
 
 		require(msg.sender == _validateMorphoGuard(guard), "invalid morpho sender");

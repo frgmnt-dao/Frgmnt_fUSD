@@ -51,9 +51,7 @@ abstract contract PoolLogicFlashloanAave {
 		address pml = _getPoolManagerLogic();
 
 		// Resolve the Aave lending pool guard
-		address guard =
-			IPoolManagerLogic(pml)
-				.getContractGuard(msg.sender);
+		address guard = IPoolManagerLogic(pml).getAssetGuard(msg.sender);
 
 		require(guard != address(0), "invalid lending pool");
 
