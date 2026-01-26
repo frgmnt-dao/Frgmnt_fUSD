@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {Id}
+  from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
+
 import { IAssetGuard } from "./IAssetGuard.sol";
 
 /// @title IMorphoBlueLendingPoolAssetGuard
@@ -42,4 +45,7 @@ interface IMorphoBlueLendingPoolAssetGuard {
    * @return morpho The Morpho Blue core contract address
    */
   function morpho() external view returns (address);
+
+
+  function setPoolMarkets(address pool, Id[] calldata marketIds) external;
 }

@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ERC721Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
+import {Id} from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
 
 import { IPoolLogic } from "./interfaces/IPoolLogic.sol";
 import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
@@ -11,6 +12,7 @@ import { IHasSupportedAsset } from "./interfaces/IHasSupportedAsset.sol";
 import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
 import { IAddAssetCheckGuard } from "./interfaces/guards/IAddAssetCheckGuard.sol";
 import { IAssetHandler } from "./interfaces/IAssetHandler.sol";
+import { IMorphoBlueLendingPoolAssetGuard } from "./interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { Managed } from "./Managed.sol";
 
 contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsset, Managed {
@@ -164,18 +166,21 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	function getAssetType(address _asset) public view override returns (uint16 assetType) {
 		assetType = IAssetHandler(assetHandler).assetTypes(_asset);
 	}
-
-	function getAssetGuard(address _asset) public view returns (address) {
-		uint16 _assetType = getAssetType(_asset);
+    
+	/// @notice Get address of the asset guard
+    /// @param _extAsset The address of the external asset
+	function getAssetGuard(address _extAsset) public view returns (address) {
+		uint16 _assetType = getAssetType(_extAsset);
 		return IGovernance(governance).assetGuards(_assetType);
 	}
 
-	function getContractGuard(address _contract) public view returns (address) {
-		return IGovernance(governance).contractGuards(_contract);
+    /// @notice Get address of the contract guard
+    /// @param _extContract The address of the external contract
+	function getContractGuard(address _extContract) public view returns (address) {
+		return IGovernance(governance).contractGuards(_extContract);
 	}
 
 	
-
 	function getMaximumFee() public view returns (uint256, uint256, uint256, uint256, uint256) {
 		return (
 			_maximumPerformanceFeeNumerator,
@@ -276,6 +281,43 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		governance = _governance;
 		emit GovernanceUpdated(previousGovernance, _governance);
 	}
+
+
+	/**
+    * @notice Configure Morpho markets.
+    * @dev This function is called by the manager via PoolManagerLogic.
+    *      It performs the following checks:
+    *      1) Retrieves the asset guard for the Morpho contract address
+    *      2) Ensures the guard address is not zero
+    *      3) Uses staticcall to verify the guard implements setPoolMarkets()
+    *      4) Calls setPoolMarkets on the guard
+    *
+    * @param extAsset The Morpho contract address (external asset).
+    * @param marketIds The list of Morpho market IDs to associate with Morpho Guard Asset.
+    */
+    function setPoolMarkets(
+        address extAsset,
+        Id[] calldata marketIds) external onlyManager {
+        // 1) Get the asset guard associated with the Morpho contract address
+        address guard = getAssetGuard(extAsset);
+
+        // 2) Guard must exist
+        require(guard != address(0), "PM: guard is zero");
+		
+		address _poolLogic = poolLogic;
+
+        // 3) Verify the guard implements setPoolMarkets()
+        (bool ok, ) = guard.staticcall(
+        abi.encodeWithSelector(
+            IMorphoBlueLendingPoolAssetGuard.setPoolMarkets.selector,
+            _poolLogic,  
+            marketIds)
+        );
+        require(ok, "PoolManagerLogic: guard missing setPoolMarkets");
+
+        // 4) Call setPoolMarkets on the guard
+        IMorphoBlueLendingPoolAssetGuard(guard).setPoolMarkets(_poolLogic, marketIds);
+    }
 
 	// -----------------------------------------------------------------------
 	// Supported assets

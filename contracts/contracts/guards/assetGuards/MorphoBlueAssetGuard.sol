@@ -7,7 +7,6 @@ pragma solidity ^0.8.24;
 
 import { IMorpho, IMorphoBase, Id, MarketParams, Position, Market }
   from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
-
 import { IMorphoBlueLendingPoolAssetGuard }
   from "../../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
