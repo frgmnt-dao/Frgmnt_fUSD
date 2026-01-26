@@ -36,7 +36,7 @@ library PoolTxExecutor {
 		ExecContext memory ctx,
 		address to,
 		bytes memory data
-	) external returns (bool success) {
+	) external returns (bool) {
 		if (to == address(0)) revert InvalidTransaction();
 
 		(address guard, uint16 txType, bool isPublic) =
@@ -51,9 +51,9 @@ library PoolTxExecutor {
 		) {
 			revert OnlyManagerOrTrader();
 		}
-
-		(success, ) = to.call(data);
-		if (!success) revert TxFailed();
+		
+		(bool success, bytes memory returndata) = to.call(data);
+        _checkCallResult(success, returndata);
 
 		_afterTxGuard(ctx.poolManagerLogic, guard, to, data);
 
@@ -111,5 +111,14 @@ library PoolTxExecutor {
 		if (!tracking) return;
 
 		ITxTrackingGuard(guard).afterTxGuard(poolManagerLogic, to, data);
+	}
+
+
+	function _checkCallResult(bool success, bytes memory returndata) private pure {
+        if (!success) revert TxFailed();
+
+        if (returndata.length > 0) {
+            if (!abi.decode(returndata, (bool))) revert TxFailed();
+        }
 	}
 }

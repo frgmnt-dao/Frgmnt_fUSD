@@ -895,9 +895,9 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 			}
 
 			for (uint256 i = 0; i < v.txCount; ++i) {
-				(bool success, ) = v.transactions[i].to.call(v.transactions[i].txData);
-				if (!success) revert TxFailed();
-				externalProcessed = true;
+				(bool success, bytes memory returndata) = v.transactions[i].to.call(v.transactions[i].txData);
+				_checkCallResult(success, returndata);
+                externalProcessed = true;
 			}
 
 			if (withdrawAsset != address(0)) {
@@ -1209,6 +1209,14 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 			.assetValue(asset, withdrawableBalance);
         }
 
+    }
+
+	function _checkCallResult(bool success, bytes memory returndata) internal pure {
+        if (!success) revert TxFailed();
+
+        if (returndata.length > 0) {
+            if (!abi.decode(returndata, (bool))) revert TxFailed();
+        }
     }
 
 }
