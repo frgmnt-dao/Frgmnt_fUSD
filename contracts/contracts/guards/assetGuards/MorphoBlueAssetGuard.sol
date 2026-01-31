@@ -12,6 +12,7 @@ import { IMorphoBlueLendingPoolAssetGuard }
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckingGuard.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
+import {IMorphoBlueManager} from "../../interfaces/IMorphoBlueManager.sol";
 import { IERC20Extended } from "../../interfaces/IERC20Extended.sol";
 import { IHasAssetInfo } from "../../interfaces/IHasAssetInfo.sol";
 import { IV3SwapRouter } from "../../interfaces/IV3SwapRouter.sol";
@@ -55,6 +56,9 @@ contract MorphoBlueLendingPoolAssetGuard is
   /// @notice Morpho Blue core contract (stored as address)
   address public immutable morpho;
 
+/// @notice Morpho Blue Manager contract
+  address public immutable morphoManager;
+
   /// @notice Uniswap V3 router used for swaps
   address public immutable swapRouter;
 
@@ -71,29 +75,13 @@ contract MorphoBlueLendingPoolAssetGuard is
   /// @notice Extra buffer added on flashloan amount
   uint256 public flashAmountBufferBps = 40; // 0.40%
 
-  /// @notice Morpho market Ids used by each pool
-  /// @dev Pools MUST NOT interact with Morpho markets outside this list
-  mapping(address => Id[]) public poolMarkets;
-
   /// @notice Uniswap V3 fee tiers per token pair
   mapping(address => mapping(address => uint24)) public uniV3Fee;
 
   /// @notice Tokens requiring approve(0) before approve(amount)
   mapping(address => bool) public requiresApproveReset;
 
-  /*//////////////////////////////////////////////////////////////
-                            MODIFIERS
-  //////////////////////////////////////////////////////////////*/
-
-  /// @dev Restricts calls to the pool manager logic
-  modifier onlyPoolManager(address pool) {
-    require(
-      msg.sender == IPoolLogic(pool).poolManagerLogic(),
-      "MBAG: only pool manager"
-    );
-    _;
-  }
-
+ 
   /*//////////////////////////////////////////////////////////////
                             STRUCTS
   //////////////////////////////////////////////////////////////*/
@@ -132,30 +120,19 @@ contract MorphoBlueLendingPoolAssetGuard is
   /// @param preferredSettlementAsset_ Default flashloan token
   constructor(
     address morpho_,
+    address morphoManager_,
     address swapRouter_,
     address preferredSettlementAsset_
   )  Ownable(msg.sender)  {
     require(morpho_ != address(0), "MBAG: morpho=0");
+    require(morphoManager_ != address(0), "MBAG: morphoManager=0");
     require(swapRouter_ != address(0), "MBAG: router=0");
     require(preferredSettlementAsset_ != address(0), "MBAG: settlement=0");
     morpho = morpho_;
+    morphoManager = morphoManager_;
     swapRouter = swapRouter_;
     preferredSettlementAsset = preferredSettlementAsset_;
   }
-
-  /*//////////////////////////////////////////////////////////////
-                        POOL CONFIGURATION
-  //////////////////////////////////////////////////////////////*/
-
-  /// @notice Sets the Morpho markets used by a pool
-  /// @dev Must match exactly the markets used by strategies
-  function setPoolMarkets(address pool, Id[] calldata markets)
-    external
-    onlyPoolManager(pool)
-  {
-    poolMarkets[pool] = markets;
-  }
-
 
 
   /// @notice Sets Uniswap V3 fee tier for a token pair
@@ -179,7 +156,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     override
     returns (uint256 balanceUsd18)
   {
-    Id[] memory mids = poolMarkets[pool];
+    Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
     address factory = IPoolLogic(pool).factory();
     uint256 totalCollateralUsd18;
     uint256 totalDebtUsd18;
@@ -230,7 +207,7 @@ contract MorphoBlueLendingPoolAssetGuard is
 
   /// @notice Ensures no open Morpho position exists before asset removal
   function removeAssetCheck(address pool, address) public view override {
-    Id[] memory mids = poolMarkets[pool];
+    Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
     for (uint256 i; i < mids.length; i++) {
       Position memory p = IMorpho(morpho).position(mids[i], pool);
       require(
@@ -345,7 +322,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     view
     returns (DebtPlan[] memory plans, bool hasDebt)
   {
-    Id[] memory mids = poolMarkets[pool];
+    Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
     plans = new DebtPlan[](mids.length);
 
     uint256 n;
@@ -384,7 +361,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     view
     returns (SupplyPlan[] memory plans)
   {
-    Id[] memory mids = poolMarkets[pool];
+    Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
     plans = new SupplyPlan[](mids.length);
 
     uint256 n;

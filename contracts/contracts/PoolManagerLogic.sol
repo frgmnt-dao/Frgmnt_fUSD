@@ -3,7 +3,6 @@ pragma solidity ^0.8.24;
 
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import { ERC721Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
-import {Id} from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
 
 import { IPoolLogic } from "./interfaces/IPoolLogic.sol";
 import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
@@ -282,31 +281,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		emit GovernanceUpdated(previousGovernance, _governance);
 	}
 
-
-	/**
-    * @notice Configure Morpho markets.
-    * @dev This function is called by the manager via PoolManagerLogic.
-    *      It performs the following checks:
-    *      1) Retrieves the asset guard for the Morpho contract address
-    *      2) Ensures the guard address is not zero
-    *      3) Uses staticcall to verify the guard implements setPoolMarkets()
-    *      4) Calls setPoolMarkets on the guard
-    *
-    * @param extAsset The Morpho contract address (external asset).
-    * @param marketIds The list of Morpho market IDs to associate with Morpho Guard Asset.
-    */
-    function setPoolMarkets(
-        address extAsset,
-        Id[] calldata marketIds) external onlyManager {
-        // 1) Get the asset guard associated with the Morpho contract address
-        address guard = getAssetGuard(extAsset);
-
-        // 2) Guard must exist
-        require(guard != address(0), "PM: guard is zero");
-		
-        // 4) Call setPoolMarkets on the guard
-        IMorphoBlueLendingPoolAssetGuard(guard).setPoolMarkets(poolLogic, marketIds);
-    }
 
 	// -----------------------------------------------------------------------
 	// Supported assets

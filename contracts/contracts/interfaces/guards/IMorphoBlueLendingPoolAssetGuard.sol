@@ -46,6 +46,4 @@ interface IMorphoBlueLendingPoolAssetGuard {
    */
   function morpho() external view returns (address);
 
-
-  function setPoolMarkets(address pool, Id[] calldata marketIds) external;
 }

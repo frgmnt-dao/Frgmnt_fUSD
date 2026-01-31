@@ -11,8 +11,11 @@ import "../../interfaces/ITransactionTypes.sol";
 import "../../interfaces/guards/ITxTrackingGuard.sol";
 import "../../interfaces/IPoolManagerLogic.sol";
 import "../../interfaces/IHasSupportedAsset.sol";
+import "../../interfaces/IMorphoBlueManager.sol";
+import  "@openzeppelin/contracts/access/Ownable.sol";
 
-import { MarketParams } from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
+import { Id, MarketParams } from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
+import { MarketParamsLib } from "@morpho-org/morpho-blue/src/libraries/MarketParamsLib.sol";
 
 /* -------------------------------------------------------------------------- */
 /*                           MorphoBlueContractGuard                           */
@@ -21,7 +24,39 @@ import { MarketParams } from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol
 /// @title MorphoBlueContractGuard
 /// @notice Guard for Morpho Blue core operations, enforcing Frgmnt security rules.
 /// @dev    Structured similarly to the Aave V3 guard for consistency.
-contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITransactionTypes {
+contract MorphoBlueContractGuard is Ownable, TxDataUtils, IGuard, ITxTrackingGuard, ITransactionTypes {
+	
+    /// @notice Morpho Blue Manager contract
+    address public immutable morphoManager;
+	
+	/*//////////////////////////////////////////////////////////////////////////
+                                FUNCTION SELECTORS
+    //////////////////////////////////////////////////////////////////////////*/
+
+	bytes4 private constant SEL_SUPPLY =
+		bytes4(keccak256("supply((address,address,address,address,uint256),uint256,uint256,address,bytes)"));
+
+	bytes4 private constant SEL_WITHDRAW =
+		bytes4(keccak256("withdraw((address,address,address,address,uint256),uint256,uint256,address,address)"));
+
+	bytes4 private constant SEL_BORROW =
+		bytes4(keccak256("borrow((address,address,address,address,uint256),uint256,uint256,address,address)"));
+
+	bytes4 private constant SEL_REPAY =
+		bytes4(keccak256("repay((address,address,address,address,uint256),uint256,uint256,address,bytes)"));
+
+	bytes4 private constant SEL_SUPPLY_COLL =
+		bytes4(keccak256("supplyCollateral((address,address,address,address,uint256),uint256,address,bytes)"));
+
+	bytes4 private constant SEL_WITHDRAW_COLL =
+		bytes4(keccak256("withdrawCollateral((address,address,address,address,uint256),uint256,address,address)"));
+
+	bytes4 private constant SEL_LIQUIDATE =
+		bytes4(keccak256("liquidate((address,address,address,address,uint256),address,uint256,uint256,bytes)"));
+
+	bytes4 private constant SEL_FLASH_LOAN = bytes4(keccak256("flashLoan(address,uint256,bytes)"));
+    
+
 	/*//////////////////////////////////////////////////////////////////////////
                                     EVENTS
     //////////////////////////////////////////////////////////////////////////*/
@@ -49,32 +84,15 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 
 	event MorphoFlashLoanEvt(address indexed pool, address indexed token, uint256 amount, uint256 time);
 
-	/*//////////////////////////////////////////////////////////////////////////
-                                FUNCTION SELECTORS
-    //////////////////////////////////////////////////////////////////////////*/
+  
+  constructor(
+    address morphoManager_
+  )  Ownable(msg.sender)  {
+   
+    require(morphoManager_ != address(0), "MorphoGuard: morphoManager=0");
+	morphoManager = morphoManager_;
+  }
 
-	bytes4 private constant SEL_SUPPLY =
-		bytes4(keccak256("supply((address,address,address,address,uint256),uint256,uint256,address,bytes)"));
-
-	bytes4 private constant SEL_WITHDRAW =
-		bytes4(keccak256("withdraw((address,address,address,address,uint256),uint256,uint256,address,address)"));
-
-	bytes4 private constant SEL_BORROW =
-		bytes4(keccak256("borrow((address,address,address,address,uint256),uint256,uint256,address,address)"));
-
-	bytes4 private constant SEL_REPAY =
-		bytes4(keccak256("repay((address,address,address,address,uint256),uint256,uint256,address,bytes)"));
-
-	bytes4 private constant SEL_SUPPLY_COLL =
-		bytes4(keccak256("supplyCollateral((address,address,address,address,uint256),uint256,address,bytes)"));
-
-	bytes4 private constant SEL_WITHDRAW_COLL =
-		bytes4(keccak256("withdrawCollateral((address,address,address,address,uint256),uint256,address,address)"));
-
-	bytes4 private constant SEL_LIQUIDATE =
-		bytes4(keccak256("liquidate((address,address,address,address,uint256),address,uint256,uint256,bytes)"));
-
-	bytes4 private constant SEL_FLASH_LOAN = bytes4(keccak256("flashLoan(address,uint256,bytes)"));
 
 	/*//////////////////////////////////////////////////////////////////////////
                                    TX GUARD
@@ -131,6 +149,9 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 			params,
 			(MarketParams, uint256, uint256, address, bytes)
 		);
+		Id marketParamsId = MarketParamsLib.id(mp);
+		require (IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
+		"MorphoGuard: no valid marketParams");
 
 		require(mgr.isSupportedAsset(mp.loanToken), "MorphoGuard: unsupported loanToken");
 		require(onBehalf == poolLogic, "MorphoGuard: onBehalf != pool");
@@ -145,6 +166,9 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 			(MarketParams, uint256, uint256, address, address)
 		);
 
+		Id marketParamsId = MarketParamsLib.id(mp);
+		require (IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
+		"MorphoGuard: no valid marketParams");
 		require(mgr.isSupportedAsset(mp.loanToken), "MorphoGuard: unsupported loanToken");
 		require(onBehalf == poolLogic, "MorphoGuard: onBehalf != pool");
 		require(receiver == poolLogic, "MorphoGuard: receiver != pool");
@@ -159,6 +183,10 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 			(MarketParams, uint256, uint256, address, address)
 		);
 
+		Id marketParamsId = MarketParamsLib.id(mp);
+		require (IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
+		"MorphoGuard: no valid marketParams");
+
 		require(mgr.isSupportedAsset(mp.loanToken), "MorphoGuard: unsupported loanToken");
 		require(onBehalf == poolLogic, "MorphoGuard: onBehalf != pool");
 		require(receiver == poolLogic, "MorphoGuard: receiver != pool");
@@ -172,6 +200,10 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 			params,
 			(MarketParams, uint256, uint256, address, bytes)
 		);
+
+		Id marketParamsId = MarketParamsLib.id(mp);
+		require (IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
+		"MorphoGuard: no valid marketParams");
 
 		require(mgr.isSupportedAsset(mp.loanToken), "MorphoGuard: unsupported loanToken");
 		require(onBehalf == poolLogic, "MorphoGuard: onBehalf != pool");
@@ -190,6 +222,10 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 			(MarketParams, uint256, address, bytes)
 		);
 
+		Id marketParamsId = MarketParamsLib.id(mp);
+		require (IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
+		"MorphoGuard: no valid marketParams");
+
 		require(mgr.isSupportedAsset(mp.collateralToken), "MorphoGuard: unsupported collateralToken");
 		require(onBehalf == poolLogic, "MorphoGuard: onBehalf != pool");
 
@@ -206,6 +242,10 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 			params,
 			(MarketParams, uint256, address, address)
 		);
+
+		Id marketParamsId = MarketParamsLib.id(mp);
+		require (IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
+		"MorphoGuard: no valid marketParams");
 
 		require(mgr.isSupportedAsset(mp.collateralToken), "MorphoGuard: unsupported collateralToken");
 		require(onBehalf == poolLogic, "MorphoGuard: onBehalf != pool");
@@ -224,6 +264,10 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 			params,
 			(MarketParams, address, uint256, uint256, bytes)
 		);
+
+		Id marketParamsId = MarketParamsLib.id(mp);
+		require (IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
+		"MorphoGuard: no valid marketParams");
 
 		require(mgr.isSupportedAsset(mp.loanToken), "MorphoGuard: unsupported loanToken");
 		require(mgr.isSupportedAsset(mp.collateralToken), "MorphoGuard: unsupported collateralToken");
@@ -245,11 +289,11 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 		IHasSupportedAsset mgr,
 		bytes memory params
 	) internal returns (uint16) {
-		(address token, uint256 amount, ) = abi.decode(params, (address, uint256, bytes));
+		(address token, uint256 assets, ) = abi.decode(params, (address, uint256, bytes));
 
 		require(mgr.isSupportedAsset(token), "MorphoGuard: unsupported token");
 
-		emit MorphoFlashLoanEvt(poolLogic, token, amount, block.timestamp);
+		emit MorphoFlashLoanEvt(poolLogic, token, assets, block.timestamp);
 		return uint16(TransactionType.MorphoFlashLoan);
 	}
 }
