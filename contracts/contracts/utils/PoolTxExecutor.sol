@@ -36,7 +36,7 @@ library PoolTxExecutor {
 		ExecContext memory ctx,
 		address to,
 		bytes memory data
-	) external returns (bool) {
+	) external returns (bool, uint16) {
 		if (to == address(0)) revert InvalidTransaction();
 
 		(address guard, uint16 txType, bool isPublic) =
@@ -57,7 +57,7 @@ library PoolTxExecutor {
 
 		_afterTxGuard(ctx.poolManagerLogic, guard, to, data);
 
-		return true;
+		return (true, txType);
 	}
 
 	// ============================================================

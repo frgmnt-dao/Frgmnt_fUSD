@@ -956,9 +956,9 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 		    trader: _trader()
 	    });
 
-	    bool success = PoolTxExecutor.exec(ctx, to, data);
+	    (bool success, uint16 txType) = PoolTxExecutor.exec(ctx, to, data);
 
-	    emit TransactionExecuted(address(this), msg.sender, 0, block.timestamp);
+	    emit TransactionExecuted(address(this), msg.sender, txType, block.timestamp);
 
 	    return success;
     }
