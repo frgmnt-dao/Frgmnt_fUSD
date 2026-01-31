@@ -15,5 +15,7 @@ interface IPoolLogic {
 
 	function mintManagerFee() external;
 
+	function reservedAssetBalance(address asset) external view returns (uint256);
+
 	function incrementAccountedAssets(uint256 amount) external;
 }

@@ -22,6 +22,7 @@ import "../../interfaces/IHasSupportedAsset.sol";
 import "../../interfaces/IHasGuardInfo.sol";
 import "../../interfaces/IManaged.sol";
 import "../../interfaces/ITransactionTypes.sol";
+import "../../interfaces/IPoolLogic.sol";
 
 contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
 	// -------------------------------------------------------------------------
@@ -119,12 +120,21 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
 		withdrawAsset = asset;
 
 		uint256 balance = IERC20(asset).balanceOf(pool);
-		// Native checked math (0.8+); if portion > 1e18 this is intentional & enforced at higher level.
+
+        // Deduct reserved assets (e.g., from queued withdrawals) to prevent leakage
+		// to immediate pro-rata withdrawals.
+		uint256 reserved = IPoolLogic(pool).reservedAssetBalance(asset);
+		if (reserved > 0) {
+			if (reserved > balance) reserved = balance;
+			balance -= reserved;
+		}
+
 		withdrawAmount = (balance * portion) / 1e18;
 
 		// No additional calls required for simple ERC20 withdrawals.
 		// PoolLogic uses (withdrawAsset, withdrawAmount) directly.
 		return (withdrawAsset, withdrawAmount, txs);
+
 	}
 
 	// -------------------------------------------------------------------------
