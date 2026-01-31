@@ -304,19 +304,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         // 2) Guard must exist
         require(guard != address(0), "PM: guard is zero");
 		
-		address _poolLogic = poolLogic;
-
-        // 3) Verify the guard implements setPoolMarkets()
-        (bool ok, ) = guard.staticcall(
-        abi.encodeWithSelector(
-            IMorphoBlueLendingPoolAssetGuard.setPoolMarkets.selector,
-            _poolLogic,  
-            marketIds)
-        );
-        require(ok, "PoolManagerLogic: guard missing setPoolMarkets");
-
         // 4) Call setPoolMarkets on the guard
-        IMorphoBlueLendingPoolAssetGuard(guard).setPoolMarkets(_poolLogic, marketIds);
+        IMorphoBlueLendingPoolAssetGuard(guard).setPoolMarkets(poolLogic, marketIds);
     }
 
 	// -----------------------------------------------------------------------
