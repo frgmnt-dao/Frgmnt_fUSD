@@ -35,6 +35,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "./interfaces/IPoolManagerLogic.sol";
+import "./interfaces/IPoolLogic.sol";
 
 contract TokenLogic is
 	ERC20BurnableUpgradeable,
@@ -152,6 +153,12 @@ contract TokenLogic is
 
 	// emit changes to recipient exemption list for transparency/auditing.
 	event CooldownExemptRecipientUpdated(address indexed account, bool isExempt);
+
+	/// @notice Emitted when FUSD is minted directly by the PoolLogic contract.
+    /// @dev This mint follows the same cooldown accounting rules as deposits.
+    event MintedFromPool(
+	    address indexed to,
+	    uint256 amount);
 
 	// ---------------------------------------------------------------------
 	//                            INITIALIZATION
@@ -442,6 +449,10 @@ contract TokenLogic is
 		// Forward collateral to PoolLogic
 		IERC20(asset).safeTransferFrom(msg.sender, poolLogic, amount);
 
+		// Increment accountedAssets
+
+		IPoolLogic(poolLogic).incrementAccountedAssets(fusdAmount);
+
 		// Mint FUSD to the user
 		_mint(to, fusdAmount);
 
@@ -450,6 +461,31 @@ contract TokenLogic is
 
 		emit Deposited(to, asset, amount, fusdAmount);
 	}
+
+
+    /**
+    * @notice Mint FUSD to a user (PoolLogic only).
+    * @dev Used for internal system flows (e.g. rebalancing, yield realization,
+    *      protocol-controlled minting).
+    * Updates cooldown accounting exactly like deposits.
+	* @param to Recipient of the minted FUSD.
+	* @param amount Amount of FUSD to mint (18 decimals).
+    */
+    function mintFromPool(address to, uint256 amount) external {
+		require(msg.sender == poolLogic, "TokenLogic: only PoolLogic");
+	    require(to != address(0), "TokenLogic: zero address");
+	    require(amount > 0, "TokenLogic: zero amount");
+        // Snapshot previous cooldown state
+	    uint256 prevPrincipal = cooldownPrincipal[to];
+	    uint256 prevTimestamp = cooldownTimestamp[to];
+        // Update cooldown timestamp (time-weighted average)
+	    cooldownTimestamp[to] = _updateCooldownTimestamp(prevTimestamp, amount, prevPrincipal);
+        // Update principal under cooldown
+	    cooldownPrincipal[to] = prevPrincipal + amount;
+        // Mint FUSD
+	    _mint(to, amount);
+		emit MintedFromPool(to, amount);
+    }
 
 	// ---------------------------------------------------------------------
 	//                          COOLDOWN LOGIC
@@ -611,3 +647,5 @@ contract TokenLogic is
 	// Reserve storage gap for future upgrades
 	uint256[40] private __gap;
 }
+
+
