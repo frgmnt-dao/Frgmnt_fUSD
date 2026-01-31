@@ -326,23 +326,20 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
      *
      * High-level flow:
      * 1) Read current fund value and total SFUSD supply.
-     * 2) Compute incremental performance yield and performance fee using
+     * 2) Compute net incremental performance yield (net yield) and performance fee using
      *    FundCalculationLibrary.calculatePerformanceFee().
-     *    - Yield is computed in USD terms.
-     *    - Performance fee is converted to SFUSD.
+     *    Net yield and Performance fee are computed in USD.
      * 3) Compute time-based management fee using
      *    FundCalculationLibrary.calculateManagementFee().
      * 4) Settle the manager's pending rewards BEFORE modifying rewardPerShare
      *    or minting new shares, to avoid retroactive reward dilution.
-     * 5) Distribute net yield (after management fee) to existing stakers by
+     * 5) Distribute net yield (after removing management fee) to existing stakers by
      *    increasing rewardPerShare.
-     * 6) Mint performance and management fee shares to the manager.
-     * 7) Update manager reward debt and persist accounting checkpoints
-     *    (lastTotalValue, lastTotalFusd, lastFeeMintTime).
+     * 6) Mint performance and management fee shares to the manager in FUSD.
+     * 7) Update manager reward debt.
      *
      * IMPORTANT:
-     * - Performance yield and net yield are accounted in USD terms.
-     * - Fees are minted in SFUSD.
+     * - Fees are minted in FUSD.
      * - The ordering of operations is critical to ensure fair reward
      *   distribution and to prevent fee minting from capturing past rewards.
      */
@@ -350,7 +347,7 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
     function _accrueYield() internal {
 
         uint256 totalValue = _totalValue();
-		uint256 _totalFusd = IERC20(fusd).totalSupply();
+		uint256 totalFusd = IERC20(fusd).totalSupply();
 
         (
             uint256 _performanceFeeNumerator,
@@ -370,7 +367,7 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
         (
             uint256 _managementFee,
             uint256 _lastFeeMintTime) = FundCalculationLibrary.calculateManagementFee(
-            _totalFusd,
+            totalFusd,
             lastFeeMintTime,
             _managementFeeNumerator,
             _feeDenominator
@@ -388,14 +385,14 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
         }
 		_netYield = _netYield - _managementFee;
 		totalRewardAccrued += _netYield;
-	    totalManagementFee += totalManagementFee;
-		totalPerformanceFee += totalPerformanceFee;
+	    totalManagementFee += _managementFee;
+		totalPerformanceFee += _performanceFee;
 		accountedAssets = totalValue;
         if (_supply > 0 && _netYield > 0) {
             rewardPerShare += (_netYield * 1e18) / _supply;
         }
 		
-		// 2) mint performance and management fee shares to manager
+		// 2) mint performance and management fee to manager in FUSD
 		uint256 _fee = _performanceFee + _managementFee;
         if (_fee > 0) {
             ITokenLogic(fusd).mintFromPool(mgr, _fee);
@@ -1004,7 +1001,7 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 	function calculateAvailableManagerFee() public view returns (uint256 fee) {
 
         uint256 totalValue = _totalValue();
-		uint256 _totalFusd = IERC20(fusd).totalSupply();
+		uint256 totalFusd = IERC20(fusd).totalSupply();
 
         (
             uint256 _performanceFeeNumerator,
@@ -1025,7 +1022,7 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
         (
             uint256 _managementFee,
             ) = FundCalculationLibrary.calculateManagementFee(
-            _totalFusd,
+            totalFusd,
             lastFeeMintTime,
             _managementFeeNumerator,
             _feeDenominator
