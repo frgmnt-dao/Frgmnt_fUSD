@@ -893,7 +893,7 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 
 			for (uint256 i = 0; i < v.txCount; ++i) {
 				(bool success, bytes memory returndata) = v.transactions[i].to.call(v.transactions[i].txData);
-				_checkCallResult(success, returndata);
+				_checkCallResult(v.transactions[i].txData, success, returndata);
                 externalProcessed = true;
 			}
 
@@ -1208,12 +1208,25 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 
     }
 
-	function _checkCallResult(bool success, bytes memory returndata) internal pure {
+	function _checkCallResult(bytes memory data, bool success, bytes memory returndata) internal pure {
         if (!success) revert TxFailed();
 
-        if (returndata.length > 0) {
-            if (!abi.decode(returndata, (bool))) revert TxFailed();
+        // Only verify return value for ERC20 transfer/approve
+        require(data.length >= 4, "no selector");
+        bytes4 sig;
+        assembly {
+            sig := mload(add(data, 32))
         }
-    }
+
+        bool isERC20 = (sig == IERC20.transfer.selector || sig == IERC20.approve.selector);
+
+        if (isERC20 && returndata.length > 0) {
+            // SafeERC20-style: decode as bool
+            bool ok = abi.decode(returndata, (bool));
+            if (!ok) revert TxFailed();
+        }
+        // For other calls (e.g., Aave withdraw/repay uint256), ignore returndata
+	}
+    
 
 }
