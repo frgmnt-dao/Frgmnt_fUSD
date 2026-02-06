@@ -399,23 +399,6 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 		emit AssetRemoved(poolLogic, manager, _asset);
 	}
 
-	// NEW FUNCTION ADDED FOR FRG-22 (governance escape hatch)
-	function forceRemoveAsset(address _asset) external onlyFactoryOwner {
-		if (!isSupportedAsset(_asset)) revert AssetNotSupported();
-
-		uint256 idx = assetPosition[_asset] - 1;
-		uint256 len = supportedAssets.length;
-
-		for (uint256 i = idx; i + 1 < len; ++i) {
-			supportedAssets[i] = supportedAssets[i + 1];
-			assetPosition[supportedAssets[i].asset] = i + 1;
-		}
-
-		assetPosition[_asset] = 0;
-		supportedAssets.pop();
-
-		emit AssetRemoved(poolLogic, manager, _asset);
-	}
 
 	function getSupportedAssets() external view override returns (Asset[] memory) {
 		return supportedAssets;
