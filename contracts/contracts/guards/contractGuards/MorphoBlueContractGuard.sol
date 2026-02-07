@@ -12,9 +12,10 @@ import "../../interfaces/guards/ITxTrackingGuard.sol";
 import "../../interfaces/IPoolManagerLogic.sol";
 import "../../interfaces/IHasSupportedAsset.sol";
 import "../../interfaces/IMorphoBlueManager.sol";
-import  "@openzeppelin/contracts/access/Ownable.sol";
+import "../../interfaces/IHasAssetInfo.sol";
+import  "../../interfaces/IERC20Extended.sol";
 
-import { Id, MarketParams } from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
+import { IMorpho, Id, MarketParams, Position, Market} from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
 import { MarketParamsLib } from "@morpho-org/morpho-blue/src/libraries/MarketParamsLib.sol";
 
 /* -------------------------------------------------------------------------- */
@@ -23,11 +24,14 @@ import { MarketParamsLib } from "@morpho-org/morpho-blue/src/libraries/MarketPar
 
 /// @title MorphoBlueContractGuard
 /// @notice Guard for Morpho Blue core operations, enforcing Frgmnt security rules.
-/// @dev    Structured similarly to the Aave V3 guard for consistency.
-contract MorphoBlueContractGuard is Ownable, TxDataUtils, IGuard, ITxTrackingGuard, ITransactionTypes {
+contract MorphoBlueContractGuard is  TxDataUtils, IGuard, ITxTrackingGuard, ITransactionTypes {
 	
     /// @notice Morpho Blue Manager contract
     address public immutable morphoManager;
+
+	bool public override isTxTrackingGuard = true;
+
+	uint256 public constant HEALTH_FACTOR_LOWER_BOUNDARY = 1.01e18;
 	
 	/*//////////////////////////////////////////////////////////////////////////
                                 FUNCTION SELECTORS
@@ -86,8 +90,7 @@ contract MorphoBlueContractGuard is Ownable, TxDataUtils, IGuard, ITxTrackingGua
 
   
   constructor(
-    address morphoManager_
-  )  Ownable(msg.sender)  {
+    address morphoManager_)  {
    
     require(morphoManager_ != address(0), "MorphoGuard: morphoManager=0");
 	morphoManager = morphoManager_;
@@ -130,15 +133,44 @@ contract MorphoBlueContractGuard is Ownable, TxDataUtils, IGuard, ITxTrackingGua
 		return (txType, false);
 	}
 
+	
 	/// @inheritdoc ITxTrackingGuard
-	function afterTxGuard(address _poolManagerLogic, address, bytes calldata) public view override {
-		require(msg.sender == IPoolManagerLogic(_poolManagerLogic).poolLogic(), "MorphoGuard: not pool logic");
-	}
+    function afterTxGuard(address _poolManagerLogic, address to, bytes calldata data) public view override {
+        address poolLogic = IPoolManagerLogic(_poolManagerLogic).poolLogic();
+        require(msg.sender == poolLogic, "MorphoGuard: not pool logic");
+		
+        /* address factory = IPoolManagerLogic(_poolManagerLogic).factory();
 
-	/// @inheritdoc ITxTrackingGuard
-	function isTxTrackingGuard() external pure override returns (bool) {
-		return true;
-	}
+        // Decode only the first input: MarketParams
+        bytes memory params = getParams(data);
+        (MarketParams memory mp, ) = abi.decode(params, (MarketParams, bytes));
+        Id marketId = MarketParamsLib.id(mp);
+		IMorpho morpho = IMorpho(to);
+        Position memory pos = morpho.position(marketId, poolLogic);
+        Market memory m = morpho.market(marketId);
+
+        // Only check if there is outstanding debt
+        if (pos.borrowShares > 0) {
+            // Collateral value 
+            uint256 collateralValue = (uint256(pos.collateral) * IHasAssetInfo(factory).getAssetPrice(mp.collateralToken)) 
+            / (10 ** IERC20Extended(mp.collateralToken).decimals());
+
+            // Borrowed value 
+            uint256 borrowedAmount = _sharesToAssetsUp(pos.borrowShares, m.totalBorrowAssets, m.totalBorrowShares);
+            uint256 borrowedValue = (borrowedAmount * IHasAssetInfo(factory).getAssetPrice(mp.loanToken)) 
+            / (10 ** IERC20Extended(mp.loanToken).decimals());
+
+            // Health Factor = (Collateral * LLTV) / Borrowed
+            uint256 hf = (collateralValue * mp.lltv) / borrowedValue;
+            require(hf > HEALTH_FACTOR_LOWER_BOUNDARY, "MorphoGuard: health factor too low");
+        }
+	  */ 
+    }
+
+
+    
+
+	
 
 	/*//////////////////////////////////////////////////////////////////////////
                      INTERNAL HANDLERS — PER MORPHO OPERATION
@@ -296,4 +328,11 @@ contract MorphoBlueContractGuard is Ownable, TxDataUtils, IGuard, ITxTrackingGua
 		emit MorphoFlashLoanEvt(poolLogic, token, assets, block.timestamp);
 		return uint16(TransactionType.MorphoFlashLoan);
 	}
+
+	function _sharesToAssetsUp(uint256 s, uint256 a, uint256 t)
+        internal pure returns (uint256) {
+        if (s == 0 || t == 0) return 0;
+        return (s * a + t - 1) / t;
+    }
+
 }

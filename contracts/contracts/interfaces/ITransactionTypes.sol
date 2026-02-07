@@ -28,6 +28,7 @@ interface ITransactionTypes {
 		MorphoSupplyCollateral, // 20
 		MorphoWithdrawCollateral, // 21
 		MorphoLiquidate, // 22
-		MorphoFlashLoan // 23
+		MorphoFlashLoan, // 23
+		MorphoRewardClaim // 24
 	}
 }

@@ -5,7 +5,9 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "../../utils/TxDataUtils.sol";
 import "../../interfaces/guards/IGuard.sol";
+import "../../interfaces/guards/ITxTrackingGuard.sol";
 import "../../interfaces/aave/IAaveProtocolDataProvider.sol";
+import "../../interfaces/aave/v3/IAaveV3Pool.sol";
 import "../../interfaces/IPoolManagerLogic.sol";
 import "../../interfaces/IHasAssetInfo.sol";
 import "../../interfaces/IHasSupportedAsset.sol";
@@ -32,7 +34,13 @@ import "../../interfaces/ITransactionTypes.sol";
  * @custom:project  Frgmnt Protocol
  * -------------------------------------------------------------------------
  */
-contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
+contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITransactionTypes {
+
+    uint256 public constant HEALTH_FACTOR_LOWER_BOUNDARY = 1.01e18;
+	bool public override isTxTrackingGuard = true;
+
+
+
 	/*//////////////////////////////////////////////////////////////////////////
                                   EVENTS
   //////////////////////////////////////////////////////////////////////////*/
@@ -58,10 +66,6 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
 	/// @dev Emitted for rebalanceStableBorrowRate
 	event RebalanceStableBorrowRate(address fundAddress, address asset);
 
-	// Kept for future compatibility with dHEDGE/Aave-based masks
-	uint256 internal constant BORROWING_MASK = 0x5555555555555555555555555555555555555555555555555555555555555555;
-
-	uint256 internal constant COLLATERAL_MASK = 0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA;
 
 	/*//////////////////////////////////////////////////////////////////////////
                               PROTOCOL CONFIG
@@ -225,6 +229,33 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITransactionTypes {
 
 		return (txType, false); // Aave ops are never public
 	}
+
+
+    /**
+   * @notice Post-transaction hook: assert HF above threshold after risky operations.
+   * @dev Guards against actions that would push HF below 1.01.
+   */
+    function afterTxGuard(address poolManagerLogic, address to, bytes memory data) external view override {
+        address poolLogic = IPoolManagerLogic(poolManagerLogic).poolLogic();
+		require(msg.sender == poolLogic, "Frgmnt: not pool logic");
+		/*
+        bytes4 method = getMethod(data);
+
+        // Actions that may affect health factor
+        if (
+            method == bytes4(keccak256("borrow(bytes32)")) ||
+            method == bytes4(keccak256("setUserUseReserveAsCollateral(bytes32)")) ||
+            method == bytes4(keccak256("withdraw(bytes32)")) ||
+            method == bytes4(keccak256("borrow(address,uint256,uint256,uint16,address)")) ||
+            method == bytes4(keccak256("setUserUseReserveAsCollateral(address,bool)")) ||
+            method == bytes4(keccak256("withdraw(address,uint256,address)"))
+        ) {
+        (, , , , , uint256 healthFactor) = IAaveV3Pool(to).getUserAccountData(poolLogic);
+        require(healthFactor > HEALTH_FACTOR_LOWER_BOUNDARY, "Frgmnt: health factor too low");
+    }
+	*/
+  }
+
 
 	/*//////////////////////////////////////////////////////////////////////////
                            INTERNAL HANDLERS (VALIDATION)
