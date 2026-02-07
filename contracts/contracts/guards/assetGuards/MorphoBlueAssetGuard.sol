@@ -296,6 +296,9 @@ contract MorphoBlueLendingPoolAssetGuard is
     require(fp.settlementToken == repayAsset, "MBAG: settlement mismatch");
 
     MultiTransaction[] memory p1 = _swapSettlementToDebts(pool, fp);
+    // Approve Morpho to pull settlement token when repaying debts in same token (e.g. USDC market).
+    // Must run before _repayDebts so repay() transferFrom(pool, morpho, amount) succeeds.
+    MultiTransaction[] memory p1b = _approveMorphoForSettlementRepay(fp, repayAsset);
     MultiTransaction[] memory p2 = _repayDebts(pool, fp.debts);
 
     (
@@ -310,8 +313,10 @@ contract MorphoBlueLendingPoolAssetGuard is
     MultiTransaction[] memory p5 =
       _approveFlashRepay(fp.settlementToken, repayAmount);
 
-    out = _concat5(p1, p2, p3, p4, p5);
+    out = _concat5(p1, p1b, p2, p3, p4, p5);
   }
+
+  
   /*//////////////////////////////////////////////////////////////
                     DEBT COLLECTION
   //////////////////////////////////////////////////////////////*/
@@ -652,36 +657,41 @@ contract MorphoBlueLendingPoolAssetGuard is
     view
     returns (MultiTransaction[] memory txs)
   {
-    if (requiresApproveReset[token]) {
-        // Token type USDT → reset 
+    return _approveMorphoForToken(token, amount);
+
+  }
+
+
+  /// @notice Approves Morpho to pull settlement token for direct debt repayment (when loanToken == settlementToken).
+  /// Must run before _repayDebts so Morpho.repay() can transferFrom(pool, morpho, amount).
+  function _approveMorphoForSettlementRepay(FlashloanParams memory fp, address repayAsset)
+      internal view  returns (MultiTransaction[] memory txs){
+      uint256 amount;
+      for (uint256 i; i < fp.debts.length; i++) {
+        if (fp.debts[i].mp.loanToken == repayAsset) 
+          amount += fp.debts[i].repayAssetsEst;
+      }
+      if (amount == 0) return new MultiTransaction[](0);
+      return _approveMorphoForToken(repayAsset, amount);
+  }
+
+  /// @notice Shared approve Morpho for a token amount (handles USDT reset when needed).
+  function _approveMorphoForToken(address token, uint256 amount) internal view 
+      returns (MultiTransaction[] memory txs) {
+      if (requiresApproveReset[token]) {
         txs = new MultiTransaction[](2);
-
-        // 1 reset allowance
         txs[0].to = token;
-        txs[0].txData = abi.encodeWithSelector(
-          IERC20Extended.approve.selector,
-          morpho,
-          0
-        );
-
-        // 2️ new allowance
+        txs[0].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, morpho, 0);
         txs[1].to = token;
-        txs[1].txData = abi.encodeWithSelector(
-        IERC20Extended.approve.selector,
-          morpho,
-          amount
-        );
-    } else {
-        //  standard Token
+        txs[1].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, morpho, amount);
+      } else {
         txs = new MultiTransaction[](1);
         txs[0].to = token;
-        txs[0].txData = abi.encodeWithSelector(
-          IERC20Extended.approve.selector,
-          morpho,
-          amount
-        );
+        txs[0].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, morpho, amount);
       }
-    }
+  }
+
+
 
   /*//////////////////////////////////////////////////////////////
                     ORACLE & MATH HELPERS
@@ -726,15 +736,18 @@ contract MorphoBlueLendingPoolAssetGuard is
     MultiTransaction[] memory b,
     MultiTransaction[] memory c,
     MultiTransaction[] memory d,
-    MultiTransaction[] memory e
+    MultiTransaction[] memory e,
+    MultiTransaction[] memory f
+    
   ) internal pure returns (MultiTransaction[] memory out) {
-    out = new MultiTransaction[](a.length + b.length + c.length + d.length + e.length);
+    out = new MultiTransaction[](a.length + b.length + c.length + d.length + e.length + f.length);
     uint256 k;
     for (uint256 i; i < a.length; i++) out[k++] = a[i];
     for (uint256 i; i < b.length; i++) out[k++] = b[i];
     for (uint256 i; i < c.length; i++) out[k++] = c[i];
     for (uint256 i; i < d.length; i++) out[k++] = d[i];
     for (uint256 i; i < e.length; i++) out[k++] = e[i];
+    for (uint256 i; i < f.length; i++) out[k++] = f[i];
   }
 
   function _sharesToAssetsUp(uint256 s, uint256 a, uint256 t)
