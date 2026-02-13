@@ -114,10 +114,11 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		address to,
 		bytes calldata data
 	) public virtual override returns (uint16 txType, bool isPublic) {
-		bytes4 method = getMethod(data);
-
+	
 		address poolLogic = IPoolManagerLogic(_poolManagerLogic).poolLogic();
 		address factory = IPoolManagerLogic(_poolManagerLogic).factory();
+		require(msg.sender == poolLogic, "Frgmnt: not pool logic");
+		bytes4 method = getMethod(data);
 
 		/*
 		 * -----------------
