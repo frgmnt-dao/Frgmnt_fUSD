@@ -37,11 +37,11 @@ contract MorphoBlueRewardClaimGuard is
     //////////////////////////////////////////////////////////////////////////*/
 
     /// @notice Merkl claim selector
-    /// claim(address user, address[] tokens, uint256[] amounts, bytes32[][] proofs)
+    /// claim(address[] users, address[] tokens, uint256[] amounts, bytes32[][] proofs)
     bytes4 private constant SEL_CLAIM =
         bytes4(
             keccak256(
-                "claim(address,address[],uint256[],bytes32[][])"
+                "claim(address[],address[],uint256[],bytes32[][])"
             )
         );
 
@@ -52,8 +52,8 @@ contract MorphoBlueRewardClaimGuard is
     /// @notice Emitted after a successful reward claim
     event MorphoRewardClaimed(
         address indexed pool,
-        address[] tokens,
-        uint256[] amounts
+        address indexed token,
+        uint256 amount
     );
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -126,32 +126,23 @@ contract MorphoBlueRewardClaimGuard is
         bytes memory params
     ) internal returns (uint16) {
         (
-            address user,
+            address[] memory users,
             address[] memory tokens,
             uint256[] memory amounts,
-            bytes32[][] memory proofs
+
         ) = abi.decode(
                 params,
-                (address, address[], uint256[], bytes32[][])
+                (address[], address[], uint256[], bytes32[][])
             );
 
-        // Rewards must be claimed FOR the pool itself
-        require(
-            user == poolLogic,
-            "MorphoRewardGuard: user != pool"
-        );
-
-        // Basic array consistency checks
-        require(
-            tokens.length == amounts.length &&
-                tokens.length == proofs.length,
-            "MorphoRewardGuard: array mismatch"
-        );
-
+        // Rewards must be claimed only for the pool itself
+        require(users.length == 1, "MorphoRewardGuard: multiple users");
+        require(users[0] == poolLogic, "MorphoRewardGuard: user != pool");
+        
         emit MorphoRewardClaimed(
-            msg.sender,
-            tokens,
-            amounts
+            users[0],
+            tokens[0],
+            amounts[0]
         );
         return uint16(TransactionType.MorphoRewardClaim);
     }
