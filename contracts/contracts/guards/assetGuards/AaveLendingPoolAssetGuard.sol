@@ -170,22 +170,13 @@ contract AaveV3LendingPoolAssetGuard is
   // IAssetGuard VIEW
   // ============================================================
 
-  function getBalance(address pool, address) public view override returns (uint256 balanceUsd18) {
-    (
-      uint256 totalCollateralBase,
-      uint256 totalDebtBase,
-      uint256 availableBorrowsBase,
-      uint256 currentLiquidationThreshold,
-      uint256 ltv,
-      uint256 healthFactor
-    ) = IAaveV3Pool(aaveLendingPool).getUserAccountData(pool);
+  function getBalance(address pool, address) public view override returns (uint256 balance) {
+    (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
 
-    availableBorrowsBase; currentLiquidationThreshold; ltv; healthFactor;
-
-    // NOTE: many Aave markets use base unit ~1e8; if yours differs, make configurable.
-    if (totalCollateralBase > totalDebtBase) {
-      balanceUsd18 = (totalCollateralBase - totalDebtBase) * 1e10;
+    if (totalCollateralInUsd > totalDebtInUsd) {
+      balance = totalCollateralInUsd - totalDebtInUsd;
     }
+  
   }
 
   function getDecimals(address) external pure override returns (uint256) {
@@ -193,18 +184,11 @@ contract AaveV3LendingPoolAssetGuard is
   }
 
   function removeAssetCheck(address pool, address) public view override {
-    (
-      uint256 totalCollateralBase,
-      uint256 totalDebtBase,
-      uint256 availableBorrowsBase,
-      uint256 currentLiquidationThreshold,
-      uint256 ltv,
-      uint256 healthFactor
-    ) = IAaveV3Pool(aaveLendingPool).getUserAccountData(pool);
+    
+    (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
 
-    availableBorrowsBase; currentLiquidationThreshold; ltv; healthFactor;
 
-    require(totalCollateralBase == 0 && totalDebtBase == 0, "Frgmnt: cannot remove non-empty Aave pos");
+    require(totalCollateralInUsd == 0 && totalDebtInUsd == 0, "Frgmnt: cannot remove non-empty asset");
   }
 
   // ============================================================
@@ -300,6 +284,52 @@ contract AaveV3LendingPoolAssetGuard is
       transactions = _concat2(transactions, phase5);
     }
   }
+
+  
+  function _getBalance(address _pool) internal view returns (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) {
+    IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(IPoolLogic(_pool).poolManagerLogic()).getSupportedAssets();
+    uint256 length = supportedAssets.length;
+
+    address asset;
+    uint256 decimals;
+    uint256 tokenPriceInUsd;
+    uint256 collateralBalance;
+    uint256 debtBalance;
+    address factory = IPoolLogic(_pool).factory();
+
+    for (uint256 i; i < length; ++i) {
+        asset = supportedAssets[i].asset;
+
+        (collateralBalance, debtBalance) = _calculateAaveBalance(_pool, asset);
+
+        if (collateralBalance != 0 || debtBalance != 0) {
+            tokenPriceInUsd = IHasAssetInfo(factory).getAssetPrice(asset);
+            decimals = IERC20Extended(asset).decimals();
+            totalCollateralInUsd += (tokenPriceInUsd * collateralBalance) / (10 ** decimals);
+            totalDebtInUsd += (tokenPriceInUsd * debtBalance) / (10 ** decimals);
+        }
+    }
+  }
+
+
+
+  function _calculateAaveBalance(
+    address _pool,
+    address _asset
+) internal view returns (uint256 collateralBalance, uint256 debtBalance) {
+    // Collateral: aToken balance
+    address aToken = IAaveV3Pool(aaveLendingPool).getReserveAToken(_asset);
+    if (aToken != address(0)) {
+        collateralBalance = IERC20Extended(aToken).balanceOf(_pool);
+    }
+
+    // Debt: only variable debt
+    address variableDebtToken = IAaveV3Pool(aaveLendingPool).getReserveVariableDebtToken(_asset);
+    if (variableDebtToken != address(0)) {
+        debtBalance = IERC20Extended(variableDebtToken).balanceOf(_pool);
+    }
+}
+
 
   // ============================================================
   // INTERNALS
