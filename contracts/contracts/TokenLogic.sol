@@ -506,13 +506,20 @@ contract TokenLogic is
 		uint256 userBalanceBefore
 	) internal view returns (uint256 newTimestamp) {
 		uint256 total = userBalanceBefore + newMint;
+		uint256 nowTs = block.timestamp;
+
 		if (userBalanceBefore == 0 || oldTimestamp == 0) {
 			// First mint for this user or no previous timestamp
-			return block.timestamp;
+			return nowTs;
 		}
 
+		  //  if old cooldown already expired → reset
+        if (cooldownPeriod != 0 &&  nowTs >= oldTimestamp + cooldownPeriod) {
+            return nowTs ;
+        }
+
 		// Weighted average: (oldTs * oldBal + now * newMint) / (oldBal + newMint)
-		return (oldTimestamp * userBalanceBefore + block.timestamp * newMint) / total;
+		return (oldTimestamp * userBalanceBefore + nowTs * newMint) / total;
 	}
 
 	/**
@@ -599,49 +606,49 @@ contract TokenLogic is
 
     /**
      * @dev Prevent users from transferring FUSD while they are still in cooldown.
-     *      This closes the FRG-13 bypass where a user transfers freshly minted
-     *      FUSD to another address that has no cooldown history.
      *
      *      Mint (from = 0)  → allowed
      *      Burn (to = 0)    → allowed
      *      Transfer         → blocked if sender's cooldown not expired
      */
     function _update(address from, address to, uint256 amount)
-        internal
-        override(ERC20Upgradeable)
-    {
-        // Apply cooldown check only to transfers (from != 0 and to != 0)
-        if (from != address(0) && to != address(0)) {
+        internal override(ERC20Upgradeable){
+        bool isTransfer = from != address(0) && to != address(0);
+		bool exemptSender = cooldownExemptSender[from];
+		bool exemptRecipient = cooldownExemptRecipient[to];
+		bool enforceCooldown = from != address(0) && !exemptSender && !exemptRecipient;
 
-			if (!cooldownExemptSender[from] && !cooldownExemptRecipient[to]) {
-				uint256 ts = cooldownTimestamp[from];
-
-				if (ts != 0 && cooldownPeriod != 0) {
-					uint256 end = ts + cooldownPeriod;
-
-					require(
-						block.timestamp >= end,
-						"TokenLogic: cooldown transfer"
-					);
-				}
-			}
+        // --------------------------------------------------
+        // Apply cooldown check (transfers only)
+        // --------------------------------------------------
+        if (isTransfer && !exemptSender && !exemptRecipient) {
+            uint256 ts = cooldownTimestamp[from];
+            uint256 period = cooldownPeriod;
+			if (ts != 0 && period != 0) {
+                require(
+                    block.timestamp >= ts + period,
+                    "TokenLogic: cooldown transfer"
+                );
+            }
         }
 
-		// Synchronize cooldown balance
-        if (from != address(0)) {
+        // --------------------------------------------------
+        // Synchronize cooldown balance
+        // --------------------------------------------------
+        if (enforceCooldown) {
             uint256 fromBal = cooldownPrincipal[from];
-            if (fromBal > 0) {
-                uint256 delta = amount > fromBal ? fromBal : amount;
-				uint256 remaining = fromBal  - delta;
-                cooldownPrincipal[from] = remaining;
-			    if (remaining == 0) {
+			if (fromBal != 0) {
+                uint256 remaining = fromBal > amount ? fromBal - amount : 0;
+				cooldownPrincipal[from] = remaining;
+				if (remaining == 0) {
                     cooldownTimestamp[from] = 0;
                 }
             }
-		}
+        }
 
         super._update(from, to, amount);
     }
+
 
 
 	// Reserve storage gap for future upgrades
