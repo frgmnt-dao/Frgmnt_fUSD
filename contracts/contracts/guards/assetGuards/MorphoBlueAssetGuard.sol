@@ -102,6 +102,14 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 withdrawAssetsEst;    // Estimated asset amount received
   }
 
+
+  struct CollateralPlan {
+    Id id;                  // Market id
+    MarketParams mp;        // Market parameters
+    uint256 withdrawCollateral; // Amount of collateral to withdraw
+  }
+
+
   /// @notice Parameters forwarded through Morpho flashloan callback
   struct FlashloanParams {
     uint256 withdrawPortion; // Withdraw portion (1e18 = 100%)
@@ -109,6 +117,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 slippageBps;     // Slippage tolerance
     DebtPlan[] debts;        // Debt plans
     SupplyPlan[] supplies;   // Supply plans
+    CollateralPlan[] collaterals;   // Collateral plans
   }
 
   /*//////////////////////////////////////////////////////////////
@@ -172,6 +181,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       if (p.collateral > 0) {
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.collateralToken);
         uint256 unit = 10 ** IERC20Extended(mp.collateralToken).decimals();
+   
         totalCollateralUsd18 += (uint256(p.collateral) * price) / unit;
       }
 
@@ -245,9 +255,12 @@ contract MorphoBlueLendingPoolAssetGuard is
     SupplyPlan[] memory supplies =
       _collectSupplies(pool, withdrawPortion);
 
+    CollateralPlan[] memory collaterals = 
+      _collectCollaterals(pool, withdrawPortion);
+
     // No debt → direct withdraw
     if (!hasDebt) {
-      txs = _withdrawNoDebt(pool, supplies, to);
+      txs = _withdrawNoDebt(pool, supplies, collaterals, to);
       return (address(0), 0, txs);
     }
 
@@ -261,7 +274,8 @@ contract MorphoBlueLendingPoolAssetGuard is
       settlementToken: settlementToken,
       slippageBps: defaultSlippageBps,
       debts: debts,
-      supplies: supplies
+      supplies: supplies,
+      collaterals: collaterals
     });
 
     txs = new MultiTransaction[](1);
@@ -398,13 +412,34 @@ contract MorphoBlueLendingPoolAssetGuard is
     assembly { mstore(plans, n) }
   }
 
+  function _collectCollaterals(address pool, uint256 portion)
+      internal
+      view returns (CollateralPlan[] memory plans) {
+        Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
+        plans = new CollateralPlan[](mids.length);
+        uint256 n;
+        for (uint256 i; i < mids.length; i++) {
+            Position memory p = IMorpho(morpho).position(mids[i], pool);
+            if (p.collateral == 0) continue;
+            uint256 amount = _mulPortionRoundUp(p.collateral, portion);
+            MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
+            plans[n++] = CollateralPlan({
+              id: mids[i],
+              mp: mp,
+              withdrawCollateral: amount
+            }); 
+        }
+        assembly { mstore(plans, n) }
+  }
+
+
   /// @notice Withdraws supplies directly when no debt exists
   function _withdrawNoDebt(
     address pool,
     SupplyPlan[] memory supplies,
-    address to
-  ) internal view returns (MultiTransaction[] memory txs) {
-    txs = new MultiTransaction[](supplies.length);
+    CollateralPlan[] memory collaterals,
+    address to) internal view returns (MultiTransaction[] memory txs) {
+    txs = new MultiTransaction[](supplies.length + collaterals.length);
     uint256 n;
 
     for (uint256 i; i < supplies.length; i++) {
@@ -420,6 +455,20 @@ contract MorphoBlueLendingPoolAssetGuard is
         to
       );
     }
+
+    // Withdraw collaterals
+    for (uint256 i; i < collaterals.length; i++) {
+      if (collaterals[i].withdrawCollateral == 0) continue;
+        txs[n].to = morpho;
+        txs[n++].txData = abi.encodeWithSelector(
+            IMorphoBase.withdrawCollateral.selector,
+            collaterals[i].mp,
+            collaterals[i].withdrawCollateral,
+            pool,
+            to,
+            bytes("")
+        );
+      }
 
     assembly { mstore(txs, n) }
   }
@@ -477,7 +526,8 @@ contract MorphoBlueLendingPoolAssetGuard is
   ) internal view returns (MultiTransaction[] memory txs) {
     txs =  new MultiTransaction[](fp.debts.length * 3);
     uint256 n;
-
+    uint24 fee;
+    address factory = IPoolLogic(pool).factory();
     for (uint256 i; i < fp.debts.length; i++) {
       DebtPlan memory d = fp.debts[i];
       if (d.repayAssetsEst == 0) continue;
@@ -485,7 +535,7 @@ contract MorphoBlueLendingPoolAssetGuard is
 
       uint256 maxIn =
         _oracleMaxIn(
-          IPoolLogic(pool).factory(),
+        factory,
           fp.settlementToken,
           d.mp.loanToken,
           d.repayAssetsEst,
@@ -504,7 +554,8 @@ contract MorphoBlueLendingPoolAssetGuard is
       to: fp.settlementToken,
       txData: abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, type(uint256).max)});
       n++;
-
+      fee = uniV3Fee[fp.settlementToken][d.mp.loanToken];
+      require(fee != 0, "MBAG: fee not set");
       txs[n] = MultiTransaction({
       to: swapRouter,
       txData: abi.encodeWithSelector(
@@ -512,7 +563,7 @@ contract MorphoBlueLendingPoolAssetGuard is
         IV3SwapRouter.ExactOutputSingleParams({
           tokenIn: fp.settlementToken,
           tokenOut: d.mp.loanToken,
-          fee: uniV3Fee[fp.settlementToken][d.mp.loanToken],
+          fee: fee,
           recipient: pool,
           amountOut: d.repayAssetsEst,
           amountInMaximum: maxIn,
@@ -549,7 +600,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     assembly { mstore(txs, n) }
   }
 
-  /// @notice Withdraws all supplies after debts are repaid
+  /// @notice Withdraws all supplies and collaterals after debts are repaid
   function _withdrawAllAssets(
     address pool,
     FlashloanParams memory fp
@@ -562,9 +613,10 @@ contract MorphoBlueLendingPoolAssetGuard is
       uint256[] memory amounts
     )
   {
-    txs = new MultiTransaction[](fp.supplies.length);
-    tokens = new address[](fp.supplies.length);
-    amounts = new uint256[](fp.supplies.length);
+    uint256 size =  fp.supplies.length + fp.collaterals.length;
+    txs = new MultiTransaction[](size);
+    tokens = new address[](size);
+    amounts = new uint256[](size);
 
     uint256 n;
     for (uint256 i; i < fp.supplies.length; i++) {
@@ -586,6 +638,26 @@ contract MorphoBlueLendingPoolAssetGuard is
       n++;
     }
 
+    // --- Withdraw collaterals ---
+    for (uint256 i; i < fp.collaterals.length; i++) {
+        CollateralPlan memory c = fp.collaterals[i];
+        if (c.withdrawCollateral == 0) continue;
+
+        txs[n].to = morpho;
+        txs[n].txData = abi.encodeWithSelector(
+            IMorphoBase.withdrawCollateral.selector,
+            c.mp,
+            c.withdrawCollateral,
+            pool,
+            pool,
+            bytes("") // empty data
+        );
+
+        tokens[n] = c.mp.collateralToken;
+        amounts[n] = c.withdrawCollateral;
+        n++;
+    }
+
     assembly {
       mstore(txs, n)
       mstore(tokens, n)
@@ -602,13 +674,15 @@ contract MorphoBlueLendingPoolAssetGuard is
   ) internal view returns (MultiTransaction[] memory txs) {
     txs = new MultiTransaction[](tokens.length * 3);
     uint256 n;
+    uint24 fee;
+    address factory = IPoolLogic(pool).factory();
 
     for (uint256 i; i < tokens.length; i++) {
       if (tokens[i] == fp.settlementToken || amounts[i] == 0) continue;
 
       uint256 minOut =
         _oracleMinOut(
-          IPoolLogic(pool).factory(),
+          factory,
           tokens[i],
           fp.settlementToken,
           amounts[i],
@@ -629,6 +703,8 @@ contract MorphoBlueLendingPoolAssetGuard is
       });
 
       n++;
+      fee = uniV3Fee[tokens[i]][fp.settlementToken];
+      require(fee != 0, "MBAG: fee not set");
 
       txs[n] = MultiTransaction({
         to: swapRouter,
@@ -637,7 +713,7 @@ contract MorphoBlueLendingPoolAssetGuard is
         IV3SwapRouter.ExactInputSingleParams({
           tokenIn: tokens[i],
           tokenOut: fp.settlementToken,
-          fee: uniV3Fee[tokens[i]][fp.settlementToken],
+          fee: fee,
           recipient: pool,
           amountIn: amounts[i],
           amountOutMinimum: minOut,
@@ -708,7 +784,6 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 pOut = IHasAssetInfo(factory).getAssetPrice(tokenOut);
     uint256 uIn = 10 ** IERC20Extended(tokenIn).decimals();
     uint256 uOut = 10 ** IERC20Extended(tokenOut).decimals();
-
     uint256 usd = (amountIn * pIn) / uIn;
     uint256 out = (usd * uOut) / pOut;
     return (out * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
@@ -725,7 +800,6 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 pOut = IHasAssetInfo(factory).getAssetPrice(tokenOut);
     uint256 uIn = 10 ** IERC20Extended(tokenIn).decimals();
     uint256 uOut = 10 ** IERC20Extended(tokenOut).decimals();
-
     uint256 usd = (amountOut * pOut) / uOut;
     uint256 inAmt = (usd * uIn) / pIn;
     return (inAmt * (BPS_DENOMINATOR + slippageBps)) / BPS_DENOMINATOR;
