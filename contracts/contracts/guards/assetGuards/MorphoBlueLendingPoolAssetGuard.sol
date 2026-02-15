@@ -9,7 +9,6 @@ import { IMorpho, IMorphoBase, Id, MarketParams, Position, Market }
   from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
 import {SharesMathLib}
   from "@morpho-org/morpho-blue/src/libraries/SharesMathLib.sol";  
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IMorphoBlueLendingPoolAssetGuard }
   from "../../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
