@@ -7,6 +7,9 @@ pragma solidity ^0.8.24;
 
 import { IMorpho, IMorphoBase, Id, MarketParams, Position, Market }
   from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
+import {SharesMathLib}
+  from "@morpho-org/morpho-blue/src/libraries/SharesMathLib.sol";  
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IMorphoBlueLendingPoolAssetGuard }
   from "../../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
@@ -75,6 +78,9 @@ contract MorphoBlueLendingPoolAssetGuard is
   /// @notice Extra buffer added on flashloan amount
   uint256 public flashAmountBufferBps = 40; // 0.40%
 
+ 
+  uint256 public repayDebtBufferBps = 20; // 0.20%
+
   /// @notice Uniswap V3 fee tiers per token pair
   mapping(address => mapping(address => uint24)) public uniV3Fee;
 
@@ -120,6 +126,41 @@ contract MorphoBlueLendingPoolAssetGuard is
     CollateralPlan[] collaterals;   // Collateral plans
   }
 
+
+  /*//////////////////////////////////////////////////////////////
+                        EVENTS
+  //////////////////////////////////////////////////////////////*/
+
+  /// @notice Emitted when a Uniswap V3 fee tier is set for a token pair
+  /// @param tokenIn Input token address
+  /// @param tokenOut Output token address
+  /// @param fee Fee tier in bps (500, 3000, 10000)
+  event UniV3FeeUpdated(address indexed tokenIn, address indexed tokenOut, uint24 fee);
+
+  /// @notice Emitted when the default slippage tolerance is updated
+  /// @param oldBps Previous slippage tolerance (bps)
+  /// @param newBps New slippage tolerance (bps)
+  event DefaultSlippageBpsUpdated(uint256 oldBps, uint256 newBps);
+
+  /// @notice Emitted when the flashloan buffer is updated
+  /// @param oldBps Previous flashloan buffer (bps)
+  /// @param newBps New flashloan buffer (bps)
+  event FlashAmountBufferBpsUpdated(uint256 oldBps, uint256 newBps);
+
+  /// @notice Emitted when the Morpho repayment Debt buffer is updated
+  /// @param oldBps Previous repayment allowance buffer (bps)
+  /// @param newBps New repayment allowance buffer (bps)
+  event RepayDebtBufferBpsUpdated(uint256 oldBps, uint256 newBps);
+
+  /// @notice Emitted when a token's approve reset requirement is updated
+  /// @param token Token address
+  /// @param oldValue Previous value
+  /// @param newValue New value
+  event RequiresApproveResetUpdated(address indexed token, bool oldValue, bool newValue);
+
+
+
+
   /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
   //////////////////////////////////////////////////////////////*/
@@ -150,7 +191,40 @@ contract MorphoBlueLendingPoolAssetGuard is
     require(tokenIn != address(0) && tokenOut != address(0), "Invalid token");
     require(fee == 500 || fee == 3000 || fee == 10000, "Invalid fee");
     uniV3Fee[tokenIn][tokenOut] = fee;
+    emit UniV3FeeUpdated(tokenIn, tokenOut, fee);
   }
+
+
+    function setDefaultSlippageBps(uint256 _bps) external onlyOwner {
+    require(_bps <= BPS_DENOMINATOR, "MBAG: slippage too high");
+    emit DefaultSlippageBpsUpdated(defaultSlippageBps, _bps);
+    defaultSlippageBps = _bps;
+  }
+
+  function setFlashAmountBufferBps(uint256 _bps) external onlyOwner {
+    require(_bps <= BPS_DENOMINATOR, "MBAG: flash buffer too high");
+    emit FlashAmountBufferBpsUpdated(flashAmountBufferBps, _bps);
+    flashAmountBufferBps = _bps;
+  }
+
+  function setRepayDebtBufferBps(uint256 _bps) external onlyOwner {
+    require(_bps <= BPS_DENOMINATOR, "MBAG: repay buffer too high");
+    emit RepayDebtBufferBpsUpdated(repayDebtBufferBps, _bps);
+    repayDebtBufferBps = _bps;
+  }
+
+  /// @notice Sets whether a token requires approve(0) before approve(amount)
+  /// @param token Token address
+  /// @param value True if approve reset is required, false otherwise
+  function setRequiresApproveReset(address token, bool value) external onlyOwner {
+    require(token != address(0), "MBAG: token=0");
+    bool oldValue = requiresApproveReset[token];
+    requiresApproveReset[token] = value;
+    emit RequiresApproveResetUpdated(token, oldValue, value);
+  }
+
+
+
 
 
   /*//////////////////////////////////////////////////////////////
@@ -188,7 +262,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       // Supplied assets increase balance
       if (p.supplyShares > 0) {
         uint256 assets =
-          _sharesToAssetsDown(p.supplyShares, m.totalSupplyAssets, m.totalSupplyShares);
+          SharesMathLib.toAssetsDown(p.supplyShares, m.totalSupplyAssets, m.totalSupplyShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
         uint256 unit = 10 ** IERC20Extended(mp.loanToken).decimals();
         totalCollateralUsd18 += (assets * price) / unit;
@@ -197,7 +271,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       // Borrowed assets decrease balance
       if (p.borrowShares > 0) {
         uint256 assets =
-          _sharesToAssetsUp(p.borrowShares, m.totalBorrowAssets, m.totalBorrowShares);
+          SharesMathLib.toAssetsUp(p.borrowShares, m.totalBorrowAssets, m.totalBorrowShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
         uint256 unit = 10 ** IERC20Extended(mp.loanToken).decimals();
         totalDebtUsd18 += (assets * price) / unit;
@@ -310,9 +384,8 @@ contract MorphoBlueLendingPoolAssetGuard is
     require(fp.settlementToken == repayAsset, "MBAG: settlement mismatch");
 
     MultiTransaction[] memory p1 = _swapSettlementToDebts(pool, fp);
-    // Approve Morpho to pull settlement token when repaying debts in same token (e.g. USDC market).
-    // Must run before _repayDebts so repay() transferFrom(pool, morpho, amount) succeeds.
-    MultiTransaction[] memory p1b = _approveMorphoForSettlementRepay(fp, repayAsset);
+    // approve ALL loanTokens instead of only settlement token
+    MultiTransaction[] memory p1b = _approveMorphoForAllDebts(fp);
     MultiTransaction[] memory p2 = _repayDebts(pool, fp.debts);
 
     (
@@ -356,7 +429,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       Market memory m = IMorpho(morpho).market(mids[i]);
 
       uint256 repayAssets =
-        _sharesToAssetsUp(
+        SharesMathLib.toAssetsUp(
           repayShares,
           m.totalBorrowAssets,
           m.totalBorrowShares
@@ -395,7 +468,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       Market memory m = IMorpho(morpho).market(mids[i]);
 
       uint256 assets =
-        _sharesToAssetsDown(
+        SharesMathLib.toAssetsDown(
           shares,
           m.totalSupplyAssets,
           m.totalSupplyShares
@@ -528,17 +601,28 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 n;
     uint24 fee;
     address factory = IPoolLogic(pool).factory();
+    uint256 repayAmount;
+    DebtPlan memory d;
+    Market memory m;
+    uint256 maxIn;
     for (uint256 i; i < fp.debts.length; i++) {
-      DebtPlan memory d = fp.debts[i];
+      d = fp.debts[i];
       if (d.repayAssetsEst == 0) continue;
       if (d.mp.loanToken == fp.settlementToken) continue;
+      m = IMorpho(morpho).market(d.id);
+      repayAmount= SharesMathLib.toAssetsUp(
+            d.repayBorrowShares,
+            m.totalBorrowAssets,
+            m.totalBorrowShares
+        );
+      repayAmount = _bufferedRepay(repayAmount);
 
-      uint256 maxIn =
+      maxIn =
         _oracleMaxIn(
         factory,
           fp.settlementToken,
           d.mp.loanToken,
-          d.repayAssetsEst,
+          repayAmount,
           fp.slippageBps
         );
 
@@ -565,7 +649,7 @@ contract MorphoBlueLendingPoolAssetGuard is
           tokenOut: d.mp.loanToken,
           fee: fee,
           recipient: pool,
-          amountOut: d.repayAssetsEst,
+          amountOut: repayAmount,
           amountInMaximum: maxIn,
           sqrtPriceLimitX96: 0}))});
 
@@ -738,18 +822,77 @@ contract MorphoBlueLendingPoolAssetGuard is
   }
 
 
-  /// @notice Approves Morpho to pull settlement token for direct debt repayment (when loanToken == settlementToken).
-  /// Must run before _repayDebts so Morpho.repay() can transferFrom(pool, morpho, amount).
-  function _approveMorphoForSettlementRepay(FlashloanParams memory fp, address repayAsset)
-      internal view  returns (MultiTransaction[] memory txs){
-      uint256 amount;
-      for (uint256 i; i < fp.debts.length; i++) {
-        if (fp.debts[i].mp.loanToken == repayAsset) 
-          amount += fp.debts[i].repayAssetsEst;
+  /// @notice approve Morpho for ALL loanTokens involved in debt repayment
+  function _approveMorphoForAllDebts(FlashloanParams memory fp)
+      internal view returns (MultiTransaction[] memory txs) {
+    
+      uint256 len = fp.debts.length;
+
+      if (len == 0) return  new MultiTransaction[](0);
+
+      // temporary arrays for token aggregation
+      address[] memory tokens = new address[](len);
+      uint256[] memory amounts = new uint256[](len);
+      uint256 unique;
+      address loanToken;
+      uint256 exactAssets;
+      bool found;
+      Market memory m;
+
+      // -------------------------------------------------
+      // STEP 1 — aggregate buffered repay per loanToken
+      // -------------------------------------------------
+      for (uint256 i; i < len; i++) {
+        found = false; // MUST reset
+        loanToken = fp.debts[i].mp.loanToken;
+        m = IMorpho(morpho).market(fp.debts[i].id);
+        exactAssets= SharesMathLib.toAssetsUp(
+            fp.debts[i].repayBorrowShares,
+            m.totalBorrowAssets,
+            m.totalBorrowShares
+        );
+        exactAssets = _bufferedRepay(exactAssets);
+
+        
+        for (uint256 j; j < unique; j++) {
+          if (tokens[j] == loanToken) {
+            amounts[j] += exactAssets;
+            found = true;
+            break;
+          }    
+        }
+
+        if (!found) {
+          tokens[unique] = loanToken;
+          amounts[unique] = exactAssets;
+          unique++;
+        }
+    }
+
+    // -------------------------------------------------
+    // STEP 2 — build approvals using shared helper
+    // -------------------------------------------------
+    MultiTransaction[] memory temp = new MultiTransaction[](unique * 2);
+    uint256 n;
+    for (uint256 i; i < unique; i++) {
+      MultiTransaction[] memory approvals =
+      _approveMorphoForToken(tokens[i], amounts[i]);
+      for (uint256 j; j < approvals.length; j++) {
+        temp[n++] = approvals[j];
       }
-      if (amount == 0) return new MultiTransaction[](0);
-      return _approveMorphoForToken(repayAsset, amount);
+    }
+
+  // -------------------------------------------------
+  // STEP 3 — trim result array
+  // -------------------------------------------------
+  assembly {
+    mstore(temp, n)
   }
+  txs = temp;
+}
+
+
+
 
   /// @notice Shared approve Morpho for a token amount (handles USDT reset when needed).
   function _approveMorphoForToken(address token, uint256 amount) internal view 
@@ -766,6 +909,14 @@ contract MorphoBlueLendingPoolAssetGuard is
         txs[0].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, morpho, amount);
       }
   }
+
+
+  function _bufferedRepay(uint256 amount) internal view
+    returns (uint256){
+    return (amount * (BPS_DENOMINATOR + repayDebtBufferBps))
+        / BPS_DENOMINATOR;
+  }
+
 
 
 
@@ -824,19 +975,6 @@ contract MorphoBlueLendingPoolAssetGuard is
     for (uint256 i; i < f.length; i++) out[k++] = f[i];
   }
 
-  function _sharesToAssetsUp(uint256 s, uint256 a, uint256 t)
-    internal pure returns (uint256)
-  {
-    if (s == 0 || t == 0) return 0;
-    return (s * a + t - 1) / t;
-  }
-
-  function _sharesToAssetsDown(uint256 s, uint256 a, uint256 t)
-    internal pure returns (uint256)
-  {
-    if (s == 0 || t == 0) return 0;
-    return (s * a) / t;
-  }
 
   function _mulPortionRoundUp(uint256 x, uint256 p)
     internal pure returns (uint256)
