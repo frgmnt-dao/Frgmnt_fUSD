@@ -5,6 +5,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
 import { IMorphoBlueLendingPoolAssetGuard } from "../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
+import { CallResultChecker } from "./CallResultChecker.sol";
 
 /// @title PoolLogicFlashloanMorpho
 /// @notice Stateless Morpho Blue flashloan callback logic
@@ -41,9 +42,16 @@ abstract contract PoolLogicFlashloanMorpho {
 				innerParams
 			);
 
+		bool success; 
+		bytes memory returndata;
+		
 		for (uint256 i = 0; i < txs.length; ++i) {
-			(bool success, ) = txs[i].to.call(txs[i].txData);
-			require(success, "tx failed");
+
+			(success,  returndata) =  txs[i].to.call(
+					 txs[i].txData
+				);
+
+            CallResultChecker._checkCallResult(txs[i].txData, success, returndata);
 		}
 
 		require(

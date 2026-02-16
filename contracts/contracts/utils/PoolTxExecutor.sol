@@ -5,7 +5,7 @@ import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
 import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
 import { IGuard } from "../interfaces/guards/IGuard.sol";
 import { ITxTrackingGuard } from "../interfaces/guards/ITxTrackingGuard.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { CallResultChecker } from "./CallResultChecker.sol";
 
 library PoolTxExecutor {
 	// ============================================================
@@ -15,7 +15,6 @@ library PoolTxExecutor {
 	error InvalidGuard();
 	error AssetDisabled();
 	error InvalidTransaction();
-	error TxFailed();
 	error OnlyManagerOrTrader();
 
 	// ============================================================
@@ -54,7 +53,7 @@ library PoolTxExecutor {
 		}
 		
 		(bool success, bytes memory returndata) = to.call(data);
-        _checkCallResult(data, success, returndata);
+        CallResultChecker._checkCallResult(data, success, returndata);
 
 		_afterTxGuard(ctx.poolManagerLogic, guard, to, data);
 
@@ -113,25 +112,5 @@ library PoolTxExecutor {
 
 		ITxTrackingGuard(guard).afterTxGuard(poolManagerLogic, to, data);
 	}
-
-
-	function _checkCallResult(bytes memory data, bool success, bytes memory returndata) private pure {
-        if (!success) revert TxFailed();
-
-        // Only verify return value for ERC20 transfer/approve
-        require(data.length >= 4, "no selector");
-        bytes4 sig;
-        assembly {
-            sig := mload(add(data, 32))
-        }
-
-        bool isERC20 = (sig == IERC20.transfer.selector || sig == IERC20.approve.selector);
-
-        if (isERC20 && returndata.length > 0) {
-            // SafeERC20-style: decode as bool
-            bool ok = abi.decode(returndata, (bool));
-            if (!ok) revert TxFailed();
-        }
-        // For other calls (e.g., Aave withdraw/repay uint256), ignore returndata
-	}
+	
 }

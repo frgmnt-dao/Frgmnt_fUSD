@@ -6,6 +6,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
 import { IAaveLendingPoolAssetGuard } from "../interfaces/guards/IAaveLendingPoolAssetGuard.sol";
 import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
+import { CallResultChecker } from "./CallResultChecker.sol";
 
 /// @title PoolLogicFlashloanAave
 /// @notice Isolated Aave flashloan execution logic (stateless)
@@ -51,7 +52,9 @@ abstract contract PoolLogicFlashloanAave {
 		address pml = _getPoolManagerLogic();
 
 		// Resolve the Aave lending pool guard
-		address guard = IPoolManagerLogic(pml).getAssetGuard(msg.sender);
+		address guard =
+			IPoolManagerLogic(pml)
+				.getAssetGuard(msg.sender);
 
 		require(guard != address(0), "invalid lending pool");
 
@@ -70,12 +73,15 @@ abstract contract PoolLogicFlashloanAave {
 					params
 				);
 
+		bool success; 
+		bytes memory returndata;
+		
 		for (uint256 i = 0; i < transactions.length; ++i) {
-			(bool success, ) =
-				transactions[i].to.call(
+			(success,  returndata) = transactions[i].to.call(
 					transactions[i].txData
 				);
-			require(success, "tx failed");
+            CallResultChecker._checkCallResult(transactions[i].txData, success, returndata);
+
 		}
 
 		// Invariant:
