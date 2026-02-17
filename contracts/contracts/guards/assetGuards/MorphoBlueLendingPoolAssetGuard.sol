@@ -5,6 +5,8 @@ pragma solidity ^0.8.24;
                             IMPORTS
 //////////////////////////////////////////////////////////////*/
 
+import {MorphoBalancesLib} from "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
+
 import { IMorpho, IMorphoBase, Id, MarketParams, Position, Market }
   from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
 import {SharesMathLib}
@@ -244,13 +246,16 @@ contract MorphoBlueLendingPoolAssetGuard is
     address factory = IPoolLogic(pool).factory();
     uint256 totalCollateralUsd18;
     uint256 totalDebtUsd18;
+    uint256 totalSupplyAssets;
+    uint256 totalSupplyShares;
+    uint256 totalBorrowAssets;
+    uint256 totalBorrowShares;
 
     for (uint256 i; i < mids.length; i++) {
       Position memory p = IMorpho(morpho).position(mids[i], pool);
       if (p.collateral == 0 && p.borrowShares == 0 && p.supplyShares == 0) continue;
 
       MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
-      Market memory m = IMorpho(morpho).market(mids[i]);
 
       // Collateral increases balance
       if (p.collateral > 0) {
@@ -260,10 +265,15 @@ contract MorphoBlueLendingPoolAssetGuard is
         totalCollateralUsd18 += (uint256(p.collateral) * price) / unit;
       }
 
+    (totalSupplyAssets,
+      totalSupplyShares,
+      totalBorrowAssets,
+      totalBorrowShares) = _getAccruedMarketTotals(morpho, mp);
+
       // Supplied assets increase balance
       if (p.supplyShares > 0) {
         uint256 assets =
-          SharesMathLib.toAssetsDown(p.supplyShares, m.totalSupplyAssets, m.totalSupplyShares);
+          SharesMathLib.toAssetsDown(p.supplyShares, totalSupplyAssets, totalSupplyShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
         uint256 unit = 10 ** IERC20Extended(mp.loanToken).decimals();
         totalCollateralUsd18 += (assets * price) / unit;
@@ -272,7 +282,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       // Borrowed assets decrease balance
       if (p.borrowShares > 0) {
         uint256 assets =
-          SharesMathLib.toAssetsUp(p.borrowShares, m.totalBorrowAssets, m.totalBorrowShares);
+          SharesMathLib.toAssetsUp(p.borrowShares, totalBorrowAssets, totalBorrowShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
         uint256 unit = 10 ** IERC20Extended(mp.loanToken).decimals();
         totalDebtUsd18 += (assets * price) / unit;
@@ -419,6 +429,8 @@ contract MorphoBlueLendingPoolAssetGuard is
     plans = new DebtPlan[](mids.length);
 
     uint256 n;
+    uint256 totalBorrowAssets;
+    uint256 totalBorrowShares;
     for (uint256 i; i < mids.length; i++) {
       Position memory p = IMorpho(morpho).position(mids[i], pool);
       if (p.borrowShares == 0) continue;
@@ -427,13 +439,19 @@ contract MorphoBlueLendingPoolAssetGuard is
         _mulPortionRoundUp(p.borrowShares, portion);
 
       MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
-      Market memory m = IMorpho(morpho).market(mids[i]);
+      
+
+      (,
+      ,
+      totalBorrowAssets,
+      totalBorrowShares) = _getAccruedMarketTotals(morpho, mp);
+
 
       uint256 repayAssets =
         SharesMathLib.toAssetsUp(
           repayShares,
-          m.totalBorrowAssets,
-          m.totalBorrowShares
+          totalBorrowAssets,
+          totalBorrowShares
         );
 
       plans[n++] = DebtPlan({
@@ -458,6 +476,9 @@ contract MorphoBlueLendingPoolAssetGuard is
     plans = new SupplyPlan[](mids.length);
 
     uint256 n;
+    uint256 totalSupplyAssets;
+    uint256 totalSupplyShares;
+
     for (uint256 i; i < mids.length; i++) {
       Position memory p = IMorpho(morpho).position(mids[i], pool);
       if (p.supplyShares == 0) continue;
@@ -466,13 +487,17 @@ contract MorphoBlueLendingPoolAssetGuard is
         _mulPortionRoundUp(p.supplyShares, portion);
 
       MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
-      Market memory m = IMorpho(morpho).market(mids[i]);
+      (
+      totalSupplyAssets,
+      totalSupplyShares,
+      , 
+      ) = _getAccruedMarketTotals(morpho, mp);
 
       uint256 assets =
         SharesMathLib.toAssetsDown(
           shares,
-          m.totalSupplyAssets,
-          m.totalSupplyShares
+          totalSupplyAssets,
+          totalSupplyShares
         );
 
       plans[n++] = SupplyPlan({
@@ -601,21 +626,25 @@ contract MorphoBlueLendingPoolAssetGuard is
     txs =  new MultiTransaction[](fp.debts.length * 3);
     uint256 n;
     uint24 fee;
-    address factory = IPoolLogic(pool).factory();
     uint256 repayAmount;
     DebtPlan memory d;
-    Market memory m;
     uint256 maxIn;
+    uint256 totalBorrowAssets;
+    uint256 totalBorrowShares;
   
     for (uint256 i; i < fp.debts.length; i++) {
       d = fp.debts[i];
       if (d.repayAssetsEst == 0) continue;
       if (d.mp.loanToken == fp.settlementToken) continue;
-      m = IMorpho(morpho).market(d.id);
-      repayAmount= SharesMathLib.toAssetsUp(
+      (,
+      ,
+      totalBorrowAssets,
+      totalBorrowShares) = _getAccruedMarketTotals(morpho, d.mp);
+
+      repayAmount = SharesMathLib.toAssetsUp(
             d.repayBorrowShares,
-            m.totalBorrowAssets,
-            m.totalBorrowShares
+            totalBorrowAssets,
+            totalBorrowShares
         );
       repayAmount = _bufferedRepay(repayAmount);
 
@@ -624,7 +653,7 @@ contract MorphoBlueLendingPoolAssetGuard is
 
       maxIn =
         _oracleMaxIn(
-        factory,
+        IPoolLogic(pool).factory(),
           fp.settlementToken,
           d.mp.loanToken,
           repayAmount,
@@ -843,7 +872,8 @@ contract MorphoBlueLendingPoolAssetGuard is
       address loanToken;
       uint256 exactAssets;
       bool found;
-      Market memory m;
+      uint256 totalBorrowAssets;
+      uint256 totalBorrowShares;
 
       // -------------------------------------------------
       // STEP 1 — aggregate buffered repay per loanToken
@@ -851,11 +881,16 @@ contract MorphoBlueLendingPoolAssetGuard is
       for (uint256 i; i < len; i++) {
         found = false; // MUST reset
         loanToken = fp.debts[i].mp.loanToken;
-        m = IMorpho(morpho).market(fp.debts[i].id);
+        (,
+        ,
+        totalBorrowAssets,
+        totalBorrowShares) = _getAccruedMarketTotals(morpho, fp.debts[i].mp);
+
+
         exactAssets= SharesMathLib.toAssetsUp(
             fp.debts[i].repayBorrowShares,
-            m.totalBorrowAssets,
-            m.totalBorrowShares
+            totalBorrowAssets,
+            totalBorrowShares
         );
         exactAssets = _bufferedRepay(exactAssets);
 
@@ -930,6 +965,29 @@ contract MorphoBlueLendingPoolAssetGuard is
     return slippageBps < minSlippageBps ? minSlippageBps : slippageBps;
 
   }
+
+  function _getAccruedMarketTotals(
+    address morpho,
+    MarketParams memory mp)
+    internal
+    view
+    returns (
+        uint256 totalSupplyAssets,
+        uint256 totalSupplyShares,
+        uint256 totalBorrowAssets,
+        uint256 totalBorrowShares
+    ){
+    (
+        totalSupplyAssets,
+        totalSupplyShares,
+        totalBorrowAssets,
+        totalBorrowShares
+    ) = MorphoBalancesLib.expectedMarketBalances(
+        IMorpho(morpho),
+        mp
+    );
+  }
+
 
 
 
