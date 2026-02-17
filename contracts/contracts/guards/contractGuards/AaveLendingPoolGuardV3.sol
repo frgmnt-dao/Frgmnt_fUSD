@@ -115,9 +115,8 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		bytes calldata data
 	) public virtual override returns (uint16 txType, bool isPublic) {
 	
-		address poolLogic = IPoolManagerLogic(_poolManagerLogic).poolLogic();
-		address factory = IPoolManagerLogic(_poolManagerLogic).factory();
-		require(msg.sender == poolLogic, "Frgmnt: not pool logic");
+		address pool = IPoolManagerLogic(_poolManagerLogic).poolLogic();
+		require(msg.sender == pool, "Frgmnt: not pool logic");
 		bytes4 method = getMethod(data);
 
 		/*
@@ -133,7 +132,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 				(address, uint256, address, uint16)
 			);
 
-			txType = _deposit(factory, poolLogic, _poolManagerLogic, to, depositAsset, amount, onBehalfOf);
+			txType = _deposit(pool, _poolManagerLogic, to, depositAsset, amount, onBehalfOf);
 
 			/*
 			 * ---------------
@@ -146,7 +145,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 				(address, uint256, address)
 			);
 
-			txType = _withdraw(factory, poolLogic, _poolManagerLogic, to, withdrawAsset, amount, onBehalfOf);
+			txType = _withdraw(pool, _poolManagerLogic, to, withdrawAsset, amount, onBehalfOf);
 
 			/*
 			 * -------------------------------------------
@@ -156,7 +155,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		} else if (method == bytes4(keccak256("setUserUseReserveAsCollateral(address,bool)"))) {
 			(address asset, bool useAsCollateral) = abi.decode(getParams(data), (address, bool));
 
-			txType = _setUserUseReserveAsCollateral(factory, poolLogic, _poolManagerLogic, to, asset, useAsCollateral);
+			txType = _setUserUseReserveAsCollateral(pool, _poolManagerLogic, to, asset, useAsCollateral);
 
 			/*
 			 * ---------------
@@ -172,8 +171,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 			);
 
 			txType = _borrow(
-				factory,
-				poolLogic,
+				pool,
 				_poolManagerLogic,
 				to,
 				borrowAsset,
@@ -193,7 +191,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 				(address, uint256, uint256, address)
 			);
 
-			txType = _repay(factory, poolLogic, _poolManagerLogic, to, repayAsset, amount, onBehalfOf);
+			txType = _repay(pool, _poolManagerLogic, to, repayAsset, amount, onBehalfOf);
 
 			/*
 			 * --------------------------------------
@@ -203,7 +201,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		} else if (method == bytes4(keccak256("repayWithATokens(address,uint256,uint256)"))) {
 			(address asset, uint256 amount, ) = abi.decode(getParams(data), (address, uint256, uint256));
 
-			txType = _repayWithATokens(factory, poolLogic, _poolManagerLogic, to, asset, amount);
+			txType = _repayWithATokens(pool, _poolManagerLogic, to, asset, amount);
 
 			/*
 			 * -------------------------
@@ -215,7 +213,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		} else if (method == bytes4(keccak256("swapBorrowRateMode(address,uint256)"))) {
 			(address asset, uint256 rateMode) = abi.decode(getParams(data), (address, uint256));
 
-			txType = _swapBorrowRateMode(factory, poolLogic, _poolManagerLogic, to, asset, rateMode);
+			txType = _swapBorrowRateMode(pool, _poolManagerLogic, to, asset, rateMode);
 
 			/*
 			 * --------------------------------------------
@@ -225,7 +223,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		} else if (method == bytes4(keccak256("rebalanceStableBorrowRate(address,address)"))) {
 			(address asset, address user) = abi.decode(getParams(data), (address, address));
 
-			txType = _rebalanceStableBorrowRate(factory, poolLogic, _poolManagerLogic, to, asset, user);
+			txType = _rebalanceStableBorrowRate(pool, _poolManagerLogic, to, asset, user);
 		}
 
 		return (txType, false); // Aave ops are never public
@@ -270,8 +268,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	 * V3's supply() is equivalent to Aave V2 deposit().
 	 */
 	function _deposit(
-		address factory,
-		address poolLogic,
+		address pool,
 		address poolManagerLogic,
 		address to,
 		address depositAsset,
@@ -280,15 +277,15 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	) internal returns (uint16 txType) {
 		IHasSupportedAsset mgr = IHasSupportedAsset(poolManagerLogic);
 
-		// Must be a recognized “lending-enabled” asset (V2/V3 use 4 or 14)
-		uint16 assetType = IHasAssetInfo(factory).getAssetType(depositAsset);
+		// Must be a recognized “lending-enabled” asset 
+		uint16 assetType = IHasAssetInfo(poolManagerLogic).getAssetType(depositAsset);
 		require(assetType == 4, "Frgmnt: not lending-enabled");
 
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 		require(mgr.isSupportedAsset(depositAsset), "Frgmnt: unsupported deposit asset");
-		require(onBehalfOf == poolLogic, "Frgmnt: recipient not pool");
+		require(onBehalfOf == pool, "Frgmnt: recipient not pool");
 
-		emit Deposit(poolLogic, depositAsset, to, amount, block.timestamp);
+		emit Deposit(pool, depositAsset, to, amount, block.timestamp);
 		txType = uint16(TransactionType.AaveDeposit);
 	}
 
@@ -298,8 +295,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	 * ---------------------
 	 */
 	function _withdraw(
-		address, // factory (unused)
-		address poolLogic,
+		address pool,
 		address poolManagerLogic,
 		address to,
 		address withdrawAsset,
@@ -310,9 +306,12 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 		require(mgr.isSupportedAsset(withdrawAsset), "Frgmnt: unsupported withdraw asset");
-		require(onBehalfOf == poolLogic, "Frgmnt: recipient not pool");
+		uint16 assetType = IHasAssetInfo(poolManagerLogic).getAssetType(withdrawAsset);
+		require(assetType == 4, "Frgmnt: not lending-enabled");
+	
+		require(onBehalfOf == pool, "Frgmnt: recipient not pool");
 
-		emit Withdraw(poolLogic, withdrawAsset, to, amount, block.timestamp);
+		emit Withdraw(pool, withdrawAsset, to, amount, block.timestamp);
 		txType = uint16(TransactionType.AaveWithdraw);
 	}
 
@@ -322,8 +321,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	 * ---------------------
 	 */
 	function _setUserUseReserveAsCollateral(
-		address factory,
-		address poolLogic,
+		address pool,
 		address poolManagerLogic,
 		address to,
 		address asset,
@@ -332,13 +330,13 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		IHasSupportedAsset mgr = IHasSupportedAsset(poolManagerLogic);
 
 		// Must be borrow-enabled
-		uint16 assetType = IHasAssetInfo(factory).getAssetType(asset);
+		uint16 assetType = IHasAssetInfo(poolManagerLogic).getAssetType(asset);
 		require(assetType == 4, "Frgmnt: not borrow-enabled");
 
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 		require(mgr.isSupportedAsset(asset), "Frgmnt: unsupported asset");
 
-		emit SetUserUseReserveAsCollateral(poolLogic, asset, useAsCollateral, block.timestamp);
+		emit SetUserUseReserveAsCollateral(pool, asset, useAsCollateral, block.timestamp);
 		txType = uint16(TransactionType.AaveSetUserUseReserveAsCollateral);
 	}
 
@@ -351,8 +349,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	 *      → A pool may have **only one** active debt asset.
 	 */
 	function _borrow(
-		address factory,
-		address poolLogic,
+		address pool,
 		address poolManagerLogic,
 		address to,
 		address borrowAsset,
@@ -363,13 +360,13 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		// Only variable rate (Aave: 1=stable, 2=variable)
 		require(interestRateMode == 2, "Frgmnt: only variable rate");
 
-		uint16 assetType = IHasAssetInfo(factory).getAssetType(borrowAsset);
+		uint16 assetType = IHasAssetInfo(poolManagerLogic).getAssetType(borrowAsset);
 		require(assetType == 4, "Frgmnt: not borrow-enabled");
 
 		IHasSupportedAsset mgr = IHasSupportedAsset(poolManagerLogic);
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 		require(mgr.isSupportedAsset(borrowAsset), "Frgmnt: unsupported borrow asset");
-		require(onBehalfOf == poolLogic, "Frgmnt: recipient not pool");
+		require(onBehalfOf == pool, "Frgmnt: recipient not pool");
 
 		// -------------------------
 		// Single debt-asset rule
@@ -396,7 +393,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 			);
 		}
 
-		emit Borrow(poolLogic, borrowAsset, to, amount, block.timestamp);
+		emit Borrow(pool, borrowAsset, to, amount, block.timestamp);
 		txType = uint16(TransactionType.AaveBorrow);
 	}
 
@@ -406,8 +403,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	 * ---------------------
 	 */
 	function _repay(
-		address factory,
-		address poolLogic,
+		address pool,
 		address poolManagerLogic,
 		address to,
 		address repayAsset,
@@ -419,11 +415,11 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 		require(mgr.isSupportedAsset(repayAsset), "Frgmnt: unsupported repay asset");
 
-		uint16 assetType = IHasAssetInfo(factory).getAssetType(repayAsset);
+		uint16 assetType = IHasAssetInfo(poolManagerLogic).getAssetType(repayAsset);
 		require(assetType == 4, "Frgmnt: not borrow-enabled");
-		require(onBehalfOf == poolLogic, "Frgmnt: recipient not pool");
+		require(onBehalfOf == pool, "Frgmnt: recipient not pool");
 
-		emit Repay(poolLogic, repayAsset, to, amount, block.timestamp);
+		emit Repay(pool, repayAsset, to, amount, block.timestamp);
 		txType = uint16(TransactionType.AaveRepay);
 	}
 
@@ -437,8 +433,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	 *      - Regulatory & risk controls remain identical.
 	 */
 	function _repayWithATokens(
-		address factory,
-		address poolLogic,
+		address pool,
 		address poolManagerLogic,
 		address to,
 		address repayAsset,
@@ -449,10 +444,10 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 		require(mgr.isSupportedAsset(repayAsset), "Frgmnt: unsupported repay asset");
 
-		uint16 assetType = IHasAssetInfo(factory).getAssetType(repayAsset);
+		uint16 assetType = IHasAssetInfo(poolManagerLogic).getAssetType(repayAsset);
 		require(assetType == 4, "Frgmnt: not borrow-enabled");
 
-		emit Repay(poolLogic, repayAsset, to, amount, block.timestamp);
+		emit Repay(pool, repayAsset, to, amount, block.timestamp);
 		txType = uint16(TransactionType.AaveRepay);
 	}
 
@@ -468,17 +463,18 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	 *      Only a stable → variable swap is allowed for risk control.
 	 */
 	function _swapBorrowRateMode(
-		address, // factory
-		address, // poolLogic
+		address pool, 
 		address poolManagerLogic,
-		address, // to
+		address to,
 		address asset,
 		uint256 rateMode
 	) internal returns (uint16 txType) {
 		require(rateMode == 1, "Frgmnt: only stable->variable");
-		require(IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset), "Frgmnt: unsupported asset");
+		IHasSupportedAsset mgr = IHasSupportedAsset(poolManagerLogic);
+		require(mgr.isSupportedAsset(asset), "Frgmnt: unsupported asset");
+		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
 
-		emit SwapBorrowRateMode(IPoolManagerLogic(poolManagerLogic).poolLogic(), asset, rateMode);
+		emit SwapBorrowRateMode(pool, asset, rateMode);
 		txType = uint16(TransactionType.AaveSwapBorrowRateMode);
 	}
 
@@ -490,17 +486,18 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 	 * @dev Ensures the rebalance can only occur on the pool account itself.
 	 */
 	function _rebalanceStableBorrowRate(
-		address, // factory
-		address poolLogic,
+		address pool,
 		address poolManagerLogic,
-		address, // to
+		address to, 
 		address asset,
 		address user
 	) internal returns (uint16 txType) {
-		require(IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset), "Frgmnt: unsupported asset");
-		require(user == poolLogic, "Frgmnt: user not pool");
 
-		emit RebalanceStableBorrowRate(IPoolManagerLogic(poolManagerLogic).poolLogic(), asset);
+		require(user == pool, "Frgmnt: user not pool");
+		IHasSupportedAsset mgr = IHasSupportedAsset(poolManagerLogic);
+		require(mgr.isSupportedAsset(asset), "Frgmnt: unsupported asset");
+		require(mgr.isSupportedAsset(to), "Frgmnt: aave not enabled");
+		emit RebalanceStableBorrowRate(pool, asset);
 		txType = uint16(TransactionType.AaveRebalanceStableBorrowRate);
 	}
 }
