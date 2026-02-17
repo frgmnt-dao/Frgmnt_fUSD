@@ -45,6 +45,8 @@ contract MorphoBlueLendingPoolAssetGuard is
   /// @dev 100% = 10_000 bps
   uint256 private constant BPS_DENOMINATOR = 10_000;
 
+  uint256 internal constant FEE_DENOMINATOR = 1e6; // 1,000,000 = 100%
+
   /// @dev 100% withdraw = 1e18
   uint256 private constant PORTION_DENOMINATOR = 1e18;
 
@@ -604,6 +606,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     DebtPlan memory d;
     Market memory m;
     uint256 maxIn;
+  
     for (uint256 i; i < fp.debts.length; i++) {
       d = fp.debts[i];
       if (d.repayAssetsEst == 0) continue;
@@ -616,13 +619,17 @@ contract MorphoBlueLendingPoolAssetGuard is
         );
       repayAmount = _bufferedRepay(repayAmount);
 
+      fee = uniV3Fee[fp.settlementToken][d.mp.loanToken];
+      require(fee != 0, "MBAG: fee not set");
+
       maxIn =
         _oracleMaxIn(
         factory,
           fp.settlementToken,
           d.mp.loanToken,
           repayAmount,
-          fp.slippageBps
+         fp.slippageBps,
+          fee
         );
 
       if (requiresApproveReset[fp.settlementToken]) {
@@ -637,8 +644,6 @@ contract MorphoBlueLendingPoolAssetGuard is
       to: fp.settlementToken,
       txData: abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, type(uint256).max)});
       n++;
-      fee = uniV3Fee[fp.settlementToken][d.mp.loanToken];
-      require(fee != 0, "MBAG: fee not set");
       txs[n] = MultiTransaction({
       to: swapRouter,
       txData: abi.encodeWithSelector(
@@ -763,13 +768,17 @@ contract MorphoBlueLendingPoolAssetGuard is
     for (uint256 i; i < tokens.length; i++) {
       if (tokens[i] == fp.settlementToken || amounts[i] == 0) continue;
 
+      fee = uniV3Fee[tokens[i]][fp.settlementToken];
+      require(fee != 0, "MBAG: fee not set");
+
       uint256 minOut =
         _oracleMinOut(
           factory,
           tokens[i],
           fp.settlementToken,
           amounts[i],
-          fp.slippageBps
+         fp.slippageBps,
+          fee
         );
 
       if (requiresApproveReset[tokens[i]]) {
@@ -786,8 +795,6 @@ contract MorphoBlueLendingPoolAssetGuard is
       });
 
       n++;
-      fee = uniV3Fee[tokens[i]][fp.settlementToken];
-      require(fee != 0, "MBAG: fee not set");
 
       txs[n] = MultiTransaction({
         to: swapRouter,
@@ -891,8 +898,6 @@ contract MorphoBlueLendingPoolAssetGuard is
 }
 
 
-
-
   /// @notice Shared approve Morpho for a token amount (handles USDT reset when needed).
   function _approveMorphoForToken(address token, uint256 amount) internal view 
       returns (MultiTransaction[] memory txs) {
@@ -916,6 +921,16 @@ contract MorphoBlueLendingPoolAssetGuard is
         / BPS_DENOMINATOR;
   }
 
+  function _getEffectiveSlippage(uint256 slippageBps, uint256 fee)
+    internal
+    pure
+    returns (uint256){
+    // fee is Uniswap ppm (1e6 denominator)
+    uint256 minSlippageBps = (fee * BPS_DENOMINATOR) / (FEE_DENOMINATOR - fee);
+    return slippageBps < minSlippageBps ? minSlippageBps : slippageBps;
+
+  }
+
 
 
 
@@ -923,12 +938,18 @@ contract MorphoBlueLendingPoolAssetGuard is
                     ORACLE & MATH HELPERS
   //////////////////////////////////////////////////////////////*/
 
+  /// @notice Swaps tokens using Uniswap V3
+  /// @dev Only **single-hop paths** are used for exactOutputSingle and exactInputSingle.
+  /// Multi-hop exact-output paths (exactOutput with path array) are **not used** in this contract,
+  /// so `_oracleMaxIn` and `_oracleMinOut` accounting for pool fee is sufficient for all swaps.
+
   function _oracleMinOut(
     address factory,
     address tokenIn,
     address tokenOut,
     uint256 amountIn,
-    uint256 slippageBps
+    uint256 slippageBps,
+    uint24 fee
   ) internal view returns (uint256) {
     uint256 pIn = IHasAssetInfo(factory).getAssetPrice(tokenIn);
     uint256 pOut = IHasAssetInfo(factory).getAssetPrice(tokenOut);
@@ -936,6 +957,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 uOut = 10 ** IERC20Extended(tokenOut).decimals();
     uint256 usd = (amountIn * pIn) / uIn;
     uint256 out = (usd * uOut) / pOut;
+    slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
     return (out * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
   }
 
@@ -944,7 +966,8 @@ contract MorphoBlueLendingPoolAssetGuard is
     address tokenIn,
     address tokenOut,
     uint256 amountOut,
-    uint256 slippageBps
+    uint256 slippageBps,
+    uint24 fee
   ) internal view returns (uint256) {
     uint256 pIn = IHasAssetInfo(factory).getAssetPrice(tokenIn);
     uint256 pOut = IHasAssetInfo(factory).getAssetPrice(tokenOut);
@@ -952,7 +975,9 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 uOut = 10 ** IERC20Extended(tokenOut).decimals();
     uint256 usd = (amountOut * pOut) / uOut;
     uint256 inAmt = (usd * uIn) / pIn;
+    slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
     return (inAmt * (BPS_DENOMINATOR + slippageBps)) / BPS_DENOMINATOR;
+
   }
 
   function _concat5(
