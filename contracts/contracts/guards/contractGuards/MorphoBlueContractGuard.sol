@@ -16,7 +16,9 @@ import "../../interfaces/IHasAssetInfo.sol";
 import  "../../interfaces/IERC20Extended.sol";
 
 import { IMorpho, Id, MarketParams, Position, Market} from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
+import {MorphoBalancesLib} from "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import { MarketParamsLib } from "@morpho-org/morpho-blue/src/libraries/MarketParamsLib.sol";
+import {SharesMathLib} from "@morpho-org/morpho-blue/src/libraries/SharesMathLib.sol";  
 
 /* -------------------------------------------------------------------------- */
 /*                           MorphoBlueContractGuard                           */
@@ -58,8 +60,6 @@ contract MorphoBlueContractGuard is  TxDataUtils, IGuard, ITxTrackingGuard, ITra
 	bytes4 private constant SEL_LIQUIDATE =
 		bytes4(keccak256("liquidate((address,address,address,address,uint256),address,uint256,uint256,bytes)"));
 
-	bytes4 private constant SEL_FLASH_LOAN = bytes4(keccak256("flashLoan(address,uint256,bytes)"));
-    
 
 	/*//////////////////////////////////////////////////////////////////////////
                                     EVENTS
@@ -85,8 +85,6 @@ contract MorphoBlueContractGuard is  TxDataUtils, IGuard, ITxTrackingGuard, ITra
 		uint256 seizedShares,
 		uint256 time
 	);
-
-	event MorphoFlashLoanEvt(address indexed pool, address indexed token, uint256 amount, uint256 time);
 
   
   constructor(
@@ -127,7 +125,6 @@ contract MorphoBlueContractGuard is  TxDataUtils, IGuard, ITxTrackingGuard, ITra
 		else if (method == SEL_SUPPLY_COLL) txType = _handleSupplyCollateral(poolLogic, mgr, params);
 		else if (method == SEL_WITHDRAW_COLL) txType = _handleWithdrawCollateral(poolLogic, mgr, params);
 		else if (method == SEL_LIQUIDATE) txType = _handleLiquidate(poolLogic, mgr, params);
-		else if (method == SEL_FLASH_LOAN) txType = _handleFlashLoan(poolLogic, mgr, params);
 		else txType = uint16(TransactionType.NotUsed);
 
 		return (txType, false);
@@ -138,38 +135,50 @@ contract MorphoBlueContractGuard is  TxDataUtils, IGuard, ITxTrackingGuard, ITra
     function afterTxGuard(address _poolManagerLogic, address to, bytes calldata data) public view override {
         address poolLogic = IPoolManagerLogic(_poolManagerLogic).poolLogic();
         require(msg.sender == poolLogic, "MorphoGuard: not pool logic");
-		
-        /* address factory = IPoolManagerLogic(_poolManagerLogic).factory();
-
-        // Decode only the first input: MarketParams
-        bytes memory params = getParams(data);
-        (MarketParams memory mp, ) = abi.decode(params, (MarketParams, bytes));
-        Id marketId = MarketParamsLib.id(mp);
+        address factory = IPoolManagerLogic(_poolManagerLogic).factory();
 		IMorpho morpho = IMorpho(to);
-        Position memory pos = morpho.position(marketId, poolLogic);
-        Market memory m = morpho.market(marketId);
-
-        // Only check if there is outstanding debt
-        if (pos.borrowShares > 0) {
-            // Collateral value 
-            uint256 collateralValue = (uint256(pos.collateral) * IHasAssetInfo(factory).getAssetPrice(mp.collateralToken)) 
-            / (10 ** IERC20Extended(mp.collateralToken).decimals());
-
-            // Borrowed value 
-            uint256 borrowedAmount = _sharesToAssetsUp(pos.borrowShares, m.totalBorrowAssets, m.totalBorrowShares);
-            uint256 borrowedValue = (borrowedAmount * IHasAssetInfo(factory).getAssetPrice(mp.loanToken)) 
-            / (10 ** IERC20Extended(mp.loanToken).decimals());
-
-            // Health Factor = (Collateral * LLTV) / Borrowed
-            uint256 hf = (collateralValue * mp.lltv) / borrowedValue;
-            require(hf > HEALTH_FACTOR_LOWER_BOUNDARY, "MorphoGuard: health factor too low");
+        
+		bytes4 selector;
+        assembly {
+            selector := calldataload(data.offset)
         }
-	  */ 
-    }
+	
+        if (selector == morpho.withdrawCollateral.selector || selector == morpho.borrow.selector) {
+			MarketParams memory mp;
+			if (selector == morpho.withdrawCollateral.selector){
+                (mp,,,) = abi.decode(getParams(data),
+                (MarketParams, uint256, address, address));
+			} else {
+                (mp,,,,) = abi.decode(getParams(data),
+                (MarketParams, uint256, uint256, address, address));
+			}	
+	
+            Id marketId = MarketParamsLib.id(mp);
+            Position memory pos = morpho.position(marketId, poolLogic);
 
+            // Only check if there is outstanding debt
+            if (pos.borrowShares > 0) {
+                // Collateral value 
+                uint256 collateralValue = (uint256(pos.collateral) * IHasAssetInfo(factory).getAssetPrice(mp.collateralToken)) 
+                / (10 ** IERC20Extended(mp.collateralToken).decimals());
 
-    
+			    (,
+		        ,
+		        uint256 totalBorrowAssets,
+		        uint256 totalBorrowShares) = MorphoBalancesLib.expectedMarketBalances(morpho, mp);
+		        uint256 borrowAssets = SharesMathLib.toAssetsUp(pos.borrowShares, totalBorrowAssets, totalBorrowShares);
 
+                // Borrowed value 
+                uint256 borrowedValue = (borrowAssets * IHasAssetInfo(factory).getAssetPrice(mp.loanToken)) 
+                / (10 ** IERC20Extended(mp.loanToken).decimals());
+
+                // Health Factor = (Collateral * LLTV) / Borrowed
+                uint256 hf = (collateralValue * mp.lltv) / borrowedValue;
+                require(hf > HEALTH_FACTOR_LOWER_BOUNDARY, "MorphoGuard: health factor too low");
+            }
+        }
+
+	}
 	
 
 	/*//////////////////////////////////////////////////////////////////////////
@@ -316,23 +325,5 @@ contract MorphoBlueContractGuard is  TxDataUtils, IGuard, ITxTrackingGuard, ITra
 		return uint16(TransactionType.MorphoLiquidate);
 	}
 
-	function _handleFlashLoan(
-		address poolLogic,
-		IHasSupportedAsset mgr,
-		bytes memory params
-	) internal returns (uint16) {
-		(address token, uint256 assets, ) = abi.decode(params, (address, uint256, bytes));
-
-		require(mgr.isSupportedAsset(token), "MorphoGuard: unsupported token");
-
-		emit MorphoFlashLoanEvt(poolLogic, token, assets, block.timestamp);
-		return uint16(TransactionType.MorphoFlashLoan);
-	}
-
-	function _sharesToAssetsUp(uint256 s, uint256 a, uint256 t)
-        internal pure returns (uint256) {
-        if (s == 0 || t == 0) return 0;
-        return (s * a + t - 1) / t;
-    }
 
 }

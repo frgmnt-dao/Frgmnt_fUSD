@@ -237,7 +237,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
     function afterTxGuard(address poolManagerLogic, address to, bytes memory data) external view override {
         address poolLogic = IPoolManagerLogic(poolManagerLogic).poolLogic();
 		require(msg.sender == poolLogic, "Frgmnt: not pool logic");
-		/*
+		
         bytes4 method = getMethod(data);
 
         // Actions that may affect health factor
@@ -252,7 +252,7 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
         (, , , , , uint256 healthFactor) = IAaveV3Pool(to).getUserAccountData(poolLogic);
         require(healthFactor > HEALTH_FACTOR_LOWER_BOUNDARY, "Frgmnt: health factor too low");
     }
-	*/
+	
   }
 
 
