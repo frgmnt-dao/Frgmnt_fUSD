@@ -387,7 +387,10 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 		totalRewardAccrued += _netYield;
 	    totalManagementFee += _managementFee;
 		totalPerformanceFee += _performanceFee;
-		accountedAssets = totalValue;
+		if (totalValue > accountedAssets){
+		    accountedAssets = totalValue;
+		}
+		
         if (_supply > 0 && _netYield > 0) {
             rewardPerShare += (_netYield * 1e18) / _supply;
         }
