@@ -365,20 +365,32 @@ contract AaveV3LendingPoolAssetGuard is
     );
   }
 
-  function _chooseSettlementToken(DebtRepayPlan[] memory repayPlans) internal view returns (address) {
-    uint256 nonZeroDebtAssets = 0;
-    address onlyDebtAsset = address(0);
+  function _chooseSettlementToken(DebtRepayPlan[] memory repayPlans)
+      internal view returns (address) {
 
-    for (uint256 i = 0; i < repayPlans.length; ++i) {
-      if (repayPlans[i].repayStableAmount + repayPlans[i].repayVariableAmount == 0) continue;
-      nonZeroDebtAssets++;
-      onlyDebtAsset = repayPlans[i].underlyingAsset;
-      if (nonZeroDebtAssets > 1) break;
-    }
+      address firstAsset;
+      bool found;
+      
+      for (uint256 i = 0; i < repayPlans.length; ++i) {
+          if ( repayPlans[i].repayStableAmount +
+              repayPlans[i].repayVariableAmount == 0 ) continue;
 
-    if (nonZeroDebtAssets == 1) return onlyDebtAsset;
-    return preferredSettlementAsset;
+          address asset = repayPlans[i].underlyingAsset;
+
+          if (!found) {
+              firstAsset = asset;
+              found = true;
+          } else if (asset != firstAsset) {
+              // Multiple different assets detected → fallback
+              return preferredSettlementAsset;
+          }
+      }
+
+      // If exactly one unique asset was found, use it.
+      // If no debt exists, fallback.
+      return found ? firstAsset : preferredSettlementAsset;
   }
+
 
   /**
    * @notice Collect pro-rata debt repayment plans based on the pool's supported assets list.

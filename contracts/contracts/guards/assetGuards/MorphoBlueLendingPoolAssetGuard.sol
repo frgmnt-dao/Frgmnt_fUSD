@@ -268,7 +268,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     (totalSupplyAssets,
       totalSupplyShares,
       totalBorrowAssets,
-      totalBorrowShares) = _getAccruedMarketTotals(morpho, mp);
+      totalBorrowShares) = _getAccruedMarketTotals(mp);
 
       // Supplied assets increase balance
       if (p.supplyShares > 0) {
@@ -444,7 +444,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       (,
       ,
       totalBorrowAssets,
-      totalBorrowShares) = _getAccruedMarketTotals(morpho, mp);
+      totalBorrowShares) = _getAccruedMarketTotals(mp);
 
 
       uint256 repayAssets =
@@ -491,7 +491,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       totalSupplyAssets,
       totalSupplyShares,
       , 
-      ) = _getAccruedMarketTotals(morpho, mp);
+      ) = _getAccruedMarketTotals(mp);
 
       uint256 assets =
         SharesMathLib.toAssetsDown(
@@ -572,24 +572,31 @@ contract MorphoBlueLendingPoolAssetGuard is
     assembly { mstore(txs, n) }
   }
 
-  /// @notice Chooses the optimal settlement token
+  /// @notice Chooses the settlement token
+
   function _chooseSettlementToken(DebtPlan[] memory debts)
-    internal
-    view
-    returns (address)
-  {
-    address only;
-    uint256 count;
+      internal view returns (address){
+      address firstToken;
+      bool found;
 
-    for (uint256 i; i < debts.length; i++) {
-      if (debts[i].repayAssetsEst == 0) continue;
-      only = debts[i].mp.loanToken;
-      count++;
-      if (count > 1) break;
-    }
+      for (uint256 i; i < debts.length; i++) {
+          if (debts[i].repayAssetsEst == 0) continue;
 
-    return count == 1 ? only : preferredSettlementAsset;
+          address token = debts[i].mp.loanToken;
+
+          if (!found) {
+              firstToken = token;
+              found = true;
+          } else if (token != firstToken) {
+              // Two different tokens exist → fallback
+              return preferredSettlementAsset;
+          }
+      }
+
+      // All non-zero debts use the same token, or none exist
+      return found ? firstToken : preferredSettlementAsset;
   }
+  
 
   /// @notice Estimates flashloan amount required to repay all debts
   function _estimateFlashAmount(
@@ -639,7 +646,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       (,
       ,
       totalBorrowAssets,
-      totalBorrowShares) = _getAccruedMarketTotals(morpho, d.mp);
+      totalBorrowShares) = _getAccruedMarketTotals(d.mp);
 
       repayAmount = SharesMathLib.toAssetsUp(
             d.repayBorrowShares,
@@ -884,7 +891,7 @@ contract MorphoBlueLendingPoolAssetGuard is
         (,
         ,
         totalBorrowAssets,
-        totalBorrowShares) = _getAccruedMarketTotals(morpho, fp.debts[i].mp);
+        totalBorrowShares) = _getAccruedMarketTotals(fp.debts[i].mp);
 
 
         exactAssets= SharesMathLib.toAssetsUp(
@@ -967,7 +974,6 @@ contract MorphoBlueLendingPoolAssetGuard is
   }
 
   function _getAccruedMarketTotals(
-    address morpho,
     MarketParams memory mp)
     internal
     view
