@@ -223,6 +223,8 @@ contract UniswapV3AssetGuard is ERC20Guard {
             // by the pool's spot price at execution time, not by the TWAP-based estimates used
             // for decreaseLiquidity slippage protection.
 			if (dec.amount0 != 0 || dec.amount1 != 0) {
+				require(dec.amount0 <= type(uint128).max, "UniswapV3AssetGuard: amount0 overflow");
+				require(dec.amount1 <= type(uint128).max, "UniswapV3AssetGuard: amount1 overflow");
 				transactions[txCount].to = address(nonfungiblePositionManager);
 				transactions[txCount].txData = abi.encodeWithSelector(
 					INonfungiblePositionManager.collect.selector,
