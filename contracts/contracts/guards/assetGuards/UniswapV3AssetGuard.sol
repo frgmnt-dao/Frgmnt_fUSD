@@ -48,6 +48,9 @@ contract UniswapV3AssetGuard is ERC20Guard {
 
 	uint256 private constant BPS_DENOMINATOR = 10_000;
 
+	/// @dev 100% withdraw = 1e18
+    uint256 private constant PORTION_DENOMINATOR = 1e18;
+
 	event WithdrawalSlippageBpsUpdated(uint256 oldValue, uint256 newValue);
     event WithdrawalTwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event AdminUpdated(address oldAdmin, address newAdmin);
@@ -215,8 +218,8 @@ contract UniswapV3AssetGuard is ERC20Guard {
 			}
 
 			// NOTE:
-			// Collect requests are intentionally uncapped (uint128.max) to ensure that all owed
-            // principal and fee amounts are paid out. The actual amounts owed are determined
+			// Collect requests are intentionally capped to ensure that all owed
+            // principal and only pro-rata fee amounts are paid out. The actual amounts owed are determined
             // by the pool's spot price at execution time, not by the TWAP-based estimates used
             // for decreaseLiquidity slippage protection.
 			if (dec.amount0 != 0 || dec.amount1 != 0) {
@@ -226,8 +229,8 @@ contract UniswapV3AssetGuard is ERC20Guard {
 					INonfungiblePositionManager.CollectParams(
 						tokenIds[i],
 						to,
-						type(uint128).max,
-                        type(uint128).max
+						 uint128(dec.amount0),
+                         uint128(dec.amount1)
 					)
 				);
 				txCount++;
@@ -454,10 +457,10 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		uint256 principal1
 	) internal view returns (uint256 amount0, uint256 amount1) {
 		// Include proportional share of uncollected fees
-		(uint256 feeAmount0, uint256 feeAmount1) = _positionFees(nonfungiblePositionManager, tokenId);
-
-		amount0 = principal0 + ((feeAmount0 * portion) / 1e18);
-		amount1 = principal1 + ((feeAmount1 * portion) / 1e18);
+	    (uint256 feeAmount0, uint256 feeAmount1) = _positionFees(nonfungiblePositionManager, tokenId);
+    
+		amount0 = principal0 + ((feeAmount0 * portion) / PORTION_DENOMINATOR );
+		amount1 = principal1 + ((feeAmount1 * portion) / PORTION_DENOMINATOR );
 	}
 
 	/**
@@ -475,20 +478,20 @@ contract UniswapV3AssetGuard is ERC20Guard {
 			_getPositionParams(nonfungiblePositionManager, tokenId);
 
 		// LP portion to remove
-		require((uint256(liquidity) * portion) / 1e18 <= type(uint128).max, "UniswapV3AssetGuard: lpAmount overflow");
-		dec.lpAmount = uint128((uint256(liquidity) * portion) / 1e18);
-
+		dec.lpAmount = _calcLiquidityPortion(liquidity, portion);
 		// Current pool sqrtPrice
 		// NOTE: Use TWAP to mitigate spot price manipulation during withdrawal construction.
 		address pool = IUniswapV3Factory(nonfungiblePositionManager.factory()).getPool(token0, token1, fee);
 		require(pool != address(0), "UniswapV3AssetGuard: pool not found");
 
 		(int24 twapTick, ) = OracleLibrary.consult(pool, withdrawalTwapWindow);
-		uint160 sqrtPriceX96 = TickMath.getSqrtRatioAtTick(twapTick);
+		uint160 twapSqrtPriceX96 = TickMath.getSqrtRatioAtTick(twapTick);
+		(uint160 spotSqrtPriceX96, , , , , , ) = IUniswapV3Pool(pool).slot0();
+		_checkSpotPriceDeviation(spotSqrtPriceX96, twapSqrtPriceX96);
 
 		// Amounts corresponding to the lp portion
 		(dec.principal0, dec.principal1) = LiquidityAmounts.getAmountsForLiquidity(
-			sqrtPriceX96,
+			spotSqrtPriceX96,
 			TickMath.getSqrtRatioAtTick(tickLower),
 			TickMath.getSqrtRatioAtTick(tickUpper),
 			dec.lpAmount
@@ -498,4 +501,24 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		(dec.amount0, dec.amount1) =
 			_calcAmountsIncludingFees(nonfungiblePositionManager, tokenId, portion, dec.principal0, dec.principal1);
 	}
+
+    
+
+    function _calcLiquidityPortion(uint128 liquidity, uint256 portion)
+	    internal pure returns (uint128) {
+		uint256 lpAmount = (uint256(liquidity) * portion) / PORTION_DENOMINATOR;
+		require(lpAmount <= type(uint128).max, "UniswapV3AssetGuard: lpAmount overflow");
+		return uint128(lpAmount);
+	}
+
+	function _checkSpotPriceDeviation(uint160 spotSqrtPriceX96, uint160 twapSqrtPriceX96)
+	    internal view returns (bool ) {
+	    uint256 deviation = spotSqrtPriceX96 > twapSqrtPriceX96 
+		? uint256(spotSqrtPriceX96) - uint256(twapSqrtPriceX96 )
+		: uint256(twapSqrtPriceX96) - uint256(spotSqrtPriceX96);
+		require(deviation * BPS_DENOMINATOR / uint256(twapSqrtPriceX96 ) <= withdrawalSlippageBps,
+		    "UniswapV3AssetGuard: spot deviation too high");
+		return true;
+	}
+		
 }
