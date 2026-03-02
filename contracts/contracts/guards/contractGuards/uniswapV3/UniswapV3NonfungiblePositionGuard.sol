@@ -118,6 +118,7 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
 		IPoolManagerLogic poolManagerLogic = IPoolManagerLogic(_poolManagerLogic);
 		IHasSupportedAsset poolManagerLogicAssets = IHasSupportedAsset(_poolManagerLogic);
 		address pool = poolManagerLogic.poolLogic();
+		require(msg.sender == pool, "Frgmnt: not pool logic");
 
 		if (method == INonfungiblePositionManager.mint.selector) {
 			INonfungiblePositionManager.MintParams memory param = abi.decode(
