@@ -27,6 +27,7 @@ import "../../utils/UniswapV3PriceLibrary.sol";
  * @custom:project Frgmnt
  */
 contract UniswapV3AssetGuard is ERC20Guard {
+	
 	struct UniV3PoolParams {
 		address token0;
 		address token1;
@@ -148,6 +149,32 @@ contract UniswapV3AssetGuard is ERC20Guard {
 	/// @notice Synthetic valuation uses 18 decimals.
 	function getDecimals(address) external pure override returns (uint256 decimals) {
 		decimals = 18;
+	}
+
+    function removeTokenCheck(address pool, address asset, address token) public view override  
+        returns (bool) {
+
+		address factory = IPoolLogic(pool).factory();
+		INonfungiblePositionManager nonfungiblePositionManager = INonfungiblePositionManager(asset);
+
+		UniswapV3NonfungiblePositionGuard guard = UniswapV3NonfungiblePositionGuard(
+			IHasGuardInfo(factory).getContractGuard(asset)
+		);
+
+		uint256[] memory tokenIds = guard.getOwnedTokenIds(pool);
+		for (uint256 i = 0; i < tokenIds.length; ++i) {
+			uint256 tokenId = tokenIds[i];
+
+			UniV3PoolParams memory params;
+			(, , params.token0, params.token1, , , , , , , , ) = nonfungiblePositionManager.positions(tokenId);
+
+			if ((params.token0 == token ) || (params.token1 == token)) {
+				return false;
+			}
+		}
+
+    return true;
+
 	}
 
 	/**

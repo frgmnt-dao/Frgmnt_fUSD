@@ -44,4 +44,17 @@ abstract contract ClosedAssetGuard is TxDataUtils, IGuard, IAssetGuard {
 		uint256 balance = getBalance(pool, asset);
 		require(balance == 0, "ClosedAssetGuard: non-empty asset");
 	}
+
+
+	/**
+	 * @notice Ensures that an ERC20 token is not invloved in the asset position.
+	 */
+	function removeTokenCheck( address /* pool */,
+        address /* asset */,
+	    address /* token */) public view virtual returns (bool){
+
+		return true;
+	}
+
+
 }

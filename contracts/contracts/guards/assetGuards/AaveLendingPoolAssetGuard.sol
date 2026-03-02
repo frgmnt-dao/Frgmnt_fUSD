@@ -191,6 +191,21 @@ contract AaveV3LendingPoolAssetGuard is
     require(totalCollateralInUsd == 0 && totalDebtInUsd == 0, "Frgmnt: cannot remove non-empty asset");
   }
 
+
+
+  function removeTokenCheck(address pool, address, address token) public view override  
+    returns (bool) {
+
+    (uint256 collateralBalance, uint256 debtBalance) = _calculateAaveBalance(pool, token);
+    if ((collateralBalance > 0) || (debtBalance > 0)) {
+          return false;
+      
+    }
+
+	  return true;
+
+	}
+
   // ============================================================
   // Withdraw planner (IAssetGuard)
   // ============================================================

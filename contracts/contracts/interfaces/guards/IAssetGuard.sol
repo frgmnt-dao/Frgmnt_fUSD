@@ -19,5 +19,8 @@ interface IAssetGuard {
 
 	function getDecimals(address asset) external view returns (uint256 decimals);
 
-	function removeAssetCheck(address poolLogic, address asset) external view;
+	function removeAssetCheck(address pool, address asset) external view;
+
+	function removeTokenCheck(address pool, address asset, address token) external view returns (bool);
+	   
 }

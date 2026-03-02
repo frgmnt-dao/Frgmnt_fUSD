@@ -31,6 +31,7 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
 
 	error UnsupportedApproval();
 	error NonZeroAssetBalance();
+	error UsedAsset();
 
 	// -------------------------------------------------------------------------
 	// Events
@@ -160,8 +161,39 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
 	 * @dev Enforced by guards registry before unregistering this asset.
 	 */
 	function removeAssetCheck(address pool, address asset) public view virtual override {
+
 		if (getBalance(pool, asset) != 0) {
 			revert NonZeroAssetBalance();
 		}
+
+		address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
+        IHasSupportedAsset.Asset[] memory supportedAssets =
+        IHasSupportedAsset(poolManagerLogic).getSupportedAssets();
+
+		address token;
+		address guard;
+		
+		for (uint256 i = 0; i < supportedAssets.length; ++i) {
+		    token = supportedAssets[i].asset;
+		    guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(token);
+		    if (guard != address(0)) {
+		        if (!IAssetGuard(guard).removeTokenCheck(pool, asset, token)){
+			        revert UsedAsset();
+			    }
+		    }
+
+	    }
+	}
+
+
+
+	/**
+	 * @notice Ensures that an ERC20 token is not invloved in the asset position.
+	 */
+	function removeTokenCheck( address /* pool */,
+        address /* asset */,
+	    address /* token */) public view virtual   
+	    returns (bool){
+		return true;
 	}
 }

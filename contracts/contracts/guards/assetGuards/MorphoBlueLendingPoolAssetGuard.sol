@@ -302,6 +302,7 @@ contract MorphoBlueLendingPoolAssetGuard is
 
   /// @notice Ensures no open Morpho position exists before asset removal
   function removeAssetCheck(address pool, address) public view override {
+    
     Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
     for (uint256 i; i < mids.length; i++) {
       Position memory p = IMorpho(morpho).position(mids[i], pool);
@@ -313,6 +314,39 @@ contract MorphoBlueLendingPoolAssetGuard is
       );
     }
   }
+
+
+  function removeTokenCheck(address pool, address, address token) public view override  
+    returns (bool) {
+
+    Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
+
+    for (uint256 i; i < mids.length; i++) {
+
+        Position memory p = IMorpho(morpho).position(mids[i], pool);
+
+        MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
+
+        if ((p.collateral > 0) && (mp.collateralToken == token || mp.loanToken == token)) {
+
+          return false;
+        }
+
+        if ((p.supplyShares > 0) && (mp.loanToken == token)) {
+
+          return false;
+        }
+
+        if ((p.borrowShares > 0) && (mp.collateralToken == token || mp.loanToken == token)){
+
+          return false;
+        }
+    }
+
+	  return true;
+
+	}
+
 
   /*//////////////////////////////////////////////////////////////
                       WITHDRAW PROCESSING
