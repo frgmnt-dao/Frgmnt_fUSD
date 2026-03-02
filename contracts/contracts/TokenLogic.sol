@@ -476,33 +476,37 @@ contract TokenLogic is
 	/**
 	 * @dev Helper to update the user's time-weighted average mint timestamp.
 	 *
-	 * @param oldTimestamp Previous cooldownTimestamp[user].
-	 * @param newMint Amount of FUSD just minted (18 decimals).
-	 * @param userBalanceBefore FUSD balance before minting `newMint`.
-	 *
-	 * @return newTimestamp New average timestamp after including this mint.
+	 * @param to  user's address.
+	 * @param amount Amount of FUSD to mint (18 decimals).
 	 */
 	function _updateCooldownTimestamp(
-		uint256 oldTimestamp,
-		uint256 newMint,
-		uint256 userBalanceBefore
-	) internal view returns (uint256 newTimestamp) {
-		uint256 total = userBalanceBefore + newMint;
-		uint256 nowTs = block.timestamp;
+		address to,
+		uint256 amount) internal view returns (uint256, uint256) {
 
-		if (userBalanceBefore == 0 || oldTimestamp == 0) {
-			// First mint for this user or no previous timestamp
-			return nowTs;
+        uint256 prevPrincipal = cooldownPrincipal[to];
+		uint256 prevTimestamp =  cooldownTimestamp[to];
+		uint256 newPrincipal = prevPrincipal + amount;
+
+        if (prevPrincipal != 0 &&  prevTimestamp == 0){
+			return (newPrincipal, block.timestamp);
 		}
 
-		  //  if old cooldown already expired → reset
-        if (cooldownPeriod != 0 &&  nowTs >= oldTimestamp + cooldownPeriod) {
-            return nowTs ;
-        }
+		bool expired =
+            prevTimestamp != 0 &&
+            cooldownPeriod != 0 &&
+            block.timestamp >= prevTimestamp + cooldownPeriod;
 
-		// Weighted average: (oldTs * oldBal + now * newMint) / (oldBal + newMint)
-		return (oldTimestamp * userBalanceBefore + nowTs * newMint) / total;
-	}
+
+        if (prevPrincipal == 0 || expired) {
+			return (amount, block.timestamp);
+    
+        } 
+	
+        // Weighted average: (oldTs * oldBal + now * newMint) / (oldBal + newMint)
+        uint256 newTimestamp = (prevTimestamp * prevPrincipal + block.timestamp * amount) / newPrincipal;
+		return (newPrincipal, newTimestamp);
+	    
+	} 
 
 	/**
 	 * @notice Returns the remaining cooldown (in seconds) before the user
@@ -599,17 +603,20 @@ contract TokenLogic is
         bool isTransfer = from != address(0) && to != address(0);
 		bool exemptSender = cooldownExemptSender[from];
 		bool exemptRecipient = cooldownExemptRecipient[to];
-		bool enforceCooldown = from != address(0) && !exemptSender && !exemptRecipient;
+		//bool enforceCooldown = from != address(0) && !exemptSender && !exemptRecipient;
+
+		if (from == to) {
+			super._update(from, to, amount);
+            return;
+        }
 
 		// --------------------------------------------------
         // HANDLE MINT COOLDOWN (future-proof safety)
         // --------------------------------------------------
         if (isMint && !exemptRecipient) {
-            uint256 prevPrincipal = cooldownPrincipal[to];
-            uint256 prevTimestamp = cooldownTimestamp[to];
-            cooldownTimestamp[to] =
-            _updateCooldownTimestamp(prevTimestamp, amount, prevPrincipal);
-            cooldownPrincipal[to] = prevPrincipal + amount;
+            (cooldownPrincipal[to], cooldownTimestamp[to]) =
+            _updateCooldownTimestamp(to, amount);
+           
         }
 
         // --------------------------------------------------
@@ -629,15 +636,22 @@ contract TokenLogic is
         // --------------------------------------------------
         // Synchronize cooldown balance
         // --------------------------------------------------
-        if (enforceCooldown) {
+        if (from != address(0)) {
             uint256 fromBal = cooldownPrincipal[from];
 			if (fromBal != 0) {
                 uint256 remaining = fromBal > amount ? fromBal - amount : 0;
 				cooldownPrincipal[from] = remaining;
-				if (remaining == 0) {
+
+				if (remaining == 0){
                     cooldownTimestamp[from] = 0;
                 }
             }
+
+			if (to != address(0)) {
+               cooldownPrincipal[to]+=  amount;
+            }
+
+
         }
 
         super._update(from, to, amount);
