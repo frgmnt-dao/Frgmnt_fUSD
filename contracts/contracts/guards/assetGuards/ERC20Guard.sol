@@ -177,7 +177,7 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
 		    token = supportedAssets[i].asset;
 		    guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(token);
 		    if (guard != address(0)) {
-		        if (!IAssetGuard(guard).removeTokenCheck(pool, asset, token)){
+		        if (!IAssetGuard(guard).removeTokenCheck(pool, token, asset)){
 			        revert UsedAsset();
 			    }
 		    }
