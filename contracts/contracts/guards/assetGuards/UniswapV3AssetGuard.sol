@@ -188,19 +188,23 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		transactions = new MultiTransaction[](tokenIds.length * 2);
 
 		for (uint256 i = 0; i < tokenIds.length; ++i) {
+
+		
+		    // Skip NFTs where either underlying token is not supported by the factory
+			if (checkTokens(nonfungiblePositionManager, factory, tokenIds[i])) {
+				continue;
+			}
+
 			DecreaseLiquidity memory dec = _calcDecreaseLiquidity(nonfungiblePositionManager, tokenIds[i], portion);
 
 			// 1) Decrease liquidity, if any
 			if (dec.lpAmount != 0) {
 				// Slippage protection: use TWAP-priced expected principal amounts and apply configurable bps buffer.
-				uint256 amount0Min;
-				uint256 amount1Min;
-
 				if (dec.principal0 != 0) {
-					amount0Min = (dec.principal0 * (BPS_DENOMINATOR - withdrawalSlippageBps)) / BPS_DENOMINATOR;
+					dec.principal0 = (dec.principal0 * (BPS_DENOMINATOR - withdrawalSlippageBps)) / BPS_DENOMINATOR;
 				}
 				if (dec.principal1 != 0) {
-					amount1Min = (dec.principal1 * (BPS_DENOMINATOR - withdrawalSlippageBps)) / BPS_DENOMINATOR;
+					dec.principal1 = (dec.principal1 * (BPS_DENOMINATOR - withdrawalSlippageBps)) / BPS_DENOMINATOR;
 				}
 
 				transactions[txCount].to = address(nonfungiblePositionManager);
@@ -209,8 +213,8 @@ contract UniswapV3AssetGuard is ERC20Guard {
 					INonfungiblePositionManager.DecreaseLiquidityParams(
 						tokenIds[i],
 						dec.lpAmount,
-						amount0Min,
-						amount1Min,
+						dec.principal0,
+						dec.principal1,
 						block.timestamp + DEADLINE_BUFFER
 					)
 				);
@@ -521,6 +525,16 @@ contract UniswapV3AssetGuard is ERC20Guard {
 		require(deviation * BPS_DENOMINATOR / uint256(twapSqrtPriceX96 ) <= withdrawalSlippageBps,
 		    "UniswapV3AssetGuard: spot deviation too high");
 		return true;
+	}
+
+	function checkTokens(INonfungiblePositionManager nonfungiblePositionManager,address factory, 
+	        uint256 tokenId) internal view returns (bool){
+       
+		    (address token0, address token1, , , , ) =
+			_getPositionParams(nonfungiblePositionManager, tokenId);
+		    // Skip NFTs where either underlying token is not supported by the factory
+			return !IHasAssetInfo(factory).isSupportedAsset(token0) || !IHasAssetInfo(factory).isSupportedAsset(token1);
+		
 	}
 		
 }

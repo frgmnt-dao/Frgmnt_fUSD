@@ -258,7 +258,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
 
       // Collateral increases balance
-      if (p.collateral > 0) {
+      if ((p.collateral > 0) && (IHasAssetInfo(factory).isSupportedAsset(mp.collateralToken))) {
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.collateralToken);
         uint256 unit = 10 ** IERC20Extended(mp.collateralToken).decimals();
    
@@ -271,7 +271,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       totalBorrowShares) = _getAccruedMarketTotals(mp);
 
       // Supplied assets increase balance
-      if (p.supplyShares > 0) {
+      if ((p.supplyShares > 0) && (IHasAssetInfo(factory).isSupportedAsset(mp.loanToken))) {
         uint256 assets =
           SharesMathLib.toAssetsDown(p.supplyShares, totalSupplyAssets, totalSupplyShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
@@ -280,7 +280,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       }
 
       // Borrowed assets decrease balance
-      if (p.borrowShares > 0) {
+      if ((p.borrowShares > 0) && (IHasAssetInfo(factory).isSupportedAsset(mp.collateralToken))){
         uint256 assets =
           SharesMathLib.toAssetsUp(p.borrowShares, totalBorrowAssets, totalBorrowShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
@@ -432,14 +432,13 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 totalBorrowAssets;
     uint256 totalBorrowShares;
     for (uint256 i; i < mids.length; i++) {
+      address factory = IPoolLogic(pool).factory();
       Position memory p = IMorpho(morpho).position(mids[i], pool);
-      if (p.borrowShares == 0) continue;
-
+      MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
+      if ((p.borrowShares == 0) || (!IHasAssetInfo(factory).isSupportedAsset(mp.collateralToken))) continue;
+     
       uint256 repayShares =
         _mulPortionRoundUp(p.borrowShares, portion);
-
-      MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
-      
 
       (,
       ,
@@ -472,6 +471,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     view
     returns (SupplyPlan[] memory plans)
   {
+    address factory = IPoolLogic(pool).factory();
     Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
     plans = new SupplyPlan[](mids.length);
 
@@ -481,12 +481,13 @@ contract MorphoBlueLendingPoolAssetGuard is
 
     for (uint256 i; i < mids.length; i++) {
       Position memory p = IMorpho(morpho).position(mids[i], pool);
-      if (p.supplyShares == 0) continue;
+      MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
+
+      if ((p.supplyShares == 0) || (!IHasAssetInfo(factory).isSupportedAsset(mp.loanToken))) continue;
 
       uint256 shares =
         _mulPortionRoundUp(p.supplyShares, portion);
 
-      MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
       (
       totalSupplyAssets,
       totalSupplyShares,
@@ -514,14 +515,15 @@ contract MorphoBlueLendingPoolAssetGuard is
   function _collectCollaterals(address pool, uint256 portion)
       internal
       view returns (CollateralPlan[] memory plans) {
+        address factory = IPoolLogic(pool).factory();
         Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
         plans = new CollateralPlan[](mids.length);
         uint256 n;
         for (uint256 i; i < mids.length; i++) {
             Position memory p = IMorpho(morpho).position(mids[i], pool);
-            if (p.collateral == 0) continue;
-            uint256 amount = _mulPortionRoundUp(p.collateral, portion);
             MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
+            if ((p.collateral == 0) || (!IHasAssetInfo(factory).isSupportedAsset(mp.collateralToken))) continue;
+            uint256 amount = _mulPortionRoundUp(p.collateral, portion);
             plans[n++] = CollateralPlan({
               id: mids[i],
               mp: mp,
