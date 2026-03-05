@@ -239,21 +239,57 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
 		require(msg.sender == poolLogic, "Frgmnt: not pool logic");
 		
         bytes4 method = getMethod(data);
+		
+		bool riskIncreasing = false;
 
-        // Actions that may affect health factor
-        if (
-            method == bytes4(keccak256("borrow(bytes32)")) ||
-            method == bytes4(keccak256("setUserUseReserveAsCollateral(bytes32)")) ||
-            method == bytes4(keccak256("withdraw(bytes32)")) ||
-            method == bytes4(keccak256("borrow(address,uint256,uint256,uint16,address)")) ||
-            method == bytes4(keccak256("setUserUseReserveAsCollateral(address,bool)")) ||
-            method == bytes4(keccak256("withdraw(address,uint256,address)"))
-        ) {
-        (, , , , , uint256 healthFactor) = IAaveV3Pool(to).getUserAccountData(poolLogic);
-        require(healthFactor > HEALTH_FACTOR_LOWER_BOUNDARY, "Frgmnt: health factor too low");
+        // -------------------------
+        // BORROW always increases risk
+        // -------------------------
+        if (method == bytes4(keccak256("borrow(address,uint256,uint256,uint16,address)"))) {
+            riskIncreasing = true;
+        }
+
+        // -------------------------
+        // WITHDRAW: risky only if asset is collateral
+        // -------------------------
+        if (method == bytes4(keccak256("withdraw(address,uint256,address)"))) {
+
+            (address asset,,) = abi.decode(getParams(data),(address,uint256,address));
+
+            (, , , , , , , ,bool usageAsCollateralEnabled) =
+            IAaveProtocolDataProvider(aaveProtocolDataProviderV3).getUserReserveData(asset, poolLogic);
+
+            if (usageAsCollateralEnabled) {
+                riskIncreasing = true;
+            }
+        }
+
+        // -------------------------
+        // DISABLING collateral increases risk
+        // -------------------------
+        if (method == bytes4(keccak256("setUserUseReserveAsCollateral(address,bool)"))) {
+
+            (, bool useAsCollateral) = abi.decode(getParams(data),(address,bool));
+
+            if (!useAsCollateral) {
+                riskIncreasing = true;
+            }
+        }
+
+        // -------------------------
+        // Enforce HF only if risk increased
+        // -------------------------
+        if (riskIncreasing) {
+
+            (, , , , , uint256 healthFactor) =
+                IAaveV3Pool(to).getUserAccountData(poolLogic);
+
+            require(
+                healthFactor > HEALTH_FACTOR_LOWER_BOUNDARY,
+                "Frgmnt: health factor too low"
+            );
+        }
     }
-	
-  }
 
 
 	/*//////////////////////////////////////////////////////////////////////////
