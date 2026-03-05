@@ -280,7 +280,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       }
 
       // Borrowed assets decrease balance
-      if ((p.borrowShares > 0) && (IHasAssetInfo(factory).isSupportedAsset(mp.collateralToken))){
+      if ((p.borrowShares > 0) && (IHasAssetInfo(factory).isSupportedAsset(mp.loanToken))){
         uint256 assets =
           SharesMathLib.toAssetsUp(p.borrowShares, totalBorrowAssets, totalBorrowShares);
         uint256 price = IHasAssetInfo(factory).getAssetPrice(mp.loanToken);
@@ -469,7 +469,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       address factory = IPoolLogic(pool).factory();
       Position memory p = IMorpho(morpho).position(mids[i], pool);
       MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
-      if ((p.borrowShares == 0) || (!IHasAssetInfo(factory).isSupportedAsset(mp.collateralToken))) continue;
+      if ((p.borrowShares == 0) || (!IHasAssetInfo(factory).isSupportedAsset(mp.loanToken))) continue;
      
       uint256 repayShares =
         _mulPortionRoundUp(p.borrowShares, portion);
