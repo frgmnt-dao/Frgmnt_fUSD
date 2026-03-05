@@ -546,14 +546,33 @@ contract UniswapV3AssetGuard is ERC20Guard {
 
 	function _checkSpotPriceDeviation(uint160 spotSqrtPriceX96, uint160 twapSqrtPriceX96)
 	    internal view returns (bool ) {
-        uint256 spotPrice = FullMath.mulDiv(uint256(spotSqrtPriceX96), uint256(spotSqrtPriceX96), 1);
-		uint256 twapPrice = FullMath.mulDiv(uint256(twapSqrtPriceX96), uint256(twapSqrtPriceX96), 1);
 
-	    uint256 deviation = spotPrice > twapPrice
-		? uint256(spotPrice) - uint256(twapPrice)
-		: uint256(twapPrice) - uint256(spotPrice);
-		require(deviation * BPS_DENOMINATOR / uint256(twapPrice) <= withdrawalSlippageBps,
-		    "UniswapV3AssetGuard: spot deviation too high");
+		require(twapSqrtPriceX96 != 0, "UniswapV3AssetGuard: invalid TWAP");
+
+        uint256 spotPrice = FullMath.mulDiv(
+        uint256(spotSqrtPriceX96),
+        uint256(spotSqrtPriceX96),
+        1 << 192);
+		uint256 twapPrice =  FullMath.mulDiv(
+        uint256(twapSqrtPriceX96),
+        uint256(twapSqrtPriceX96),
+        1 << 192);
+
+	    // Compute allowed price bounds using BPS
+        uint256 upperBound = FullMath.mulDiv(
+        twapPrice,
+        BPS_DENOMINATOR + withdrawalSlippageBps,
+        BPS_DENOMINATOR);
+		
+		uint256 lowerBound = FullMath.mulDiv(
+        twapPrice,
+        BPS_DENOMINATOR - withdrawalSlippageBps,
+        BPS_DENOMINATOR);
+
+        require(
+        spotPrice <= upperBound && spotPrice >= lowerBound,
+        "UniswapV3AssetGuard: spot deviation too high");
+
 		return true;
 	}
 
