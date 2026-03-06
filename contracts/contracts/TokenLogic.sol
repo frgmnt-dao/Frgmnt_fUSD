@@ -642,7 +642,7 @@ contract TokenLogic is
                 uint256 remaining = fromBal > amount ? fromBal - amount : 0;
 				cooldownPrincipal[from] = remaining;
 
-				if (remaining == 0){
+				if ((remaining == 0) && (!exemptRecipient)) {
                     cooldownTimestamp[from] = 0;
                 }
             }
