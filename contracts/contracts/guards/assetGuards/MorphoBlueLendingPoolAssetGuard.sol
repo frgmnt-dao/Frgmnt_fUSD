@@ -76,7 +76,7 @@ contract MorphoBlueLendingPoolAssetGuard is
   //////////////////////////////////////////////////////////////*/
 
   /// @notice Default slippage tolerance (bps)
-  uint256 public defaultSlippageBps = 50; // 0.50%
+  uint256 public defaultSlippageBps = 70; // 0.70%
 
   /// @notice Extra buffer added on flashloan amount
   uint256 public flashAmountBufferBps = 40; // 0.40%
@@ -642,22 +642,20 @@ contract MorphoBlueLendingPoolAssetGuard is
     uint256 slippageBps
   ) internal view returns (uint256 amt) {
     address factory = IPoolLogic(pool).factory();
-    uint256 priceSettle = IHasAssetInfo(factory).getAssetPrice(settlement);
-    uint256 unitSettle = 10 ** IERC20Extended(settlement).decimals();
-
-    uint256 usd;
+    uint256 repayAssets;
+    uint24 fee;
+    uint256 totalMaxIn;
     for (uint256 i; i < debts.length; i++) {
-      if (debts[i].repayAssetsEst == 0) continue;
-      uint256 price =
-        IHasAssetInfo(factory).getAssetPrice(debts[i].mp.loanToken);
-      uint256 unit =
-        10 ** IERC20Extended(debts[i].mp.loanToken).decimals();
-      usd += (debts[i].repayAssetsEst * price) / unit;
+       repayAssets = debts[i].repayAssetsEst;
+      if (repayAssets == 0) continue;
+      repayAssets = _bufferedRepay(repayAssets);
+      fee = uniV3Fee[settlement][debts[i].mp.loanToken];
+      require(fee != 0, "MBAG: fee not set");
+      totalMaxIn += _oracleMaxIn(factory, settlement, debts[i].mp.loanToken, repayAssets, slippageBps, fee);
     }
 
-    uint256 raw = (usd * unitSettle) / priceSettle;
     amt =
-      (raw * (BPS_DENOMINATOR + slippageBps + flashAmountBufferBps)) /
+      (totalMaxIn * (BPS_DENOMINATOR + flashAmountBufferBps)) /
       BPS_DENOMINATOR;
   }
 
@@ -1110,5 +1108,5 @@ contract MorphoBlueLendingPoolAssetGuard is
   function _mulPortionRoundDown(uint256 x, uint256 p)
   internal pure returns (uint256){
   return (x * p) / PORTION_DENOMINATOR;
-}
+  }
 }

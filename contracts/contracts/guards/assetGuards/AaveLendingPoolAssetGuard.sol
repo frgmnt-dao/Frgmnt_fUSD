@@ -24,6 +24,9 @@ contract AaveV3LendingPoolAssetGuard is
   // -----------------------------
 
   uint256 private constant BPS_DENOMINATOR = 10_000;
+
+  uint256 internal constant FEE_DENOMINATOR = 1e6; // 1,000,000 = 100%
+
   uint256 private constant PORTION_DENOMINATOR = 1e18;
 
   /// @notice USDT on Base mainnet (example address you provided)
@@ -61,7 +64,7 @@ contract AaveV3LendingPoolAssetGuard is
 
   address public owner;
 
-  uint256 public defaultSlippageBps = 50;      // 0.50%
+  uint256 public defaultSlippageBps = 70;      // 0.70%
   uint256 public flashAmountBufferBps = 40;    // 0.40%
 
   // Router flexibility:
@@ -466,29 +469,22 @@ contract AaveV3LendingPoolAssetGuard is
     uint256 slippageBps
   ) internal view returns (uint256 flashAmount) {
     address factory = IPoolLogic(pool).factory();
-
-    uint256 settlementPriceUsdD18 = IHasAssetInfo(factory).getAssetPrice(settlementToken);
-    require(settlementPriceUsdD18 != 0, "Frgmnt: settlement price=0");
-
-    uint256 settlementUnit = 10 ** IERC20Extended(settlementToken).decimals();
-    uint256 totalUsdValueD18 = 0;
+    uint256 totalMaxIn;
 
     for (uint256 i = 0; i < repayPlans.length; ++i) {
       uint256 repayTotal = repayPlans[i].repayStableAmount + repayPlans[i].repayVariableAmount;
       if (repayTotal == 0) continue;
-
-      uint256 repayTokenPriceUsdD18 = IHasAssetInfo(factory).getAssetPrice(repayPlans[i].underlyingAsset);
-      require(repayTokenPriceUsdD18 != 0, "Frgmnt: debt price=0");
-
-      uint256 repayTokenUnit = 10 ** IERC20Extended(repayPlans[i].underlyingAsset).decimals();
-      totalUsdValueD18 += (repayTotal * repayTokenPriceUsdD18) / repayTokenUnit;
+      
+      // get swap fee
+        uint24 fee = uniV3Fee[settlementToken][repayPlans[i].underlyingAsset];
+        require(fee != 0, "Frgmnt: missing fee");
+     
+      totalMaxIn += _oracleMaxIn(factory, settlementToken, repayPlans[i].underlyingAsset, repayTotal, slippageBps, fee);
     }
 
-    uint256 settlementNeeded = (totalUsdValueD18 * settlementUnit) / settlementPriceUsdD18;
-    uint256 totalBufferBps = slippageBps + flashAmountBufferBps;
-
-    flashAmount = (settlementNeeded * (BPS_DENOMINATOR + totalBufferBps)) / BPS_DENOMINATOR;
+    flashAmount = (totalMaxIn * (BPS_DENOMINATOR + flashAmountBufferBps)) / BPS_DENOMINATOR;
     require(flashAmount > 0, "Frgmnt: flash=0");
+
   }
 
   function _withdrawCollateralAndTransfer(
@@ -544,7 +540,10 @@ contract AaveV3LendingPoolAssetGuard is
 
     address factory = IPoolLogic(pool).factory();
 
-    uint256 maxSettlementIn = _oracleMaxIn(factory, settlementToken, debtToken, desiredDebtOut, slippageBps);
+    uint24 fee = uniV3Fee[settlementToken][debtToken];
+    require(fee != 0, "Frgmnt: missing fee/path settle->debt");
+
+    uint256 maxSettlementIn = _oracleMaxIn(factory, settlementToken, debtToken, desiredDebtOut, slippageBps, fee);
 
     bytes memory reversedPath = uniV3PathExactOut[settlementToken][debtToken];
     if (reversedPath.length > 0) {
@@ -552,9 +551,6 @@ contract AaveV3LendingPoolAssetGuard is
       t.txData = _encodeExactOutput(reversedPath, pool, desiredDebtOut, maxSettlementIn);
       return (true, t);
     }
-
-    uint24 fee = uniV3Fee[settlementToken][debtToken];
-    require(fee != 0, "Frgmnt: missing fee/path settle->debt");
 
     t.to = swapRouter;
     t.txData = _encodeExactOutputSingle(settlementToken, debtToken, fee, pool, desiredDebtOut, maxSettlementIn);
@@ -709,7 +705,9 @@ contract AaveV3LendingPoolAssetGuard is
     if (tokenIn == settlementToken) return (false, t);
 
     address factory = IPoolLogic(pool).factory();
-    uint256 minOut = _oracleMinOut(factory, tokenIn, settlementToken, amountIn, slippageBps);
+    uint24 fee = uniV3Fee[tokenIn][settlementToken];
+    require(fee != 0, "Frgmnt: missing fee/path collateral->settle");
+    uint256 minOut = _oracleMinOut(factory, tokenIn, settlementToken, amountIn, slippageBps,fee);
 
     bytes memory forwardPath = uniV3PathExactIn[tokenIn][settlementToken];
     if (forwardPath.length > 0) {
@@ -717,9 +715,6 @@ contract AaveV3LendingPoolAssetGuard is
       t.txData = _encodeExactInput(forwardPath, pool, amountIn, minOut);
       return (true, t);
     }
-
-    uint24 fee = uniV3Fee[tokenIn][settlementToken];
-    require(fee != 0, "Frgmnt: missing fee/path collateral->settle");
 
     t.to = swapRouter;
     t.txData = _encodeExactInputSingle(tokenIn, settlementToken, fee, pool, amountIn, minOut);
@@ -789,7 +784,8 @@ contract AaveV3LendingPoolAssetGuard is
     address tokenIn,
     address tokenOut,
     uint256 amountIn,
-    uint256 slippageBps
+    uint256 slippageBps,
+    uint24 fee
   ) internal view returns (uint256) {
     uint256 priceInUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenIn);
     uint256 priceOutUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenOut);
@@ -801,6 +797,8 @@ contract AaveV3LendingPoolAssetGuard is
     uint256 usdValueD18 = (amountIn * priceInUsdD18) / unitIn;
     uint256 expectedOut = (usdValueD18 * unitOut) / priceOutUsdD18;
 
+    slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
+
     return (expectedOut * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
   }
 
@@ -809,7 +807,8 @@ contract AaveV3LendingPoolAssetGuard is
     address tokenIn,
     address tokenOut,
     uint256 amountOut,
-    uint256 slippageBps
+    uint256 slippageBps,
+    uint24 fee
   ) internal view returns (uint256) {
     uint256 priceInUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenIn);
     uint256 priceOutUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenOut);
@@ -821,7 +820,20 @@ contract AaveV3LendingPoolAssetGuard is
     uint256 usdValueD18 = (amountOut * priceOutUsdD18) / unitOut;
     uint256 expectedIn = (usdValueD18 * unitIn) / priceInUsdD18;
 
+    slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
+
     return (expectedIn * (BPS_DENOMINATOR + slippageBps)) / BPS_DENOMINATOR;
+  }
+
+
+  function _getEffectiveSlippage(uint256 slippageBps, uint256 fee)
+    internal
+    pure
+    returns (uint256){
+    // fee is Uniswap ppm (1e6 denominator)
+    uint256 minSlippageBps = (fee * BPS_DENOMINATOR) / (FEE_DENOMINATOR - fee);
+    return slippageBps < minSlippageBps ? minSlippageBps : slippageBps;
+
   }
 
   // ============================================================
