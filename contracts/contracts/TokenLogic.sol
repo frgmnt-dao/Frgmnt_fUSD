@@ -460,7 +460,7 @@ contract TokenLogic is
 	* @param to Recipient of the minted FUSD.
 	* @param amount Amount of FUSD to mint (18 decimals).
     */
-    function mintFromPool(address to, uint256 amount) external {
+    function mintFromPool(address to, uint256 amount) external whenNotPaused {
 		require(msg.sender == poolLogic, "TokenLogic: only PoolLogic");
 	    require(to != address(0), "TokenLogic: zero address");
 	    require(amount > 0, "TokenLogic: zero amount");
