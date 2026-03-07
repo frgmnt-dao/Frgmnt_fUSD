@@ -549,32 +549,30 @@ contract UniswapV3AssetGuard is ERC20Guard {
 
 		require(twapSqrtPriceX96 != 0, "UniswapV3AssetGuard: invalid TWAP");
 
+		uint256 Q192 = 1 << 192;
+
         uint256 spotPrice = FullMath.mulDiv(
         uint256(spotSqrtPriceX96),
-        uint256(spotSqrtPriceX96),
-        1 << 192);
+        uint256(spotSqrtPriceX96) * 1e18,
+        Q192);
+
 		uint256 twapPrice =  FullMath.mulDiv(
         uint256(twapSqrtPriceX96),
-        uint256(twapSqrtPriceX96),
-        1 << 192);
+        uint256(twapSqrtPriceX96) * 1e18,
+        Q192);
+        
+        uint256 diff = spotPrice > twapPrice
+        ? spotPrice - twapPrice
+        : twapPrice - spotPrice;
 
-	    // Compute allowed price bounds using BPS
-        uint256 upperBound = FullMath.mulDiv(
-        twapPrice,
-        BPS_DENOMINATOR + withdrawalSlippageBps,
-        BPS_DENOMINATOR);
+        uint256 deviationBps = FullMath.mulDiv(diff,  BPS_DENOMINATOR , twapPrice);
 		
-		uint256 lowerBound = FullMath.mulDiv(
-        twapPrice,
-        BPS_DENOMINATOR - withdrawalSlippageBps,
-        BPS_DENOMINATOR);
-
-        require(
-        spotPrice <= upperBound && spotPrice >= lowerBound,
-        "UniswapV3AssetGuard: spot deviation too high");
-
+		require(deviationBps <= withdrawalSlippageBps, "UniswapV3AssetGuard: Spot deviation too high");
+		
 		return true;
 	}
+
+
 
 	function checkTokens(INonfungiblePositionManager nonfungiblePositionManager,address factory, 
 	        uint256 tokenId) internal view returns (bool){
