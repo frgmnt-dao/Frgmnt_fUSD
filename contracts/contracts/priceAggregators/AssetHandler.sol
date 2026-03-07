@@ -20,9 +20,7 @@ import "../interfaces/IAssetHandler.sol";
 // 5 = Uniswap V3 NFT Position Asset
 
 contract AssetHandler is OwnableUpgradeable, IAssetHandler {
-	/// @notice Chainlink oracle freshness window in seconds (default ~25 hours).
-	uint256 public defaultChainlinkTimeout;
-
+	
 	/// @notice Chainlink oracle freshness window per asset.
 	mapping(address => uint256) public chainlinkTimeouts;
 
@@ -40,7 +38,6 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	/// @notice Grace period after sequencer recovery (seconds)
 	uint256 public constant SEQUENCER_GRACE_PERIOD = 3600; // 1 hour 
 
-	event SetDefaultChainlinkTimeout(uint256 chainlinkTimeout_);
 	event SetChainlinkTimeout(address indexed asset, uint256 chainlinkTimeout_);
 	event SetSequencerUptimeFeed(address indexed feed); 
 
@@ -49,8 +46,6 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	function initialize(Asset[] memory assets) external initializer {
 		// OZ v5: __Ownable_init(initialOwner)
 		__Ownable_init(msg.sender);
-
-		defaultChainlinkTimeout = 90_000; // ~25 hours
 		addAssets(assets);
 	}
 
@@ -75,9 +70,6 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 
 		// per-asset timeout overrides the default; fallback to default if unset
 		uint256 timeout = chainlinkTimeouts[asset];
-		if (timeout == 0) {
-			timeout = defaultChainlinkTimeout;
-		}
 		require(timeout != 0, "Frgmnt: timeout not set");
 
 		// NEW: handle variable decimals (e.g. 8, 18, etc.)
@@ -117,13 +109,7 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	}
 
 	/* ─────────────────────────── Owner actions ─────────────────────────── */
-
-	/// @notice Update default Chainlink freshness window.
-	function setDefaultChainlinkTimeout(uint256 newTimeout) external onlyOwner {
-		defaultChainlinkTimeout = newTimeout;
-		emit SetDefaultChainlinkTimeout(newTimeout);
-	}
-
+	
 	/// @notice Update Chainlink freshness window for a specific asset.
 	function setChainlinkTimeout(address asset, uint256 newTimeout) external onlyOwner {
 		require(asset != address(0), "Frgmnt: asset=0");
