@@ -520,7 +520,7 @@ contract MorphoBlueLendingPoolAssetGuard is
       if ((p.supplyShares == 0) || (!IHasAssetInfo(factory).isSupportedAsset(mp.loanToken))) continue;
 
       uint256 shares =
-        _mulPortionRoundUp(p.supplyShares, portion);
+        _mulPortionRoundDown(p.supplyShares, portion);
 
       (
       totalSupplyAssets,
@@ -557,7 +557,7 @@ contract MorphoBlueLendingPoolAssetGuard is
             Position memory p = IMorpho(morpho).position(mids[i], pool);
             MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
             if ((p.collateral == 0) || (!IHasAssetInfo(factory).isSupportedAsset(mp.collateralToken))) continue;
-            uint256 amount = _mulPortionRoundUp(p.collateral, portion);
+            uint256 amount = _mulPortionRoundDown(p.collateral, portion);
             plans[n++] = CollateralPlan({
               id: mids[i],
               mp: mp,
@@ -1105,4 +1105,10 @@ contract MorphoBlueLendingPoolAssetGuard is
   {
     return (x * p + PORTION_DENOMINATOR - 1) / PORTION_DENOMINATOR;
   }
+
+
+  function _mulPortionRoundDown(uint256 x, uint256 p)
+  internal pure returns (uint256){
+  return (x * p) / PORTION_DENOMINATOR;
+}
 }
