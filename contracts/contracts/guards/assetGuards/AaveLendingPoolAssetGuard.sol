@@ -474,6 +474,13 @@ contract AaveV3LendingPoolAssetGuard is
     for (uint256 i = 0; i < repayPlans.length; ++i) {
       uint256 repayTotal = repayPlans[i].repayStableAmount + repayPlans[i].repayVariableAmount;
       if (repayTotal == 0) continue;
+
+      // Skip swap logic if debt token is same as settlement token
+      if (repayPlans[i].underlyingAsset == settlementToken) {
+          // Only add repay amount
+          totalMaxIn += repayTotal;
+          continue;
+        }
       
       // get swap fee
         uint24 fee = uniV3Fee[settlementToken][repayPlans[i].underlyingAsset];

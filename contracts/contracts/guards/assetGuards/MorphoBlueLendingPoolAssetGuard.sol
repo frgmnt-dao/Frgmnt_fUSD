@@ -648,6 +648,12 @@ contract MorphoBlueLendingPoolAssetGuard is
     for (uint256 i; i < debts.length; i++) {
        repayAssets = debts[i].repayAssetsEst;
       if (repayAssets == 0) continue;
+
+      // Skip  swap calculation if debt token is the same as settlement token
+      if (debts[i].mp.loanToken == settlement) {
+          totalMaxIn += _bufferedRepay(repayAssets);
+            continue;
+      }
       repayAssets = _bufferedRepay(repayAssets);
       fee = uniV3Fee[settlement][debts[i].mp.loanToken];
       require(fee != 0, "MBAG: fee not set");
