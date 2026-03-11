@@ -401,8 +401,8 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
             ITokenLogic(fusd).mintFromPool(mgr, _fee);
         }
         // 4) Update manager rewardDebt after minting shares
-        UserReward storage ur = userRewards[mgr];
-        ur.rewardDebt = (balanceOf(mgr) * rewardPerShare) / 1e18;
+        //UserReward storage ur = userRewards[mgr];
+        //ur.rewardDebt = (balanceOf(mgr) * rewardPerShare) / 1e18;
         // 5) update state
         lastFeeMintTime = _lastFeeMintTime;
     }
