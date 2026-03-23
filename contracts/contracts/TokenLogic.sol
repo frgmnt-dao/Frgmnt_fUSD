@@ -186,7 +186,7 @@ contract TokenLogic is
 	) external initializer {
 		require(admin != address(0), "TokenLogic: admin=0");
 		require(emergency != address(0), "TokenLogic: emergency=0");
-		require(_poolLogic != address(0), "TokenLogic: poolLogic=0");
+	//	require(_poolLogic != address(0), "TokenLogic: poolLogic=0");
 		require(_poolManagerLogic!= address(0), "TokenLogic: poolManagerLogic=0");
 
 		__ERC20_init("Frgmnt USD", "FUSD");

@@ -128,7 +128,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 	) external initializer {
 		if (_factoryOwner == address(0)) revert InvalidFactory();
 		if (_manager == address(0)) revert InvalidManager();
-		if (_poolLogic == address(0)) revert InvalidPoolLogic();
+	//	if (_poolLogic == address(0)) revert InvalidPoolLogic();
 		if (_governance == address(0)) revert InvalidGovernance();
 		_initialize(_manager, _managerName);
 		factoryOwner = _factoryOwner;

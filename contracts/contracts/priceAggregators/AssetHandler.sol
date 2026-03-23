@@ -16,8 +16,8 @@ import "../interfaces/IAssetHandler.sol";
 // 0 = ERC20 with Chainlink direct USD price feed
 // 1 = Morpho Lending Pool Asset
 // 2 = Aave V3 Lending Pool Asset
+// 3 = Uniswap V3 NFT Position Asset
 // 4 = Lending/borrow Enable Asset
-// 5 = Uniswap V3 NFT Position Asset
 
 contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 	
