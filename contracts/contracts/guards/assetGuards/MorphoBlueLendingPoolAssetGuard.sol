@@ -198,7 +198,7 @@ contract MorphoBlueLendingPoolAssetGuard is
   }
 
   function setRepayDebtBufferBps(uint256 _bps) external onlyOwner {
-    if (_bps > MorphoMathLib.BPS_DENOMINATOR) revert FlashBufferTooHigh();
+    if (_bps > MorphoMathLib.BPS_DENOMINATOR) revert RepayBufferTooHigh();
     emit RepayDebtBufferBpsUpdated(repayDebtBufferBps, _bps);
     repayDebtBufferBps = _bps;
   }
