@@ -4,7 +4,7 @@ async function main() {
   // --------------------------------------------------
   // Governance proxy
   // --------------------------------------------------
-  const GOVERNANCE_PROXY = '0x9e7051B91D9423A63e15B46EC776540d2f8fc364';
+  const GOVERNANCE_PROXY = '0xC393A896D15641cA970F682BE62e89347941985d';
 
   // --------------------------------------------------
   // Signer (owner)
@@ -36,22 +36,22 @@ async function main() {
     {
       name: 'MorphoBlue',
       extContract: '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb',
-      guard: '0xa828eD0f49B8034eFEd2C7900080bD62a349bea9',
+      guard: '0x7A4701fAB443687F9EADCa68Ef0B207729a5acEa',
     },
     {
       name: 'UniswapV3',
       extContract: '0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1',
-      guard: '0xb7663Da98E056dc378e39b91a3BbC76e4b372207',
+      guard: '0xA313f1AADFB45033498a20e2e2cfefD31D10c973',
     },
     {
       name: 'UniswapRouter',
       extContract: '0x2626664c2603336E57B271c5C0b26F421741e481',
-      guard: '0x3d37894A3484C8327093035446C7F20949900277',
+      guard: '0xcAE75F063Ef5b432F4ad3140960c888a0795d5DC',
     },
     {
       name: 'AaveV3',
       extContract: '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5',
-      guard: '0x13dEd9e23077D572A2B54eFd7492aC5366CE3FCc',
+      guard: '0x7Ef5442f796bF1Ae3e00E91a5527cAa5F7aba5A4',
     },
   ];
 

@@ -6,7 +6,7 @@ import path from 'path';
 // USER CONFIG
 // ============================================================
 
-const GOVERNANCE_SAFE = '0xC7baC338d86e5471e1B0F8580d18d3a7C4024E66';
+const GOVERNANCE_SAFE = '0xafb9B883637f72767ADf7193Bb3B8e59C02Ea05d';
 const POOL_MANAGER_ADDRESS = GOVERNANCE_SAFE;
 const POOL_MANAGER_NAME = 'Frgmnt';
 const EMERGENCY_ADDRESS = GOVERNANCE_SAFE;

@@ -1,7 +1,7 @@
 import { ethers } from 'hardhat';
 
 async function main() {
-  const ASSET_HANDLER_PROXY = '0xB401f781C66c2A7f73b123E2E142F2Ad860fD5F0';
+  const ASSET_HANDLER_PROXY = '0x387174F4B3676c7F6e06da9c6c855375B5b10AAB';
 
   const ONE_DAY = 24 * 60 * 60;
 
@@ -22,7 +22,7 @@ async function main() {
   // --------------------------------------------------
   //  All assets share the same feed
   // --------------------------------------------------
-  const SHARED_FEED = ethers.getAddress('0xab4667ddAC66D4073d5E3aa91cC5EF20d9409af7');
+  const SHARED_FEED = ethers.getAddress('0x5bb4eA3b0187bb503c81Bd91Ebc2A1021497e538');
 
   const assets = [
     {
