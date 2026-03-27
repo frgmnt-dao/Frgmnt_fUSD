@@ -1,4 +1,4 @@
-import { ethers } from "hardhat";
+import { ethers } from 'hardhat';
 
 async function main() {
   // --------------------------------------------------
@@ -6,17 +6,17 @@ async function main() {
   // --------------------------------------------------
   const [deployer] = await ethers.getSigners();
 
-  console.log("Deploying ERC20Guard with account:", deployer.address);
+  console.log('Deploying ERC20Guard with account:', deployer.address);
   console.log(
-    "Deployer balance:",
+    'Deployer balance:',
     ethers.formatEther(await ethers.provider.getBalance(deployer.address)),
-    "ETH"
+    'ETH',
   );
 
   // --------------------------------------------------
   // Contract factory
   // --------------------------------------------------
-  const ERC20Guard = await ethers.getContractFactory("ERC20Guard", deployer);
+  const ERC20Guard = await ethers.getContractFactory('ERC20Guard', deployer);
 
   // --------------------------------------------------
   // Deploy (no constructor args)
@@ -27,10 +27,10 @@ async function main() {
 
   const address = await erc20Guard.getAddress();
 
-  console.log("✅ ERC20Guard deployed at:", address);
+  console.log('✅ ERC20Guard deployed at:', address);
 }
 
 main().catch((error) => {
-  console.error("❌ Deployment failed:", error);
+  console.error('❌ Deployment failed:', error);
   process.exitCode = 1;
 });

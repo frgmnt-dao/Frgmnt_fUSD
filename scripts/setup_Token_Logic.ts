@@ -44,14 +44,14 @@ async function main() {
   // --------------------------------------------------
   // 2️ setMinDepositUSD → 5 USD (18 decimals)
   // --------------------------------------------------
-   const MIN_DEPOSIT_USD = ethers.parseUnits("5", 18);
+  const MIN_DEPOSIT_USD = ethers.parseUnits('5', 18);
 
-  const tx2 = await tokenLogic.setMinDepositUSD(
-   MIN_DEPOSIT_USD,
-    { ...overrides, nonce: nonceStart }
-   );
+  const tx2 = await tokenLogic.setMinDepositUSD(MIN_DEPOSIT_USD, {
+    ...overrides,
+    nonce: nonceStart,
+  });
   await tx2.wait();
-  console.log(" Min deposit set to 5 USD");
+  console.log(' Min deposit set to 5 USD');
 
   // --------------------------------------------------
   // 3️ configureAsset → USDC / allowed / cap = 100 USDC
