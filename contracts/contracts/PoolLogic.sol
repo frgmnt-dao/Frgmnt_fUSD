@@ -270,7 +270,7 @@ contract PoolLogic is IPoolLogic, ERC20Upgradeable, OwnableUpgradeable, Reentran
 	    if (_poolManagerLogic == address(0)) revert ZeroAddress();
 	    if (_owner == address(0)) revert ZeroAddress();
 
-		__ERC20_init("Staked Frgmnt USD", "SFUSD");
+		__ERC20_init("Staked Frgmnt USD", "sfUSD");
 		__Ownable_init(_owner);
 		__ReentrancyGuard_init();
 
