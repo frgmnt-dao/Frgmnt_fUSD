@@ -3,24 +3,27 @@
 pragma solidity ^0.8.24;
 
 interface IAssetGuard {
-	struct MultiTransaction {
-		address to;
-		bytes txData;
-	}
+    struct MultiTransaction {
+        address to;
+        bytes txData;
+    }
 
-	function withdrawProcessing(
-		address pool,
-		address asset,
-		uint256 withdrawPortion,
-		address to
-	) external returns (address, uint256, MultiTransaction[] memory transactions);
+    function withdrawProcessing(
+        address pool,
+        address asset,
+        uint256 withdrawPortion,
+        address to
+    ) external returns (address, uint256, MultiTransaction[] memory transactions);
 
-	function getBalance(address pool, address asset) external view returns (uint256 balance);
+    function getBalance(address pool, address asset) external view returns (uint256 balance);
 
-	function getDecimals(address asset) external view returns (uint256 decimals);
+    function getDecimals(address asset) external view returns (uint256 decimals);
 
-	function removeAssetCheck(address pool, address asset) external view;
+    function removeAssetCheck(address pool, address asset) external view;
 
-	function removeTokenCheck(address pool, address asset, address token) external view returns (bool);
-	   
+    function removeTokenCheck(
+        address pool,
+        address asset,
+        address token
+    ) external view returns (bool);
 }

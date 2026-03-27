@@ -11,31 +11,39 @@ pragma solidity ^0.8.24;
  * - Retrieve debt token addresses for lending/borrowing integrations
  */
 interface IAaveProtocolDataProvider {
-	/**
-	 * @notice Returns reserve token contract addresses for an underlying asset in Aave
-	 * @param asset The underlying ERC20 token address (e.g., USDC, WETH)
-	 * @return aTokenAddress Aave interest-bearing token
-	 * @return stableDebtTokenAddress Aave stable-rate debt token
-	 * @return variableDebtTokenAddress Aave variable-rate debt token
-	 */
-	function getReserveTokensAddresses(
-		address asset
-	) external view returns (address aTokenAddress, address stableDebtTokenAddress, address variableDebtTokenAddress);
+    /**
+     * @notice Returns reserve token contract addresses for an underlying asset in Aave
+     * @param asset The underlying ERC20 token address (e.g., USDC, WETH)
+     * @return aTokenAddress Aave interest-bearing token
+     * @return stableDebtTokenAddress Aave stable-rate debt token
+     * @return variableDebtTokenAddress Aave variable-rate debt token
+     */
+    function getReserveTokensAddresses(
+        address asset
+    )
+        external
+        view
+        returns (
+            address aTokenAddress,
+            address stableDebtTokenAddress,
+            address variableDebtTokenAddress
+        );
 
-
-
-	function getUserReserveData(
-    address asset,
-    address user) external view
-    returns (
-      uint256 currentATokenBalance,
-      uint256 currentStableDebt,
-      uint256 currentVariableDebt,
-      uint256 principalStableDebt,
-      uint256 scaledVariableDebt,
-      uint256 stableBorrowRate,
-      uint256 liquidityRate,
-      uint40 stableRateLastUpdated,
-      bool usageAsCollateralEnabled
-    );
+    function getUserReserveData(
+        address asset,
+        address user
+    )
+        external
+        view
+        returns (
+            uint256 currentATokenBalance,
+            uint256 currentStableDebt,
+            uint256 currentVariableDebt,
+            uint256 principalStableDebt,
+            uint256 scaledVariableDebt,
+            uint256 stableBorrowRate,
+            uint256 liquidityRate,
+            uint40 stableRateLastUpdated,
+            bool usageAsCollateralEnabled
+        );
 }

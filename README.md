@@ -1,5 +1,3 @@
-
-
 ## Hardhat Configuration
 
 - [Typechain](https://github.com/dethcrypto/TypeChain) plugin enabled (typescript type bindings for smart contracts)
@@ -8,10 +6,9 @@
 - Prettier and eslint configured for project files and solidity smart contract
 - [Solhint](https://github.com/protofire/solhint) configured for enforcing best practices
 - Github actions workflows prepared for CI/CD
-Check the Hardhat documentation for more information.
+  Check the Hardhat documentation for more information.
 
 https://hardhat.org/getting-started/
-
 
 ## Hardhat Shorthand
 
@@ -112,5 +109,3 @@ npm run sol:format:write
 ```shell
 npm run solhint
 ```
-
-

@@ -134,16 +134,20 @@ npx hardhat run scripts/deploySfusd.ts --network base
 **Example script:**
 
 ```typescript
-const { ethers, upgrades } = require("hardhat")
+const { ethers, upgrades } = require('hardhat');
 
 async function main() {
-	const SFUSD = await ethers.getContractFactory("SFUSD")
-	const sfusd = await upgrades.deployProxy(SFUSD, [factory, false, "Staked FUSD", "SFUSD", fusd], {
-		initializer: "initialize",
-	})
-	console.log("SFUSD deployed to:", sfusd.target)
+    const SFUSD = await ethers.getContractFactory('SFUSD');
+    const sfusd = await upgrades.deployProxy(
+        SFUSD,
+        [factory, false, 'Staked FUSD', 'SFUSD', fusd],
+        {
+            initializer: 'initialize',
+        },
+    );
+    console.log('SFUSD deployed to:', sfusd.target);
 }
-main()
+main();
 ```
 
 ### Upgrade
@@ -153,14 +157,14 @@ npx hardhat run scripts/upgradeSfusd.ts --network arbitrum
 ```
 
 ```typescript
-const { ethers, upgrades } = require("hardhat")
+const { ethers, upgrades } = require('hardhat');
 
 async function main() {
-	const SFUSDV2 = await ethers.getContractFactory("SFUSDV2")
-	await upgrades.upgradeProxy(existingProxyAddress, SFUSDV2)
-	console.log("SFUSD upgraded successfully.")
+    const SFUSDV2 = await ethers.getContractFactory('SFUSDV2');
+    await upgrades.upgradeProxy(existingProxyAddress, SFUSDV2);
+    console.log('SFUSD upgraded successfully.');
 }
-main()
+main();
 ```
 
 ### Run Tests

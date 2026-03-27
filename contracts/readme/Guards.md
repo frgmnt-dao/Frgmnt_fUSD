@@ -35,28 +35,28 @@ Some contract guards also allow **public functions** (callable by anyone), e.g. 
 Asset guards define **how a pool should handle a specific asset or group of assets**.  
 An "asset" in Frgmnt can be:
 
-- A simple ERC20 token  
-- A liquidity position (ERC20 or ERC721)  
-- A group of lending/borrowing positions managed by an external protocol  
+- A simple ERC20 token
+- A liquidity position (ERC20 or ERC721)
+- A group of lending/borrowing positions managed by an external protocol
 
 Examples:
 
 - Plain ERC20 tokens: `WETH`, `USDC`, `WBTC`
-- Uniswap V2 LP tokens  
-- Balancer LP tokens  
-- Uniswap V3 NFT positions  
+- Uniswap V2 LP tokens
+- Balancer LP tokens
+- Uniswap V3 NFT positions
 - Aave-style lending/borrowing positions
 
 ### What an asset guard provides
 
 Asset guards expose:
 
-- **Balance** — or aggregated balances for grouped positions  
-- **Removal rules** — whether an asset can be removed from supported assets (e.g., must have zero balance and no debt)  
-- **Withdrawal processing** — how an investor’s share should be redeemed  
-  - LP tokens may need to be unwrapped  
-  - Lending positions may require repaying debt  
-  - NFT positions may require burning/unrolling
+- **Balance** — or aggregated balances for grouped positions
+- **Removal rules** — whether an asset can be removed from supported assets (e.g., must have zero balance and no debt)
+- **Withdrawal processing** — how an investor’s share should be redeemed
+    - LP tokens may need to be unwrapped
+    - Lending positions may require repaying debt
+    - NFT positions may require burning/unrolling
 
 ### Important note
 
@@ -64,8 +64,8 @@ A single Frgmnt “asset” may represent multiple underlying positions.
 Example:
 
 - An **AaveLendingPool asset** may internally manage:
-  - aTokens (collateral)
-  - debtTokens (borrows)
+    - aTokens (collateral)
+    - debtTokens (borrows)
 
 Yet they are exposed to the pool as **one unified asset** via its guard.
 
@@ -74,23 +74,26 @@ Yet they are exposed to the pool as **one unified asset** via its guard.
 ## Examples
 
 ### Simple ERC20
-- SUSHI token  
-- Uses `ERC20Guard`  
-- Balance = token amount  
-- Price = Chainlink feed  
+
+- SUSHI token
+- Uses `ERC20Guard`
+- Balance = token amount
+- Price = Chainlink feed
 
 ### LP Tokens (Balancer / Uniswap V2)
-- Pool holds ERC20 LP tokens  
-- Guard = `ERC20Guard`  
-- Balance = LP token amount  
+
+- Pool holds ERC20 LP tokens
+- Guard = `ERC20Guard`
+- Balance = LP token amount
 - Value = LP aggregator (reads underlying token values)
 
 ### Complex Lending Position (Aave-style)
-- Pool may supply WBTC & DAI, and borrow WETH  
-- Asset = “Aave Lending Pool”  
+
+- Pool may supply WBTC & DAI, and borrow WETH
+- Asset = “Aave Lending Pool”
 - Guard aggregates:
-  - total collateral value minus total debt value  
-- Balance returned in USD terms  
+    - total collateral value minus total debt value
+- Balance returned in USD terms
 - Price aggregator = pass-through (1:1 with returned value)
 
 ---

@@ -1,4 +1,4 @@
-import { ethers } from "hardhat";
+import { ethers } from 'hardhat';
 
 // ============================================================
 // HELPERS
@@ -37,15 +37,15 @@ async function main() {
   const provider = ethers.provider;
   const signer = (await ethers.getSigners())[0];
 
-  console.log("Deployer :", await signer.getAddress());
+  console.log('Deployer :', await signer.getAddress());
   const chain = await provider.getNetwork();
-  console.log("ChainId  :", chain.chainId);
+  console.log('ChainId  :', chain.chainId);
 
-  const USDFactory = await ethers.getContractFactory("USDPriceAggregator", signer);
+  const USDFactory = await ethers.getContractFactory('USDPriceAggregator', signer);
 
-  const usdAggregatorAddress = await deployWithRetry(USDFactory, [], "USDPriceAggregator");
+  const usdAggregatorAddress = await deployWithRetry(USDFactory, [], 'USDPriceAggregator');
 
-  console.log("\n  USDPriceAggregator deployed at:", usdAggregatorAddress);
+  console.log('\n  USDPriceAggregator deployed at:', usdAggregatorAddress);
 }
 
 main().catch((e) => {

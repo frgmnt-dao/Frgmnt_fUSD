@@ -20,15 +20,18 @@ Rather than relying on a single controlling account, the protocol combines **tim
 Frgmnt Finance uses OpenZeppelin’s `TimelockController` as the **central execution layer** for governance actions.
 
 The Timelock enforces a mandatory delay between:
+
 1. Approval of a governance action
 2. Its on-chain execution
 
 This delay ensures that:
+
 - Governance actions cannot be executed immediately
 - Changes are visible on-chain before they take effect
 - Users, integrators, and ecosystem participants have time to react
 
 Typical actions executed through the Timelock include:
+
 - Contract upgrades
 - Protocol configuration changes
 - Asset and oracle management
@@ -41,11 +44,13 @@ Typical actions executed through the Timelock include:
 A **Gnosis Safe multisignature wallet**, referred to as the GovernanceSafe, is used to approve and propose governance actions.
 
 Key properties:
+
 - Requires multiple independent signers to approve an action
 - Eliminates reliance on a single private key
 - Provides strong operational security guarantees
 
 The GovernanceSafe:
+
 - Proposes actions to the Timelock
 - Acts as the administrator of the Timelock
 - Does not execute changes directly without delay
@@ -57,10 +62,12 @@ The GovernanceSafe:
 A **dedicated multisignature wallet** is reserved for emergency actions.
 
 Emergency actions are intentionally limited to:
+
 - Pausing sensitive protocol functionality
 - Resuming operations after incidents or maintenance
 
 Key characteristics:
+
 - No time delay (to allow rapid response)
 - Narrow scope of permissions
 - Separate signers from governance where possible
@@ -74,6 +81,7 @@ This separation ensures that emergency powers cannot be misused to change protoc
 Operational activities such as trading and execution are handled by a dedicated operational wallet, referred to as the TraderSafe.
 
 The TraderSafe:
+
 - Can execute predefined operational transactions
 - Cannot upgrade contracts
 - Cannot modify governance parameters
@@ -94,6 +102,7 @@ A typical governance flow follows these steps:
 5. Any address may execute the proposal once eligible
 
 This process ensures governance actions are:
+
 - Predictable
 - Observable
 - Resistant to rushed or unilateral changes
@@ -102,12 +111,12 @@ This process ensures governance actions are:
 
 ## Role Separation and Responsibility Model
 
-| Role | Purpose | Examples |
-|----|--------|---------|
-| Timelock | Delayed execution | Upgrades, configuration |
+| Role           | Purpose             | Examples                |
+| -------------- | ------------------- | ----------------------- |
+| Timelock       | Delayed execution   | Upgrades, configuration |
 | GovernanceSafe | Approval & proposal | Strategy and parameters |
-| EmergencySafe | Emergency response | Pause / unpause |
-| TraderSafe | Operations | Trading, execution |
+| EmergencySafe  | Emergency response  | Pause / unpause         |
+| TraderSafe     | Operations          | Trading, execution      |
 
 Each role is explicitly scoped to its responsibilities, reducing the impact of any single compromise.
 
@@ -123,6 +132,7 @@ Frgmnt Finance contracts follow a consistent governance pattern:
 - All sensitive actions flow through the governance system
 
 This applies across:
+
 - Token contracts
 - Pool logic contracts
 - Asset and oracle registries
@@ -133,11 +143,13 @@ This applies across:
 ## Privilege Lifecycle Management
 
 After deployment and setup:
+
 - Ownership is transferred to the Timelock
 - Administrative roles are reassigned to governance-controlled addresses
 - Temporary setup accounts relinquish all special permissions
 
 This ensures:
+
 - No hidden or residual privileges
 - Clear and auditable authority paths
 - Long-term consistency of governance controls
@@ -173,12 +185,14 @@ The current governance structure provides strong guarantees while allowing flexi
 ### DAO-Based Governance
 
 Future iterations may introduce:
+
 - On-chain proposal creation
 - Token-based or NFT-based voting
 - Delegated voting and representation
 - Community-driven governance processes
 
 In such a model:
+
 - The DAO becomes the primary proposer
 - The Timelock remains the execution layer
 - Multisignature wallets may act as guardians or emergency backstops
@@ -203,6 +217,7 @@ A typical governance evolution path:
 ### Additional Best Practices and Enhancements
 
 Planned or recommended improvements include:
+
 - Different execution delays for different action categories
 - Separate Timelocks for upgrades versus parameter changes
 - On-chain proposal metadata stored on IPFS or Arweave
@@ -215,6 +230,7 @@ Planned or recommended improvements include:
 ## Summary
 
 Frgmnt Finance governance combines:
+
 - Time-delayed execution through a Timelock
 - Multisignature approval for sensitive actions
 - Clear separation between governance, emergency, and operations

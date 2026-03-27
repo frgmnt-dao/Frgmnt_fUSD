@@ -9,28 +9,23 @@ import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
  * @dev Stateless utility library extracted from PoolLogic.
  */
 library FundCalculationLibrary {
-
-  
     function calculatePerformanceFee(
         uint256 _totalValue,
         uint256 _accountedAssets,
         uint256 _performanceFeeNumerator,
         uint256 _feeDenominator
     ) internal pure returns (uint256 performanceFee, uint256 netYield) {
-
         if (_totalValue <= _accountedAssets) {
             return (0, 0);
         }
 
-        uint256 incrementalYield  = _totalValue - _accountedAssets;
+        uint256 incrementalYield = _totalValue - _accountedAssets;
 
         // Performance fee computed in USD
-        performanceFee =
-            (incrementalYield * _performanceFeeNumerator) / _feeDenominator;
+        performanceFee = (incrementalYield * _performanceFeeNumerator) / _feeDenominator;
 
         netYield = incrementalYield - performanceFee;
     }
-
 
     function calculateManagementFee(
         uint256 _totalFusd,
@@ -38,7 +33,6 @@ library FundCalculationLibrary {
         uint256 _managementFeeNumerator,
         uint256 _feeDenominator
     ) internal view returns (uint256 managementFee, uint256 lastFeeMintTime) {
-
         uint256 ts = block.timestamp;
         uint256 dt = ts - _lastFeeMintTime;
 
@@ -48,17 +42,13 @@ library FundCalculationLibrary {
         if (dt == 0) return (0, lastFeeMintTime);
 
         // No supply or zero fee rate → no management fee
-        if (_totalFusd == 0 || _managementFeeNumerator == 0){
+        if (_totalFusd == 0 || _managementFeeNumerator == 0) {
             return (0, lastFeeMintTime);
         }
 
         // Linear time-based management fee
-        managementFee =
-        (_totalFusd * _managementFeeNumerator * dt)
-        / _feeDenominator
-        / 365 days;
+        managementFee = (_totalFusd * _managementFeeNumerator * dt) / _feeDenominator / 365 days;
     }
-
 
     // ============================================================
     // =            FUSD → ASSET CONVERSION HELPERS                =

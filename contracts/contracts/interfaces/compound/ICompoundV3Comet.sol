@@ -12,22 +12,22 @@ pragma solidity ^0.8.24;
  * - `baseToken()` returns the underlying token address (e.g., USDC).
  */
 interface ICompoundV3Comet {
-	/**
-	 * @notice Supply assets to Compound V3 Comet
-	 * @param asset The ERC20 token being deposited (must match baseToken)
-	 * @param amount Amount to deposit
-	 */
-	function supply(address asset, uint256 amount) external;
+    /**
+     * @notice Supply assets to Compound V3 Comet
+     * @param asset The ERC20 token being deposited (must match baseToken)
+     * @param amount Amount to deposit
+     */
+    function supply(address asset, uint256 amount) external;
 
-	/**
-	 * @notice Withdraw assets from Compound V3 Comet
-	 * @param asset The ERC20 token being withdrawn (must match baseToken)
-	 * @param amount Amount to withdraw
-	 */
-	function withdraw(address asset, uint256 amount) external;
+    /**
+     * @notice Withdraw assets from Compound V3 Comet
+     * @param asset The ERC20 token being withdrawn (must match baseToken)
+     * @param amount Amount to withdraw
+     */
+    function withdraw(address asset, uint256 amount) external;
 
-	/**
-	 * @notice Returns the underlying ERC20 asset used in this Comet market
-	 */
-	function baseToken() external view returns (address);
+    /**
+     * @notice Returns the underlying ERC20 asset used in this Comet market
+     */
+    function baseToken() external view returns (address);
 }

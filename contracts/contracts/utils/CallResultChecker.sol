@@ -4,10 +4,13 @@ pragma solidity ^0.8.24;
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 library CallResultChecker {
-
     error TxFailed();
 
-    function _checkCallResult(bytes memory data, bool success, bytes memory returndata) public pure {
+    function _checkCallResult(
+        bytes memory data,
+        bool success,
+        bytes memory returndata
+    ) public pure {
         if (!success) revert TxFailed();
 
         // Only verify return value for ERC20 transfer/approve
@@ -25,5 +28,5 @@ library CallResultChecker {
             if (!ok) revert TxFailed();
         }
         // For other calls (e.g., Aave withdraw/repay uint256), ignore returndata
-	}
+    }
 }

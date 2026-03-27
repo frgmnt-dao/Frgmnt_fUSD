@@ -15,924 +15,1063 @@ import { IHasAssetInfo } from "../../interfaces/IHasAssetInfo.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 contract AaveV3LendingPoolAssetGuard is
-  ClosedAssetGuard,
-  IAaveLendingPoolAssetGuard,
-  ISlippageCheckingGuard
+    ClosedAssetGuard,
+    IAaveLendingPoolAssetGuard,
+    ISlippageCheckingGuard
 {
-  // -----------------------------
-  // Constants
-  // -----------------------------
+    // -----------------------------
+    // Constants
+    // -----------------------------
 
-  uint256 private constant BPS_DENOMINATOR = 10_000;
+    uint256 private constant BPS_DENOMINATOR = 10_000;
 
-  uint256 internal constant FEE_DENOMINATOR = 1e6; // 1,000,000 = 100%
+    uint256 internal constant FEE_DENOMINATOR = 1e6; // 1,000,000 = 100%
 
-  uint256 private constant PORTION_DENOMINATOR = 1e18;
+    uint256 private constant PORTION_DENOMINATOR = 1e18;
 
-  /// @notice USDT on Base mainnet (example address you provided)
-  address public constant USDT_BASE = 0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2;
+    /// @notice USDT on Base mainnet (example address you provided)
+    address public constant USDT_BASE = 0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2;
 
-  // -----------------------------
-  // Types
-  // -----------------------------
+    // -----------------------------
+    // Types
+    // -----------------------------
 
-  struct DebtRepayPlan {
-    address underlyingAsset;
-    uint256 repayStableAmount;   // rateMode = 1
-    uint256 repayVariableAmount; // rateMode = 2
-  }
-
-  struct FlashloanParams {
-    uint256 withdrawPortion;     // 1e18
-    address settlementToken;     // flash asset
-    uint256 slippageBps;         // oracle slippage tolerance
-    DebtRepayPlan[] repayPlans;  // pro-rata debts
-  }
-
-  // -----------------------------
-  // State
-  // -----------------------------
-
-  /// @notice Required by ISlippageCheckingGuard
-  bool public override isSlippageCheckingGuard = true;
-
-  IAaveProtocolDataProvider public immutable aaveProtocolDataProvider;
-  address public immutable override aaveLendingPool;
-  address public immutable swapRouter;
-
-  address public immutable preferredSettlementAsset;
-
-  address public owner;
-
-  uint256 public defaultSlippageBps = 70;      // 0.70%
-  uint256 public flashAmountBufferBps = 40;    // 0.40%
-
-  // Router flexibility:
-  // exactInput: forward path tokenIn -> ... -> tokenOut
-  mapping(address => mapping(address => bytes)) public uniV3PathExactIn;
-  // exactOutput: reversed path tokenOut <- ... <- tokenIn (Uniswap requirement)
-  mapping(address => mapping(address => bytes)) public uniV3PathExactOut;
-  // fallback single-hop fee
-  mapping(address => mapping(address => uint24)) public uniV3Fee;
-
-  // tokens requiring approve(0) before approve(non-zero)
-  mapping(address => bool) public requiresApproveReset;
-
-  // -----------------------------
-  // Events
-  // -----------------------------
-
-  event OwnerUpdated(address indexed oldOwner, address indexed newOwner);
-  event DefaultSlippageBpsUpdated(uint256 slippageBps);
-  event FlashAmountBufferBpsUpdated(uint256 bufferBps);
-
-  event UniV3FeeSet(address indexed tokenIn, address indexed tokenOut, uint24 fee);
-  event UniV3PathExactInSet(address indexed tokenIn, address indexed tokenOut, bytes path);
-  event UniV3PathExactOutSet(address indexed tokenIn, address indexed tokenOut, bytes reversedPath);
-
-  event ApproveResetFlagSet(address indexed token, bool required);
-
-  modifier onlyOwner() {
-    require(msg.sender == owner, "Frgmnt: only owner");
-    _;
-  }
-
-  constructor(
-    address aaveProtocolDataProvider_,
-    address aaveLendingPool_,
-    address preferredSettlementAsset_,
-    address swapRouter_
-  ) {
-    require(aaveProtocolDataProvider_ != address(0) && aaveLendingPool_ != address(0), "Frgmnt: invalid address");
-    require(preferredSettlementAsset_ != address(0), "Frgmnt: settlement=0");
-    require(swapRouter_ != address(0), "Frgmnt: swapRouter=0");
-
-    owner = msg.sender;
-
-    aaveProtocolDataProvider = IAaveProtocolDataProvider(aaveProtocolDataProvider_);
-    aaveLendingPool = aaveLendingPool_;
-    preferredSettlementAsset = preferredSettlementAsset_;
-    swapRouter = swapRouter_;
-
-    // default: USDT-like approval behavior
-    requiresApproveReset[USDT_BASE] = true;
-  }
-
-  // ============================================================
-  // Admin config
-  // ============================================================
-
-  function setOwner(address newOwner) external onlyOwner {
-    require(newOwner != address(0), "Frgmnt: owner=0");
-    emit OwnerUpdated(owner, newOwner);
-    owner = newOwner;
-  }
-
-  function setDefaultSlippageBps(uint256 slippageBps) external onlyOwner {
-    require(slippageBps <= 2_000, "Frgmnt: slippage too high");
-    defaultSlippageBps = slippageBps;
-    emit DefaultSlippageBpsUpdated(slippageBps);
-  }
-
-  function setFlashAmountBufferBps(uint256 bufferBps) external onlyOwner {
-    require(bufferBps <= 500, "Frgmnt: buffer too high");
-    flashAmountBufferBps = bufferBps;
-    emit FlashAmountBufferBpsUpdated(bufferBps);
-  }
-
-  function setUniV3Fee(address tokenIn, address tokenOut, uint24 fee) external onlyOwner {
-    require(tokenIn != address(0) && tokenOut != address(0), "Frgmnt: bad token");
-    require(fee > 0, "Frgmnt: bad fee");
-    uniV3Fee[tokenIn][tokenOut] = fee;
-    emit UniV3FeeSet(tokenIn, tokenOut, fee);
-  }
-
-  function setUniV3PathExactIn(address tokenIn, address tokenOut, bytes calldata path) external onlyOwner {
-    require(tokenIn != address(0) && tokenOut != address(0), "Frgmnt: bad token");
-    require(path.length > 0, "Frgmnt: empty path");
-    _validateUniV3Path(path);
-    uniV3PathExactIn[tokenIn][tokenOut] = path;
-    emit UniV3PathExactInSet(tokenIn, tokenOut, path);
-  }
-
-  function setUniV3PathExactOut(address tokenIn, address tokenOut, bytes calldata reversedPath) external onlyOwner {
-    require(tokenIn != address(0) && tokenOut != address(0), "Frgmnt: bad token");
-    require(reversedPath.length > 0, "Frgmnt: empty path");
-    _validateUniV3Path(reversedPath);
-    uniV3PathExactOut[tokenIn][tokenOut] = reversedPath;
-    emit UniV3PathExactOutSet(tokenIn, tokenOut, reversedPath);
-  }
-
-  function setRequiresApproveReset(address token, bool required) external onlyOwner {
-    require(token != address(0), "Frgmnt: token=0");
-    requiresApproveReset[token] = required;
-    emit ApproveResetFlagSet(token, required);
-  }
-
-  // ============================================================
-  // IAssetGuard VIEW
-  // ============================================================
-
-  function getBalance(address pool, address) public view override returns (uint256 balance) {
-    (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
-
-    if (totalCollateralInUsd > totalDebtInUsd) {
-      balance = totalCollateralInUsd - totalDebtInUsd;
-    }
-  
-  }
-
-  function getDecimals(address) external pure override returns (uint256) {
-    return 18;
-  }
-
-  function removeAssetCheck(address pool, address) public view override {
-    
-    (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
-
-
-    require(totalCollateralInUsd == 0 && totalDebtInUsd == 0, "Frgmnt: cannot remove non-empty asset");
-  }
-
-
-
-  function removeTokenCheck(address pool, address, address token) public view override  
-    returns (bool) {
-
-    (uint256 collateralBalance, uint256 debtBalance) = _calculateAaveBalance(pool, token);
-    if ((collateralBalance > 0) || (debtBalance > 0)) {
-          return false;
-      
+    struct DebtRepayPlan {
+        address underlyingAsset;
+        uint256 repayStableAmount; // rateMode = 1
+        uint256 repayVariableAmount; // rateMode = 2
     }
 
-	  return true;
-
-	}
-
-  // ============================================================
-  // Withdraw planner (IAssetGuard)
-  // ============================================================
-
-  function withdrawProcessing(
-    address pool,
-    address,
-    uint256 withdrawPortion,
-    address to
-  )
-    external
-    view
-    override
-    returns (address withdrawAsset, uint256 withdrawBalance, MultiTransaction[] memory transactions)
-  {
-    require(withdrawPortion <= PORTION_DENOMINATOR, "Frgmnt: bad portion");
-    require(to != address(0), "Frgmnt: to=0");
-
-    (DebtRepayPlan[] memory repayPlans, uint256 debtAssetCount) = _collectDebtPlans(pool, withdrawPortion);
-
-    // No debt: withdraw collateral and transfer to user
-    if (debtAssetCount == 0) {
-      transactions = _withdrawCollateralAndTransfer(pool, withdrawPortion, to);
-      return (address(0), 0, transactions);
+    struct FlashloanParams {
+        uint256 withdrawPortion; // 1e18
+        address settlementToken; // flash asset
+        uint256 slippageBps; // oracle slippage tolerance
+        DebtRepayPlan[] repayPlans; // pro-rata debts
     }
 
-    address settlementToken = _chooseSettlementToken(repayPlans);
-    uint256 slippageBps = defaultSlippageBps;
+    // -----------------------------
+    // State
+    // -----------------------------
 
-    uint256 flashAmount = _estimateFlashAmountInSettlement(pool, repayPlans, settlementToken, slippageBps);
+    /// @notice Required by ISlippageCheckingGuard
+    bool public override isSlippageCheckingGuard = true;
 
-    FlashloanParams memory fp;
-    fp.withdrawPortion = withdrawPortion;
-    fp.settlementToken = settlementToken;
-    fp.slippageBps = slippageBps;
-    fp.repayPlans = repayPlans;
+    IAaveProtocolDataProvider public immutable aaveProtocolDataProvider;
+    address public immutable override aaveLendingPool;
+    address public immutable swapRouter;
 
-    transactions = new MultiTransaction[](1);
-    transactions[0].to = aaveLendingPool;
-    transactions[0].txData = _encodeFlashLoanTx(pool, settlementToken, flashAmount, fp);
+    address public immutable preferredSettlementAsset;
 
-    return (settlementToken, 0, transactions);
-  }
+    address public owner;
 
-  // ============================================================
-  // Flashloan callback planner (IAaveLendingPoolAssetGuard)
-  // ============================================================
+    uint256 public defaultSlippageBps = 70; // 0.70%
+    uint256 public flashAmountBufferBps = 40; // 0.40%
 
-  function flashloanProcessing(
-    address pool,
-    address repayAsset,
-    uint256 repayAmount,
-    uint256 premium,
-    bytes calldata params
-  ) external view override returns (MultiTransaction[] memory transactions) {
-    FlashloanParams memory fp = abi.decode(params, (FlashloanParams));
-    require(fp.settlementToken == repayAsset, "Frgmnt: settlement mismatch");
+    // Router flexibility:
+    // exactInput: forward path tokenIn -> ... -> tokenOut
+    mapping(address => mapping(address => bytes)) public uniV3PathExactIn;
+    // exactOutput: reversed path tokenOut <- ... <- tokenIn (Uniswap requirement)
+    mapping(address => mapping(address => bytes)) public uniV3PathExactOut;
+    // fallback single-hop fee
+    mapping(address => mapping(address => uint24)) public uniV3Fee;
 
-    return _flashloanProcessingInternal(pool, fp, repayAmount, premium);
-  }
+    // tokens requiring approve(0) before approve(non-zero)
+    mapping(address => bool) public requiresApproveReset;
 
-  function _flashloanProcessingInternal(
-    address pool,
-    FlashloanParams memory fp,
-    uint256 repayAmount,
-    uint256 premium
-  ) internal view returns (MultiTransaction[] memory transactions) {
-    // Phase 1 + Phase 2
-    transactions = _buildSettlementToDebtSwaps(pool, fp.settlementToken, fp.repayPlans, fp.slippageBps);
-    {
-      MultiTransaction[] memory phase2 = _buildApproveAndRepayAllDebts(pool, fp.repayPlans);
-      transactions = _concat2(transactions, phase2);
-    }
+    // -----------------------------
+    // Events
+    // -----------------------------
 
-    // Phase 3 + Phase 4
-    {
-      (MultiTransaction[] memory withdrawTxs, address[] memory collTokens, uint256[] memory collAmounts) =
-        _buildWithdrawCollateral(pool, fp.withdrawPortion);
+    event OwnerUpdated(address indexed oldOwner, address indexed newOwner);
+    event DefaultSlippageBpsUpdated(uint256 slippageBps);
+    event FlashAmountBufferBpsUpdated(uint256 bufferBps);
 
-      transactions = _concat2(transactions, withdrawTxs);
-
-      MultiTransaction[] memory swapsBack =
-        _buildCollateralToSettlementSwaps(pool, collTokens, collAmounts, fp.settlementToken, fp.slippageBps);
-
-      transactions = _concat2(transactions, swapsBack);
-    }
-
-    // Phase 5
-    {
-      MultiTransaction[] memory phase5 = _buildFlashRepayApprove(fp.settlementToken, repayAmount + premium);
-      transactions = _concat2(transactions, phase5);
-    }
-  }
-
-  
-  function _getBalance(address _pool) internal view returns (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) {
-    IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(IPoolLogic(_pool).poolManagerLogic()).getSupportedAssets();
-    uint256 length = supportedAssets.length;
-
-    address asset;
-    uint256 decimals;
-    uint256 tokenPriceInUsd;
-    uint256 collateralBalance;
-    uint256 debtBalance;
-    address factory = IPoolLogic(_pool).factory();
-
-    for (uint256 i; i < length; ++i) {
-        asset = supportedAssets[i].asset;
-
-        (collateralBalance, debtBalance) = _calculateAaveBalance(_pool, asset);
-
-        if (collateralBalance != 0 || debtBalance != 0) {
-            tokenPriceInUsd = IHasAssetInfo(factory).getAssetPrice(asset);
-            decimals = IERC20Extended(asset).decimals();
-            totalCollateralInUsd += (tokenPriceInUsd * collateralBalance) / (10 ** decimals);
-            totalDebtInUsd += (tokenPriceInUsd * debtBalance) / (10 ** decimals);
-        }
-    }
-  }
-
-
-
-  function _calculateAaveBalance(
-    address _pool,
-    address _asset
-) internal view returns (uint256 collateralBalance, uint256 debtBalance) {
-    // Collateral: aToken balance
-    address aToken = IAaveV3Pool(aaveLendingPool).getReserveAToken(_asset);
-    if (aToken != address(0)) {
-        collateralBalance = IERC20Extended(aToken).balanceOf(_pool);
-    }
-
-    // Debt: only variable debt
-    address variableDebtToken = IAaveV3Pool(aaveLendingPool).getReserveVariableDebtToken(_asset);
-    if (variableDebtToken != address(0)) {
-        debtBalance = IERC20Extended(variableDebtToken).balanceOf(_pool);
-    }
-}
-
-
-  // ============================================================
-  // INTERNALS
-  // ============================================================
-
-  function _encodeFlashLoanTx(
-    address pool,
-    address settlementToken,
-    uint256 flashAmount,
-    FlashloanParams memory fp
-  ) internal pure returns (bytes memory txData) {
-    
-    address[] memory assets = new address[](1) ;
-    assets[0] = settlementToken;
-
-    uint256[] memory amounts = new uint256[](1) ;
-    amounts[0] = flashAmount;
-
-    uint256[] memory modes = new uint256[](1) ;
-    modes[0] = 0;
-
-    bytes memory params = abi.encode(fp);
-
-    txData = abi.encodeWithSelector(
-      IAaveV3Pool.flashLoan.selector,
-      pool,
-      assets,
-      amounts,
-      modes,
-      pool,
-      params,
-      uint16(0)
+    event UniV3FeeSet(address indexed tokenIn, address indexed tokenOut, uint24 fee);
+    event UniV3PathExactInSet(address indexed tokenIn, address indexed tokenOut, bytes path);
+    event UniV3PathExactOutSet(
+        address indexed tokenIn,
+        address indexed tokenOut,
+        bytes reversedPath
     );
-  }
 
-  function _chooseSettlementToken(DebtRepayPlan[] memory repayPlans)
-      internal view returns (address) {
+    event ApproveResetFlagSet(address indexed token, bool required);
 
-      address firstAsset;
-      bool found;
-      
-      for (uint256 i = 0; i < repayPlans.length; ++i) {
-          if ( repayPlans[i].repayStableAmount +
-              repayPlans[i].repayVariableAmount == 0 ) continue;
-
-          address asset = repayPlans[i].underlyingAsset;
-
-          if (!found) {
-              firstAsset = asset;
-              found = true;
-          } else if (asset != firstAsset) {
-              // Multiple different assets detected → fallback
-              return preferredSettlementAsset;
-          }
-      }
-
-      // If exactly one unique asset was found, use it.
-      // If no debt exists, fallback.
-      return found ? firstAsset : preferredSettlementAsset;
-  }
-
-
-  /**
-   * @notice Collect pro-rata debt repayment plans based on the pool's supported assets list.
-   * @dev IMPORTANT INVARIANT (DOCUMENTED):
-   * - This guard only scans debts for assets returned by PoolManagerLogic.getSupportedAssets().
-   * - Therefore, the protocol MUST enforce: "the pool never borrows outside supported assets".
-   * - If the pool borrows an unsupported asset on Aave, this function will not include it in the repay plan,
-   *   leading to incomplete debt repayment during withdrawals.
-   *
-   * If you want stronger safety, you can improve the debt discovery mechanism to scan all Aave reserves and
-   * check stable/variable debt tokens for non-zero balances, but that requires iterating over all reserves
-   * (potentially expensive) and having an accessor for the reserve list.
-   */
-  function _collectDebtPlans(
-    address pool,
-    uint256 withdrawPortion
-  ) internal view returns (DebtRepayPlan[] memory plans, uint256 planCount) {
-    IHasSupportedAsset.Asset[] memory supportedAssets =
-      IHasSupportedAsset(IPoolLogic(pool).poolManagerLogic()).getSupportedAssets();
-
-    plans = new DebtRepayPlan[](supportedAssets.length);
-
-    for (uint256 i = 0; i < supportedAssets.length; ++i) {
-      address underlying = supportedAssets[i].asset;
-
-      (, address stableDebtToken, address variableDebtToken) =
-        aaveProtocolDataProvider.getReserveTokensAddresses(underlying);
-
-      uint256 stableDebtBalance = stableDebtToken == address(0) ? 0 : IERC20Extended(stableDebtToken).balanceOf(pool);
-      uint256 variableDebtBalance = variableDebtToken == address(0) ? 0 : IERC20Extended(variableDebtToken).balanceOf(pool);
-
-      if (stableDebtBalance == 0 && variableDebtBalance == 0) continue;
-
-      uint256 repayStable = stableDebtBalance == 0 ? 0 : _mulPortionRoundUp(stableDebtBalance, withdrawPortion);
-      uint256 repayVariable = variableDebtBalance == 0 ? 0 : _mulPortionRoundUp(variableDebtBalance, withdrawPortion);
-
-      if (repayStable == 0 && repayVariable == 0) continue;
-
-      plans[planCount] = DebtRepayPlan({
-        underlyingAsset: underlying,
-        repayStableAmount: repayStable,
-        repayVariableAmount: repayVariable
-      });
-      planCount++;
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Frgmnt: only owner");
+        _;
     }
 
-    assembly { mstore(plans, planCount) }
-  }
+    constructor(
+        address aaveProtocolDataProvider_,
+        address aaveLendingPool_,
+        address preferredSettlementAsset_,
+        address swapRouter_
+    ) {
+        require(
+            aaveProtocolDataProvider_ != address(0) && aaveLendingPool_ != address(0),
+            "Frgmnt: invalid address"
+        );
+        require(preferredSettlementAsset_ != address(0), "Frgmnt: settlement=0");
+        require(swapRouter_ != address(0), "Frgmnt: swapRouter=0");
 
-  function _mulPortionRoundUp(uint256 amount, uint256 portion) internal pure returns (uint256) {
-    return (amount * portion + (PORTION_DENOMINATOR - 1)) / PORTION_DENOMINATOR;
-  }
+        owner = msg.sender;
 
-  function _estimateFlashAmountInSettlement(
-    address pool,
-    DebtRepayPlan[] memory repayPlans,
-    address settlementToken,
-    uint256 slippageBps
-  ) internal view returns (uint256 flashAmount) {
-    address factory = IPoolLogic(pool).factory();
-    uint256 totalMaxIn;
+        aaveProtocolDataProvider = IAaveProtocolDataProvider(aaveProtocolDataProvider_);
+        aaveLendingPool = aaveLendingPool_;
+        preferredSettlementAsset = preferredSettlementAsset_;
+        swapRouter = swapRouter_;
 
-    for (uint256 i = 0; i < repayPlans.length; ++i) {
-      uint256 repayTotal = repayPlans[i].repayStableAmount + repayPlans[i].repayVariableAmount;
-      if (repayTotal == 0) continue;
+        // default: USDT-like approval behavior
+        requiresApproveReset[USDT_BASE] = true;
+    }
 
-      // Skip swap logic if debt token is same as settlement token
-      if (repayPlans[i].underlyingAsset == settlementToken) {
-          // Only add repay amount
-          totalMaxIn += repayTotal;
-          continue;
+    // ============================================================
+    // Admin config
+    // ============================================================
+
+    function setOwner(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "Frgmnt: owner=0");
+        emit OwnerUpdated(owner, newOwner);
+        owner = newOwner;
+    }
+
+    function setDefaultSlippageBps(uint256 slippageBps) external onlyOwner {
+        require(slippageBps <= 2_000, "Frgmnt: slippage too high");
+        defaultSlippageBps = slippageBps;
+        emit DefaultSlippageBpsUpdated(slippageBps);
+    }
+
+    function setFlashAmountBufferBps(uint256 bufferBps) external onlyOwner {
+        require(bufferBps <= 500, "Frgmnt: buffer too high");
+        flashAmountBufferBps = bufferBps;
+        emit FlashAmountBufferBpsUpdated(bufferBps);
+    }
+
+    function setUniV3Fee(address tokenIn, address tokenOut, uint24 fee) external onlyOwner {
+        require(tokenIn != address(0) && tokenOut != address(0), "Frgmnt: bad token");
+        require(fee > 0, "Frgmnt: bad fee");
+        uniV3Fee[tokenIn][tokenOut] = fee;
+        emit UniV3FeeSet(tokenIn, tokenOut, fee);
+    }
+
+    function setUniV3PathExactIn(
+        address tokenIn,
+        address tokenOut,
+        bytes calldata path
+    ) external onlyOwner {
+        require(tokenIn != address(0) && tokenOut != address(0), "Frgmnt: bad token");
+        require(path.length > 0, "Frgmnt: empty path");
+        _validateUniV3Path(path);
+        uniV3PathExactIn[tokenIn][tokenOut] = path;
+        emit UniV3PathExactInSet(tokenIn, tokenOut, path);
+    }
+
+    function setUniV3PathExactOut(
+        address tokenIn,
+        address tokenOut,
+        bytes calldata reversedPath
+    ) external onlyOwner {
+        require(tokenIn != address(0) && tokenOut != address(0), "Frgmnt: bad token");
+        require(reversedPath.length > 0, "Frgmnt: empty path");
+        _validateUniV3Path(reversedPath);
+        uniV3PathExactOut[tokenIn][tokenOut] = reversedPath;
+        emit UniV3PathExactOutSet(tokenIn, tokenOut, reversedPath);
+    }
+
+    function setRequiresApproveReset(address token, bool required) external onlyOwner {
+        require(token != address(0), "Frgmnt: token=0");
+        requiresApproveReset[token] = required;
+        emit ApproveResetFlagSet(token, required);
+    }
+
+    // ============================================================
+    // IAssetGuard VIEW
+    // ============================================================
+
+    function getBalance(address pool, address) public view override returns (uint256 balance) {
+        (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
+
+        if (totalCollateralInUsd > totalDebtInUsd) {
+            balance = totalCollateralInUsd - totalDebtInUsd;
         }
-      
-      // get swap fee
-        uint24 fee = uniV3Fee[settlementToken][repayPlans[i].underlyingAsset];
-        require(fee != 0, "Frgmnt: missing fee");
-     
-      totalMaxIn += _oracleMaxIn(factory, settlementToken, repayPlans[i].underlyingAsset, repayTotal, slippageBps, fee);
     }
 
-    flashAmount = (totalMaxIn * (BPS_DENOMINATOR + flashAmountBufferBps)) / BPS_DENOMINATOR;
-    require(flashAmount > 0, "Frgmnt: flash=0");
-
-  }
-
-  function _withdrawCollateralAndTransfer(
-    address pool,
-    uint256 withdrawPortion,
-    address recipient
-  ) internal view returns (MultiTransaction[] memory txs) {
-    IHasSupportedAsset.Asset[] memory supportedAssets =
-      IHasSupportedAsset(IPoolLogic(pool).poolManagerLogic()).getSupportedAssets();
-
-    txs = new MultiTransaction[](supportedAssets.length * 2);
-    uint256 txCount = 0;
-
-    for (uint256 i = 0; i < supportedAssets.length; ++i) {
-      address underlying = supportedAssets[i].asset;
-
-      (address aToken,,) = aaveProtocolDataProvider.getReserveTokensAddresses(underlying);
-      if (aToken == address(0)) continue;
-
-      uint256 aTokenBalance = IERC20Extended(aToken).balanceOf(pool);
-      if (aTokenBalance == 0) continue;
-
-      uint256 withdrawAmount = (aTokenBalance * withdrawPortion) / PORTION_DENOMINATOR;
-      if (withdrawAmount == 0) continue;
-
-      txs[txCount].to = aaveLendingPool;
-      txs[txCount].txData = abi.encodeWithSelector(IAaveV3Pool.withdraw.selector, underlying, withdrawAmount, pool);
-      txCount++;
-
-      txs[txCount].to = underlying;
-      txs[txCount].txData = abi.encodeWithSelector(IERC20Extended.transfer.selector, recipient, withdrawAmount);
-      txCount++;
+    function getDecimals(address) external pure override returns (uint256) {
+        return 18;
     }
 
-    assembly { mstore(txs, txCount) }
-  }
+    function removeAssetCheck(address pool, address) public view override {
+        (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
 
-  // ============================================================
-  // Stack-too-deep FIX 1: build one settle->debt swap tx in isolated scope
-  // ============================================================
-
-  function _buildOneSettlementToDebtSwapTx(
-    address pool,
-    address settlementToken,
-    DebtRepayPlan memory plan,
-    uint256 slippageBps
-  ) internal view returns (bool ok, MultiTransaction memory t) {
-    address debtToken = plan.underlyingAsset;
-    if (debtToken == settlementToken) return (false, t);
-
-    uint256 desiredDebtOut = plan.repayStableAmount + plan.repayVariableAmount;
-    if (desiredDebtOut == 0) return (false, t);
-
-    address factory = IPoolLogic(pool).factory();
-
-    uint24 fee = uniV3Fee[settlementToken][debtToken];
-    require(fee != 0, "Frgmnt: missing fee/path settle->debt");
-
-    uint256 maxSettlementIn = _oracleMaxIn(factory, settlementToken, debtToken, desiredDebtOut, slippageBps, fee);
-
-    bytes memory reversedPath = uniV3PathExactOut[settlementToken][debtToken];
-    if (reversedPath.length > 0) {
-      t.to = swapRouter;
-      t.txData = _encodeExactOutput(reversedPath, pool, desiredDebtOut, maxSettlementIn);
-      return (true, t);
-    }
-
-    t.to = swapRouter;
-    t.txData = _encodeExactOutputSingle(settlementToken, debtToken, fee, pool, desiredDebtOut, maxSettlementIn);
-    return (true, t);
-  }
-
-  function _buildSettlementToDebtSwaps(
-    address pool,
-    address settlementToken,
-    DebtRepayPlan[] memory repayPlans,
-    uint256 slippageBps
-  ) internal view returns (MultiTransaction[] memory txs) {
-    txs = new MultiTransaction[](2 + repayPlans.length);
-    uint256 n = 0;
-
-    if (requiresApproveReset[settlementToken]) {
-      txs[n].to = settlementToken;
-      txs[n].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, 0);
-      n++;
-    }
-    txs[n].to = settlementToken;
-    txs[n].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, type(uint256).max);
-    n++;
-
-    for (uint256 i = 0; i < repayPlans.length; ++i) {
-      (bool ok, MultiTransaction memory mt) =
-        _buildOneSettlementToDebtSwapTx(pool, settlementToken, repayPlans[i], slippageBps);
-
-      if (!ok) continue;
-
-      txs[n] = mt;
-      n++;
-    }
-
-    assembly { mstore(txs, n) }
-  }
-
-  function _buildApproveAndRepayAllDebts(
-    address pool,
-    DebtRepayPlan[] memory repayPlans
-  ) internal view returns (MultiTransaction[] memory txs) {
-    txs = new MultiTransaction[](repayPlans.length * 4);
-    uint256 n = 0;
-
-    for (uint256 i = 0; i < repayPlans.length; ++i) {
-      address debtToken = repayPlans[i].underlyingAsset;
-
-      uint256 repayStable = repayPlans[i].repayStableAmount;
-      uint256 repayVariable = repayPlans[i].repayVariableAmount;
-      uint256 totalRepay = repayStable + repayVariable;
-
-      if (totalRepay == 0) continue;
-
-      if (requiresApproveReset[debtToken]) {
-        txs[n].to = debtToken;
-        txs[n].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, aaveLendingPool, 0);
-        n++;
-      }
-
-      txs[n].to = debtToken;
-      txs[n].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, aaveLendingPool, totalRepay);
-      n++;
-
-      if (repayStable > 0) {
-        txs[n].to = aaveLendingPool;
-        txs[n].txData = abi.encodeWithSelector(
-          IAaveV3Pool.repay.selector,
-          debtToken,
-          repayStable,
-          uint256(1),
-          pool
+        require(
+            totalCollateralInUsd == 0 && totalDebtInUsd == 0,
+            "Frgmnt: cannot remove non-empty asset"
         );
-        n++;
-      }
-
-      if (repayVariable > 0) {
-        txs[n].to = aaveLendingPool;
-        txs[n].txData = abi.encodeWithSelector(
-          IAaveV3Pool.repay.selector,
-          debtToken,
-          repayVariable,
-          uint256(2),
-          pool
-        );
-        n++;
-      }
     }
 
-    assembly { mstore(txs, n) }
-  }
+    function removeTokenCheck(
+        address pool,
+        address,
+        address token
+    ) public view override returns (bool) {
+        (uint256 collateralBalance, uint256 debtBalance) = _calculateAaveBalance(pool, token);
+        if ((collateralBalance > 0) || (debtBalance > 0)) {
+            return false;
+        }
 
-  function _buildWithdrawCollateral(
-    address pool,
-    uint256 withdrawPortion
-  )
-    internal
-    view
-    returns (
-      MultiTransaction[] memory withdrawTxs,
-      address[] memory collateralTokens,
-      uint256[] memory collateralAmounts
+        return true;
+    }
+
+    // ============================================================
+    // Withdraw planner (IAssetGuard)
+    // ============================================================
+
+    function withdrawProcessing(
+        address pool,
+        address,
+        uint256 withdrawPortion,
+        address to
     )
-  {
-    IHasSupportedAsset.Asset[] memory supportedAssets =
-      IHasSupportedAsset(IPoolLogic(pool).poolManagerLogic()).getSupportedAssets();
+        external
+        view
+        override
+        returns (
+            address withdrawAsset,
+            uint256 withdrawBalance,
+            MultiTransaction[] memory transactions
+        )
+    {
+        require(withdrawPortion <= PORTION_DENOMINATOR, "Frgmnt: bad portion");
+        require(to != address(0), "Frgmnt: to=0");
 
-    withdrawTxs = new MultiTransaction[](supportedAssets.length);
-    collateralTokens = new address[](supportedAssets.length);
-    collateralAmounts = new uint256[](supportedAssets.length);
+        (DebtRepayPlan[] memory repayPlans, uint256 debtAssetCount) = _collectDebtPlans(
+            pool,
+            withdrawPortion
+        );
 
-    uint256 n = 0;
+        // No debt: withdraw collateral and transfer to user
+        if (debtAssetCount == 0) {
+            transactions = _withdrawCollateralAndTransfer(pool, withdrawPortion, to);
+            return (address(0), 0, transactions);
+        }
 
-    for (uint256 i = 0; i < supportedAssets.length; ++i) {
-      address underlying = supportedAssets[i].asset;
+        address settlementToken = _chooseSettlementToken(repayPlans);
+        uint256 slippageBps = defaultSlippageBps;
 
-      (address aToken,,) = aaveProtocolDataProvider.getReserveTokensAddresses(underlying);
-      if (aToken == address(0)) continue;
+        uint256 flashAmount = _estimateFlashAmountInSettlement(
+            pool,
+            repayPlans,
+            settlementToken,
+            slippageBps
+        );
 
-      uint256 aTokenBalance = IERC20Extended(aToken).balanceOf(pool);
-      if (aTokenBalance == 0) continue;
+        FlashloanParams memory fp;
+        fp.withdrawPortion = withdrawPortion;
+        fp.settlementToken = settlementToken;
+        fp.slippageBps = slippageBps;
+        fp.repayPlans = repayPlans;
 
-      uint256 withdrawAmount = (aTokenBalance * withdrawPortion) / PORTION_DENOMINATOR;
-      if (withdrawAmount == 0) continue;
+        transactions = new MultiTransaction[](1);
+        transactions[0].to = aaveLendingPool;
+        transactions[0].txData = _encodeFlashLoanTx(pool, settlementToken, flashAmount, fp);
 
-      withdrawTxs[n].to = aaveLendingPool;
-      withdrawTxs[n].txData = abi.encodeWithSelector(IAaveV3Pool.withdraw.selector, underlying, withdrawAmount, pool);
-
-      collateralTokens[n] = underlying;
-      collateralAmounts[n] = withdrawAmount;
-      n++;
+        return (settlementToken, 0, transactions);
     }
 
-    assembly {
-      mstore(withdrawTxs, n)
-      mstore(collateralTokens, n)
-      mstore(collateralAmounts, n)
-    }
-  }
+    // ============================================================
+    // Flashloan callback planner (IAaveLendingPoolAssetGuard)
+    // ============================================================
 
-  // ============================================================
-  // Stack-too-deep FIX 2: build one collateral->settlement swap tx in isolated scope
-  // ============================================================
+    function flashloanProcessing(
+        address pool,
+        address repayAsset,
+        uint256 repayAmount,
+        uint256 premium,
+        bytes calldata params
+    ) external view override returns (MultiTransaction[] memory transactions) {
+        FlashloanParams memory fp = abi.decode(params, (FlashloanParams));
+        require(fp.settlementToken == repayAsset, "Frgmnt: settlement mismatch");
 
-  function _buildOneCollateralToSettlementSwapTx(
-    address pool,
-    address tokenIn,
-    uint256 amountIn,
-    address settlementToken,
-    uint256 slippageBps
-  ) internal view returns (bool ok, MultiTransaction memory t) {
-    if (amountIn == 0) return (false, t);
-    if (tokenIn == settlementToken) return (false, t);
-
-    address factory = IPoolLogic(pool).factory();
-    uint24 fee = uniV3Fee[tokenIn][settlementToken];
-    require(fee != 0, "Frgmnt: missing fee/path collateral->settle");
-    uint256 minOut = _oracleMinOut(factory, tokenIn, settlementToken, amountIn, slippageBps,fee);
-
-    bytes memory forwardPath = uniV3PathExactIn[tokenIn][settlementToken];
-    if (forwardPath.length > 0) {
-      t.to = swapRouter;
-      t.txData = _encodeExactInput(forwardPath, pool, amountIn, minOut);
-      return (true, t);
+        return _flashloanProcessingInternal(pool, fp, repayAmount, premium);
     }
 
-    t.to = swapRouter;
-    t.txData = _encodeExactInputSingle(tokenIn, settlementToken, fee, pool, amountIn, minOut);
-    return (true, t);
-  }
+    function _flashloanProcessingInternal(
+        address pool,
+        FlashloanParams memory fp,
+        uint256 repayAmount,
+        uint256 premium
+    ) internal view returns (MultiTransaction[] memory transactions) {
+        // Phase 1 + Phase 2
+        transactions = _buildSettlementToDebtSwaps(
+            pool,
+            fp.settlementToken,
+            fp.repayPlans,
+            fp.slippageBps
+        );
+        {
+            MultiTransaction[] memory phase2 = _buildApproveAndRepayAllDebts(pool, fp.repayPlans);
+            transactions = _concat2(transactions, phase2);
+        }
 
-  function _buildCollateralToSettlementSwaps(
-    address pool,
-    address[] memory collateralTokens,
-    uint256[] memory collateralAmounts,
-    address settlementToken,
-    uint256 slippageBps
-  ) internal view returns (MultiTransaction[] memory txs) {
-    txs = new MultiTransaction[](collateralTokens.length * 3);
-    uint256 n = 0;
+        // Phase 3 + Phase 4
+        {
+            (
+                MultiTransaction[] memory withdrawTxs,
+                address[] memory collTokens,
+                uint256[] memory collAmounts
+            ) = _buildWithdrawCollateral(pool, fp.withdrawPortion);
 
-    for (uint256 i = 0; i < collateralTokens.length; ++i) {
-      address tokenIn = collateralTokens[i];
-      uint256 amountIn = collateralAmounts[i];
+            transactions = _concat2(transactions, withdrawTxs);
 
-      if (amountIn == 0) continue;
-      if (tokenIn == settlementToken) continue;
+            MultiTransaction[] memory swapsBack = _buildCollateralToSettlementSwaps(
+                pool,
+                collTokens,
+                collAmounts,
+                fp.settlementToken,
+                fp.slippageBps
+            );
 
-      if (requiresApproveReset[tokenIn]) {
-        txs[n].to = tokenIn;
-        txs[n].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, 0);
+            transactions = _concat2(transactions, swapsBack);
+        }
+
+        // Phase 5
+        {
+            MultiTransaction[] memory phase5 = _buildFlashRepayApprove(
+                fp.settlementToken,
+                repayAmount + premium
+            );
+            transactions = _concat2(transactions, phase5);
+        }
+    }
+
+    function _getBalance(
+        address _pool
+    ) internal view returns (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) {
+        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
+            IPoolLogic(_pool).poolManagerLogic()
+        ).getSupportedAssets();
+        uint256 length = supportedAssets.length;
+
+        address asset;
+        uint256 decimals;
+        uint256 tokenPriceInUsd;
+        uint256 collateralBalance;
+        uint256 debtBalance;
+        address factory = IPoolLogic(_pool).factory();
+
+        for (uint256 i; i < length; ++i) {
+            asset = supportedAssets[i].asset;
+
+            (collateralBalance, debtBalance) = _calculateAaveBalance(_pool, asset);
+
+            if (collateralBalance != 0 || debtBalance != 0) {
+                tokenPriceInUsd = IHasAssetInfo(factory).getAssetPrice(asset);
+                decimals = IERC20Extended(asset).decimals();
+                totalCollateralInUsd += (tokenPriceInUsd * collateralBalance) / (10 ** decimals);
+                totalDebtInUsd += (tokenPriceInUsd * debtBalance) / (10 ** decimals);
+            }
+        }
+    }
+
+    function _calculateAaveBalance(
+        address _pool,
+        address _asset
+    ) internal view returns (uint256 collateralBalance, uint256 debtBalance) {
+        // Collateral: aToken balance
+        address aToken = IAaveV3Pool(aaveLendingPool).getReserveAToken(_asset);
+        if (aToken != address(0)) {
+            collateralBalance = IERC20Extended(aToken).balanceOf(_pool);
+        }
+
+        // Debt: only variable debt
+        address variableDebtToken = IAaveV3Pool(aaveLendingPool).getReserveVariableDebtToken(
+            _asset
+        );
+        if (variableDebtToken != address(0)) {
+            debtBalance = IERC20Extended(variableDebtToken).balanceOf(_pool);
+        }
+    }
+
+    // ============================================================
+    // INTERNALS
+    // ============================================================
+
+    function _encodeFlashLoanTx(
+        address pool,
+        address settlementToken,
+        uint256 flashAmount,
+        FlashloanParams memory fp
+    ) internal pure returns (bytes memory txData) {
+        address[] memory assets = new address[](1);
+        assets[0] = settlementToken;
+
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = flashAmount;
+
+        uint256[] memory modes = new uint256[](1);
+        modes[0] = 0;
+
+        bytes memory params = abi.encode(fp);
+
+        txData = abi.encodeWithSelector(
+            IAaveV3Pool.flashLoan.selector,
+            pool,
+            assets,
+            amounts,
+            modes,
+            pool,
+            params,
+            uint16(0)
+        );
+    }
+
+    function _chooseSettlementToken(
+        DebtRepayPlan[] memory repayPlans
+    ) internal view returns (address) {
+        address firstAsset;
+        bool found;
+
+        for (uint256 i = 0; i < repayPlans.length; ++i) {
+            if (repayPlans[i].repayStableAmount + repayPlans[i].repayVariableAmount == 0) continue;
+
+            address asset = repayPlans[i].underlyingAsset;
+
+            if (!found) {
+                firstAsset = asset;
+                found = true;
+            } else if (asset != firstAsset) {
+                // Multiple different assets detected → fallback
+                return preferredSettlementAsset;
+            }
+        }
+
+        // If exactly one unique asset was found, use it.
+        // If no debt exists, fallback.
+        return found ? firstAsset : preferredSettlementAsset;
+    }
+
+    /**
+     * @notice Collect pro-rata debt repayment plans based on the pool's supported assets list.
+     * @dev IMPORTANT INVARIANT (DOCUMENTED):
+     * - This guard only scans debts for assets returned by PoolManagerLogic.getSupportedAssets().
+     * - Therefore, the protocol MUST enforce: "the pool never borrows outside supported assets".
+     * - If the pool borrows an unsupported asset on Aave, this function will not include it in the repay plan,
+     *   leading to incomplete debt repayment during withdrawals.
+     *
+     * If you want stronger safety, you can improve the debt discovery mechanism to scan all Aave reserves and
+     * check stable/variable debt tokens for non-zero balances, but that requires iterating over all reserves
+     * (potentially expensive) and having an accessor for the reserve list.
+     */
+    function _collectDebtPlans(
+        address pool,
+        uint256 withdrawPortion
+    ) internal view returns (DebtRepayPlan[] memory plans, uint256 planCount) {
+        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
+            IPoolLogic(pool).poolManagerLogic()
+        ).getSupportedAssets();
+
+        plans = new DebtRepayPlan[](supportedAssets.length);
+
+        for (uint256 i = 0; i < supportedAssets.length; ++i) {
+            address underlying = supportedAssets[i].asset;
+
+            (, address stableDebtToken, address variableDebtToken) = aaveProtocolDataProvider
+                .getReserveTokensAddresses(underlying);
+
+            uint256 stableDebtBalance =
+                stableDebtToken == address(0) ? 0 : IERC20Extended(stableDebtToken).balanceOf(pool);
+            uint256 variableDebtBalance =
+                variableDebtToken == address(0)
+                    ? 0
+                    : IERC20Extended(variableDebtToken).balanceOf(pool);
+
+            if (stableDebtBalance == 0 && variableDebtBalance == 0) continue;
+
+            uint256 repayStable =
+                stableDebtBalance == 0 ? 0 : _mulPortionRoundUp(stableDebtBalance, withdrawPortion);
+            uint256 repayVariable =
+                variableDebtBalance == 0
+                    ? 0
+                    : _mulPortionRoundUp(variableDebtBalance, withdrawPortion);
+
+            if (repayStable == 0 && repayVariable == 0) continue;
+
+            plans[planCount] = DebtRepayPlan({
+                underlyingAsset: underlying,
+                repayStableAmount: repayStable,
+                repayVariableAmount: repayVariable
+            });
+            planCount++;
+        }
+
+        assembly {
+            mstore(plans, planCount)
+        }
+    }
+
+    function _mulPortionRoundUp(uint256 amount, uint256 portion) internal pure returns (uint256) {
+        return (amount * portion + (PORTION_DENOMINATOR - 1)) / PORTION_DENOMINATOR;
+    }
+
+    function _estimateFlashAmountInSettlement(
+        address pool,
+        DebtRepayPlan[] memory repayPlans,
+        address settlementToken,
+        uint256 slippageBps
+    ) internal view returns (uint256 flashAmount) {
+        address factory = IPoolLogic(pool).factory();
+        uint256 totalMaxIn;
+
+        for (uint256 i = 0; i < repayPlans.length; ++i) {
+            uint256 repayTotal =
+                repayPlans[i].repayStableAmount + repayPlans[i].repayVariableAmount;
+            if (repayTotal == 0) continue;
+
+            // Skip swap logic if debt token is same as settlement token
+            if (repayPlans[i].underlyingAsset == settlementToken) {
+                // Only add repay amount
+                totalMaxIn += repayTotal;
+                continue;
+            }
+
+            // get swap fee
+            uint24 fee = uniV3Fee[settlementToken][repayPlans[i].underlyingAsset];
+            require(fee != 0, "Frgmnt: missing fee");
+
+            totalMaxIn += _oracleMaxIn(
+                factory,
+                settlementToken,
+                repayPlans[i].underlyingAsset,
+                repayTotal,
+                slippageBps,
+                fee
+            );
+        }
+
+        flashAmount = (totalMaxIn * (BPS_DENOMINATOR + flashAmountBufferBps)) / BPS_DENOMINATOR;
+        require(flashAmount > 0, "Frgmnt: flash=0");
+    }
+
+    function _withdrawCollateralAndTransfer(
+        address pool,
+        uint256 withdrawPortion,
+        address recipient
+    ) internal view returns (MultiTransaction[] memory txs) {
+        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
+            IPoolLogic(pool).poolManagerLogic()
+        ).getSupportedAssets();
+
+        txs = new MultiTransaction[](supportedAssets.length * 2);
+        uint256 txCount = 0;
+
+        for (uint256 i = 0; i < supportedAssets.length; ++i) {
+            address underlying = supportedAssets[i].asset;
+
+            (address aToken, , ) = aaveProtocolDataProvider.getReserveTokensAddresses(underlying);
+            if (aToken == address(0)) continue;
+
+            uint256 aTokenBalance = IERC20Extended(aToken).balanceOf(pool);
+            if (aTokenBalance == 0) continue;
+
+            uint256 withdrawAmount = (aTokenBalance * withdrawPortion) / PORTION_DENOMINATOR;
+            if (withdrawAmount == 0) continue;
+
+            txs[txCount].to = aaveLendingPool;
+            txs[txCount].txData = abi.encodeWithSelector(
+                IAaveV3Pool.withdraw.selector,
+                underlying,
+                withdrawAmount,
+                pool
+            );
+            txCount++;
+
+            txs[txCount].to = underlying;
+            txs[txCount].txData = abi.encodeWithSelector(
+                IERC20Extended.transfer.selector,
+                recipient,
+                withdrawAmount
+            );
+            txCount++;
+        }
+
+        assembly {
+            mstore(txs, txCount)
+        }
+    }
+
+    // ============================================================
+    // Stack-too-deep FIX 1: build one settle->debt swap tx in isolated scope
+    // ============================================================
+
+    function _buildOneSettlementToDebtSwapTx(
+        address pool,
+        address settlementToken,
+        DebtRepayPlan memory plan,
+        uint256 slippageBps
+    ) internal view returns (bool ok, MultiTransaction memory t) {
+        address debtToken = plan.underlyingAsset;
+        if (debtToken == settlementToken) return (false, t);
+
+        uint256 desiredDebtOut = plan.repayStableAmount + plan.repayVariableAmount;
+        if (desiredDebtOut == 0) return (false, t);
+
+        address factory = IPoolLogic(pool).factory();
+
+        uint24 fee = uniV3Fee[settlementToken][debtToken];
+        require(fee != 0, "Frgmnt: missing fee/path settle->debt");
+
+        uint256 maxSettlementIn = _oracleMaxIn(
+            factory,
+            settlementToken,
+            debtToken,
+            desiredDebtOut,
+            slippageBps,
+            fee
+        );
+
+        bytes memory reversedPath = uniV3PathExactOut[settlementToken][debtToken];
+        if (reversedPath.length > 0) {
+            t.to = swapRouter;
+            t.txData = _encodeExactOutput(reversedPath, pool, desiredDebtOut, maxSettlementIn);
+            return (true, t);
+        }
+
+        t.to = swapRouter;
+        t.txData = _encodeExactOutputSingle(
+            settlementToken,
+            debtToken,
+            fee,
+            pool,
+            desiredDebtOut,
+            maxSettlementIn
+        );
+        return (true, t);
+    }
+
+    function _buildSettlementToDebtSwaps(
+        address pool,
+        address settlementToken,
+        DebtRepayPlan[] memory repayPlans,
+        uint256 slippageBps
+    ) internal view returns (MultiTransaction[] memory txs) {
+        txs = new MultiTransaction[](2 + repayPlans.length);
+        uint256 n = 0;
+
+        if (requiresApproveReset[settlementToken]) {
+            txs[n].to = settlementToken;
+            txs[n].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, 0);
+            n++;
+        }
+        txs[n].to = settlementToken;
+        txs[n].txData = abi.encodeWithSelector(
+            IERC20Extended.approve.selector,
+            swapRouter,
+            type(uint256).max
+        );
         n++;
-      }
 
-      txs[n].to = tokenIn;
-      txs[n].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, swapRouter, type(uint256).max);
-      n++;
+        for (uint256 i = 0; i < repayPlans.length; ++i) {
+            (bool ok, MultiTransaction memory mt) = _buildOneSettlementToDebtSwapTx(
+                pool,
+                settlementToken,
+                repayPlans[i],
+                slippageBps
+            );
 
-      (bool ok, MultiTransaction memory mt) =
-        _buildOneCollateralToSettlementSwapTx(pool, tokenIn, amountIn, settlementToken, slippageBps);
+            if (!ok) continue;
 
-      if (!ok) continue;
+            txs[n] = mt;
+            n++;
+        }
 
-      txs[n] = mt;
-      n++;
+        assembly {
+            mstore(txs, n)
+        }
     }
 
-    assembly { mstore(txs, n) }
-  }
+    function _buildApproveAndRepayAllDebts(
+        address pool,
+        DebtRepayPlan[] memory repayPlans
+    ) internal view returns (MultiTransaction[] memory txs) {
+        txs = new MultiTransaction[](repayPlans.length * 4);
+        uint256 n = 0;
 
-  function _buildFlashRepayApprove(address settlementToken, uint256 approveAmount)
-    internal
-    view
-    returns (MultiTransaction[] memory txs)
-  {
+        for (uint256 i = 0; i < repayPlans.length; ++i) {
+            address debtToken = repayPlans[i].underlyingAsset;
 
-    if (requiresApproveReset[settlementToken]) {
-      txs = new MultiTransaction[](2);
-      txs[0].to = settlementToken;
-      txs[0].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, aaveLendingPool, 0);
-      txs[1].to = settlementToken;
-      txs[1].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, aaveLendingPool, approveAmount);
-    } else {
-      txs = new MultiTransaction[](1);
-      txs[0].to = settlementToken;
-      txs[0].txData = abi.encodeWithSelector(IERC20Extended.approve.selector, aaveLendingPool, approveAmount);
+            uint256 repayStable = repayPlans[i].repayStableAmount;
+            uint256 repayVariable = repayPlans[i].repayVariableAmount;
+            uint256 totalRepay = repayStable + repayVariable;
+
+            if (totalRepay == 0) continue;
+
+            if (requiresApproveReset[debtToken]) {
+                txs[n].to = debtToken;
+                txs[n].txData = abi.encodeWithSelector(
+                    IERC20Extended.approve.selector,
+                    aaveLendingPool,
+                    0
+                );
+                n++;
+            }
+
+            txs[n].to = debtToken;
+            txs[n].txData = abi.encodeWithSelector(
+                IERC20Extended.approve.selector,
+                aaveLendingPool,
+                totalRepay
+            );
+            n++;
+
+            if (repayStable > 0) {
+                txs[n].to = aaveLendingPool;
+                txs[n].txData = abi.encodeWithSelector(
+                    IAaveV3Pool.repay.selector,
+                    debtToken,
+                    repayStable,
+                    uint256(1),
+                    pool
+                );
+                n++;
+            }
+
+            if (repayVariable > 0) {
+                txs[n].to = aaveLendingPool;
+                txs[n].txData = abi.encodeWithSelector(
+                    IAaveV3Pool.repay.selector,
+                    debtToken,
+                    repayVariable,
+                    uint256(2),
+                    pool
+                );
+                n++;
+            }
+        }
+
+        assembly {
+            mstore(txs, n)
+        }
     }
-  }
 
-  function _oracleMinOut(
-    address factory,
-    address tokenIn,
-    address tokenOut,
-    uint256 amountIn,
-    uint256 slippageBps,
-    uint24 fee
-  ) internal view returns (uint256) {
-    uint256 priceInUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenIn);
-    uint256 priceOutUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenOut);
-    require(priceInUsdD18 != 0 && priceOutUsdD18 != 0, "Frgmnt: price=0");
+    function _buildWithdrawCollateral(
+        address pool,
+        uint256 withdrawPortion
+    )
+        internal
+        view
+        returns (
+            MultiTransaction[] memory withdrawTxs,
+            address[] memory collateralTokens,
+            uint256[] memory collateralAmounts
+        )
+    {
+        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
+            IPoolLogic(pool).poolManagerLogic()
+        ).getSupportedAssets();
 
-    uint256 unitIn = 10 ** IERC20Extended(tokenIn).decimals();
-    uint256 unitOut = 10 ** IERC20Extended(tokenOut).decimals();
+        withdrawTxs = new MultiTransaction[](supportedAssets.length);
+        collateralTokens = new address[](supportedAssets.length);
+        collateralAmounts = new uint256[](supportedAssets.length);
 
-    uint256 usdValueD18 = (amountIn * priceInUsdD18) / unitIn;
-    uint256 expectedOut = (usdValueD18 * unitOut) / priceOutUsdD18;
+        uint256 n = 0;
 
-    slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
+        for (uint256 i = 0; i < supportedAssets.length; ++i) {
+            address underlying = supportedAssets[i].asset;
 
-    return (expectedOut * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
-  }
+            (address aToken, , ) = aaveProtocolDataProvider.getReserveTokensAddresses(underlying);
+            if (aToken == address(0)) continue;
 
-  function _oracleMaxIn(
-    address factory,
-    address tokenIn,
-    address tokenOut,
-    uint256 amountOut,
-    uint256 slippageBps,
-    uint24 fee
-  ) internal view returns (uint256) {
-    uint256 priceInUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenIn);
-    uint256 priceOutUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenOut);
-    require(priceInUsdD18 != 0 && priceOutUsdD18 != 0, "Frgmnt: price=0");
+            uint256 aTokenBalance = IERC20Extended(aToken).balanceOf(pool);
+            if (aTokenBalance == 0) continue;
 
-    uint256 unitIn = 10 ** IERC20Extended(tokenIn).decimals();
-    uint256 unitOut = 10 ** IERC20Extended(tokenOut).decimals();
+            uint256 withdrawAmount = (aTokenBalance * withdrawPortion) / PORTION_DENOMINATOR;
+            if (withdrawAmount == 0) continue;
 
-    uint256 usdValueD18 = (amountOut * priceOutUsdD18) / unitOut;
-    uint256 expectedIn = (usdValueD18 * unitIn) / priceInUsdD18;
+            withdrawTxs[n].to = aaveLendingPool;
+            withdrawTxs[n].txData = abi.encodeWithSelector(
+                IAaveV3Pool.withdraw.selector,
+                underlying,
+                withdrawAmount,
+                pool
+            );
 
-    slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
+            collateralTokens[n] = underlying;
+            collateralAmounts[n] = withdrawAmount;
+            n++;
+        }
 
-    return (expectedIn * (BPS_DENOMINATOR + slippageBps)) / BPS_DENOMINATOR;
-  }
+        assembly {
+            mstore(withdrawTxs, n)
+            mstore(collateralTokens, n)
+            mstore(collateralAmounts, n)
+        }
+    }
 
+    // ============================================================
+    // Stack-too-deep FIX 2: build one collateral->settlement swap tx in isolated scope
+    // ============================================================
 
-  function _getEffectiveSlippage(uint256 slippageBps, uint256 fee)
-    internal
-    pure
-    returns (uint256){
-    // fee is Uniswap ppm (1e6 denominator)
-    uint256 minSlippageBps = (fee * BPS_DENOMINATOR) / (FEE_DENOMINATOR - fee);
-    return slippageBps < minSlippageBps ? minSlippageBps : slippageBps;
+    function _buildOneCollateralToSettlementSwapTx(
+        address pool,
+        address tokenIn,
+        uint256 amountIn,
+        address settlementToken,
+        uint256 slippageBps
+    ) internal view returns (bool ok, MultiTransaction memory t) {
+        if (amountIn == 0) return (false, t);
+        if (tokenIn == settlementToken) return (false, t);
 
-  }
+        address factory = IPoolLogic(pool).factory();
+        uint24 fee = uniV3Fee[tokenIn][settlementToken];
+        require(fee != 0, "Frgmnt: missing fee/path collateral->settle");
+        uint256 minOut = _oracleMinOut(
+            factory,
+            tokenIn,
+            settlementToken,
+            amountIn,
+            slippageBps,
+            fee
+        );
 
-  // ============================================================
-  // Swap encoders
-  // ============================================================
+        bytes memory forwardPath = uniV3PathExactIn[tokenIn][settlementToken];
+        if (forwardPath.length > 0) {
+            t.to = swapRouter;
+            t.txData = _encodeExactInput(forwardPath, pool, amountIn, minOut);
+            return (true, t);
+        }
 
-  function _encodeExactOutput(
-    bytes memory path,
-    address recipient,
-    uint256 amountOut,
-    uint256 amountInMaximum
-  ) internal pure returns (bytes memory) {
-    IV3SwapRouter.ExactOutputParams memory p = IV3SwapRouter.ExactOutputParams({
-      path: path,
-      recipient: recipient,
-      amountOut: amountOut,
-      amountInMaximum: amountInMaximum
-    });
-    return abi.encodeWithSelector(IV3SwapRouter.exactOutput.selector, p);
-  }
+        t.to = swapRouter;
+        t.txData = _encodeExactInputSingle(tokenIn, settlementToken, fee, pool, amountIn, minOut);
+        return (true, t);
+    }
 
-  function _encodeExactOutputSingle(
-    address tokenIn,
-    address tokenOut,
-    uint24 fee,
-    address recipient,
-    uint256 amountOut,
-    uint256 amountInMaximum
-  ) internal pure returns (bytes memory) {
-    IV3SwapRouter.ExactOutputSingleParams memory p = IV3SwapRouter.ExactOutputSingleParams({
-      tokenIn: tokenIn,
-      tokenOut: tokenOut,
-      fee: fee,
-      recipient: recipient,
-      amountOut: amountOut,
-      amountInMaximum: amountInMaximum,
-      sqrtPriceLimitX96: 0
-    });
-    return abi.encodeWithSelector(IV3SwapRouter.exactOutputSingle.selector, p);
-  }
+    function _buildCollateralToSettlementSwaps(
+        address pool,
+        address[] memory collateralTokens,
+        uint256[] memory collateralAmounts,
+        address settlementToken,
+        uint256 slippageBps
+    ) internal view returns (MultiTransaction[] memory txs) {
+        txs = new MultiTransaction[](collateralTokens.length * 3);
+        uint256 n = 0;
 
-  function _encodeExactInput(
-    bytes memory path,
-    address recipient,
-    uint256 amountIn,
-    uint256 amountOutMinimum
-  ) internal pure returns (bytes memory) {
-    IV3SwapRouter.ExactInputParams memory p = IV3SwapRouter.ExactInputParams({
-      path: path,
-      recipient: recipient,
-      amountIn: amountIn,
-      amountOutMinimum: amountOutMinimum
-    });
-    return abi.encodeWithSelector(IV3SwapRouter.exactInput.selector, p);
-  }
+        for (uint256 i = 0; i < collateralTokens.length; ++i) {
+            address tokenIn = collateralTokens[i];
+            uint256 amountIn = collateralAmounts[i];
 
-  function _encodeExactInputSingle(
-    address tokenIn,
-    address tokenOut,
-    uint24 fee,
-    address recipient,
-    uint256 amountIn,
-    uint256 amountOutMinimum
-  ) internal pure returns (bytes memory) {
-    IV3SwapRouter.ExactInputSingleParams memory p = IV3SwapRouter.ExactInputSingleParams({
-      tokenIn: tokenIn,
-      tokenOut: tokenOut,
-      fee: fee,
-      recipient: recipient,
-      amountIn: amountIn,
-      amountOutMinimum: amountOutMinimum,
-      sqrtPriceLimitX96: 0
-    });
-    return abi.encodeWithSelector(IV3SwapRouter.exactInputSingle.selector, p);
-  }
+            if (amountIn == 0) continue;
+            if (tokenIn == settlementToken) continue;
 
+            if (requiresApproveReset[tokenIn]) {
+                txs[n].to = tokenIn;
+                txs[n].txData = abi.encodeWithSelector(
+                    IERC20Extended.approve.selector,
+                    swapRouter,
+                    0
+                );
+                n++;
+            }
 
-  function _validateUniV3Path(bytes memory path) internal pure {
-    // Uniswap V3 path format:
-    // token0 (20 bytes) | fee0 (3 bytes) | token1 (20 bytes) | fee1 (3 bytes) | ... | tokenM (20 bytes)
-    // length = 20 + 23*M, with M >= 1
-    require(path.length >= 43, "Frgmnt: invalid uniV3 path length");
-    require((path.length - 20) % 23 == 0, "Frgmnt: invalid uniV3 path length");
-  }
+            txs[n].to = tokenIn;
+            txs[n].txData = abi.encodeWithSelector(
+                IERC20Extended.approve.selector,
+                swapRouter,
+                type(uint256).max
+            );
+            n++;
 
-  function _concat2(
-    MultiTransaction[] memory x,
-    MultiTransaction[] memory y
-  ) internal pure returns (MultiTransaction[] memory out) {
-    out = new MultiTransaction[](x.length + y.length);
-    uint256 k = 0;
-    for (uint256 i = 0; i < x.length; ++i) out[k++] = x[i];
-    for (uint256 i = 0; i < y.length; ++i) out[k++] = y[i];
-  }
+            (bool ok, MultiTransaction memory mt) = _buildOneCollateralToSettlementSwapTx(
+                pool,
+                tokenIn,
+                amountIn,
+                settlementToken,
+                slippageBps
+            );
+
+            if (!ok) continue;
+
+            txs[n] = mt;
+            n++;
+        }
+
+        assembly {
+            mstore(txs, n)
+        }
+    }
+
+    function _buildFlashRepayApprove(
+        address settlementToken,
+        uint256 approveAmount
+    ) internal view returns (MultiTransaction[] memory txs) {
+        if (requiresApproveReset[settlementToken]) {
+            txs = new MultiTransaction[](2);
+            txs[0].to = settlementToken;
+            txs[0].txData = abi.encodeWithSelector(
+                IERC20Extended.approve.selector,
+                aaveLendingPool,
+                0
+            );
+            txs[1].to = settlementToken;
+            txs[1].txData = abi.encodeWithSelector(
+                IERC20Extended.approve.selector,
+                aaveLendingPool,
+                approveAmount
+            );
+        } else {
+            txs = new MultiTransaction[](1);
+            txs[0].to = settlementToken;
+            txs[0].txData = abi.encodeWithSelector(
+                IERC20Extended.approve.selector,
+                aaveLendingPool,
+                approveAmount
+            );
+        }
+    }
+
+    function _oracleMinOut(
+        address factory,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 slippageBps,
+        uint24 fee
+    ) internal view returns (uint256) {
+        uint256 priceInUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenIn);
+        uint256 priceOutUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenOut);
+        require(priceInUsdD18 != 0 && priceOutUsdD18 != 0, "Frgmnt: price=0");
+
+        uint256 unitIn = 10 ** IERC20Extended(tokenIn).decimals();
+        uint256 unitOut = 10 ** IERC20Extended(tokenOut).decimals();
+
+        uint256 usdValueD18 = (amountIn * priceInUsdD18) / unitIn;
+        uint256 expectedOut = (usdValueD18 * unitOut) / priceOutUsdD18;
+
+        slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
+
+        return (expectedOut * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
+    }
+
+    function _oracleMaxIn(
+        address factory,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountOut,
+        uint256 slippageBps,
+        uint24 fee
+    ) internal view returns (uint256) {
+        uint256 priceInUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenIn);
+        uint256 priceOutUsdD18 = IHasAssetInfo(factory).getAssetPrice(tokenOut);
+        require(priceInUsdD18 != 0 && priceOutUsdD18 != 0, "Frgmnt: price=0");
+
+        uint256 unitIn = 10 ** IERC20Extended(tokenIn).decimals();
+        uint256 unitOut = 10 ** IERC20Extended(tokenOut).decimals();
+
+        uint256 usdValueD18 = (amountOut * priceOutUsdD18) / unitOut;
+        uint256 expectedIn = (usdValueD18 * unitIn) / priceInUsdD18;
+
+        slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
+
+        return (expectedIn * (BPS_DENOMINATOR + slippageBps)) / BPS_DENOMINATOR;
+    }
+
+    function _getEffectiveSlippage(
+        uint256 slippageBps,
+        uint256 fee
+    ) internal pure returns (uint256) {
+        // fee is Uniswap ppm (1e6 denominator)
+        uint256 minSlippageBps = (fee * BPS_DENOMINATOR) / (FEE_DENOMINATOR - fee);
+        return slippageBps < minSlippageBps ? minSlippageBps : slippageBps;
+    }
+
+    // ============================================================
+    // Swap encoders
+    // ============================================================
+
+    function _encodeExactOutput(
+        bytes memory path,
+        address recipient,
+        uint256 amountOut,
+        uint256 amountInMaximum
+    ) internal pure returns (bytes memory) {
+        IV3SwapRouter.ExactOutputParams memory p = IV3SwapRouter.ExactOutputParams({
+            path: path,
+            recipient: recipient,
+            amountOut: amountOut,
+            amountInMaximum: amountInMaximum
+        });
+        return abi.encodeWithSelector(IV3SwapRouter.exactOutput.selector, p);
+    }
+
+    function _encodeExactOutputSingle(
+        address tokenIn,
+        address tokenOut,
+        uint24 fee,
+        address recipient,
+        uint256 amountOut,
+        uint256 amountInMaximum
+    ) internal pure returns (bytes memory) {
+        IV3SwapRouter.ExactOutputSingleParams memory p = IV3SwapRouter.ExactOutputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            fee: fee,
+            recipient: recipient,
+            amountOut: amountOut,
+            amountInMaximum: amountInMaximum,
+            sqrtPriceLimitX96: 0
+        });
+        return abi.encodeWithSelector(IV3SwapRouter.exactOutputSingle.selector, p);
+    }
+
+    function _encodeExactInput(
+        bytes memory path,
+        address recipient,
+        uint256 amountIn,
+        uint256 amountOutMinimum
+    ) internal pure returns (bytes memory) {
+        IV3SwapRouter.ExactInputParams memory p = IV3SwapRouter.ExactInputParams({
+            path: path,
+            recipient: recipient,
+            amountIn: amountIn,
+            amountOutMinimum: amountOutMinimum
+        });
+        return abi.encodeWithSelector(IV3SwapRouter.exactInput.selector, p);
+    }
+
+    function _encodeExactInputSingle(
+        address tokenIn,
+        address tokenOut,
+        uint24 fee,
+        address recipient,
+        uint256 amountIn,
+        uint256 amountOutMinimum
+    ) internal pure returns (bytes memory) {
+        IV3SwapRouter.ExactInputSingleParams memory p = IV3SwapRouter.ExactInputSingleParams({
+            tokenIn: tokenIn,
+            tokenOut: tokenOut,
+            fee: fee,
+            recipient: recipient,
+            amountIn: amountIn,
+            amountOutMinimum: amountOutMinimum,
+            sqrtPriceLimitX96: 0
+        });
+        return abi.encodeWithSelector(IV3SwapRouter.exactInputSingle.selector, p);
+    }
+
+    function _validateUniV3Path(bytes memory path) internal pure {
+        // Uniswap V3 path format:
+        // token0 (20 bytes) | fee0 (3 bytes) | token1 (20 bytes) | fee1 (3 bytes) | ... | tokenM (20 bytes)
+        // length = 20 + 23*M, with M >= 1
+        require(path.length >= 43, "Frgmnt: invalid uniV3 path length");
+        require((path.length - 20) % 23 == 0, "Frgmnt: invalid uniV3 path length");
+    }
+
+    function _concat2(
+        MultiTransaction[] memory x,
+        MultiTransaction[] memory y
+    ) internal pure returns (MultiTransaction[] memory out) {
+        out = new MultiTransaction[](x.length + y.length);
+        uint256 k = 0;
+        for (uint256 i = 0; i < x.length; ++i) out[k++] = x[i];
+        for (uint256 i = 0; i < y.length; ++i) out[k++] = y[i];
+    }
 }

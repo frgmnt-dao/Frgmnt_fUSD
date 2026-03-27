@@ -1,4 +1,4 @@
-import { ethers } from "hardhat";
+import { ethers } from 'hardhat';
 
 /**
  * Address validation helper.
@@ -24,27 +24,27 @@ async function sendTx(dryRun: boolean, label: string, txPromise: Promise<any>) {
 function parseAddressList(envValue: string | undefined): string[] {
   if (!envValue) return [];
   return envValue
-    .split(",")
+    .split(',')
     .map((x) => x.trim())
     .filter((x) => x.length > 0);
 }
 
 async function main() {
-  const DRY_RUN = (process.env.DRY_RUN ?? "true").toLowerCase() === "true";
+  const DRY_RUN = (process.env.DRY_RUN ?? 'true').toLowerCase() === 'true';
 
   // Governance infrastructure addresses
-  const TIMELOCK = process.env.TIMELOCK ?? "";
-  const GOVERNANCE_SAFE = process.env.GOVERNANCE_SAFE ?? "";
-  const EMERGENCY_SAFE = process.env.EMERGENCY_SAFE ?? "";
-  const TRADER_SAFE = process.env.TRADER_SAFE ?? "";
+  const TIMELOCK = process.env.TIMELOCK ?? '';
+  const GOVERNANCE_SAFE = process.env.GOVERNANCE_SAFE ?? '';
+  const EMERGENCY_SAFE = process.env.EMERGENCY_SAFE ?? '';
+  const TRADER_SAFE = process.env.TRADER_SAFE ?? '';
 
   // Deployed protocol contracts
-  const GOVERNANCE = process.env.GOVERNANCE ?? "";
-  const ASSET_HANDLER = process.env.ASSET_HANDLER ?? "";
-  const TOKEN_LOGIC = process.env.TOKEN_LOGIC ?? "";
-  const POOL_MANAGER_LOGIC = process.env.POOL_MANAGER_LOGIC ?? "";
-  const POOL_LOGIC = process.env.POOL_LOGIC ?? "";
-  const MANAGED = process.env.MANAGED ?? ""; // optional
+  const GOVERNANCE = process.env.GOVERNANCE ?? '';
+  const ASSET_HANDLER = process.env.ASSET_HANDLER ?? '';
+  const TOKEN_LOGIC = process.env.TOKEN_LOGIC ?? '';
+  const POOL_MANAGER_LOGIC = process.env.POOL_MANAGER_LOGIC ?? '';
+  const POOL_LOGIC = process.env.POOL_LOGIC ?? '';
+  const MANAGED = process.env.MANAGED ?? ''; // optional
 
   // Optional: previous privileged holders to remove access from (AccessControl-only)
   const PREVIOUS_TOKEN_ADMINS = parseAddressList(process.env.PREVIOUS_TOKEN_ADMINS);
@@ -79,13 +79,13 @@ async function main() {
   const signerAddr = await signer.getAddress();
 
   // Attach to deployed contracts
-  const governance = await ethers.getContractAt("Governance", GOVERNANCE, signer);
-  const assetHandler = await ethers.getContractAt("AssetHandler", ASSET_HANDLER, signer);
-  const tokenLogic = await ethers.getContractAt("TokenLogic", TOKEN_LOGIC, signer);
-  const poolManager = await ethers.getContractAt("PoolManagerLogic", POOL_MANAGER_LOGIC, signer);
-  const poolLogic = await ethers.getContractAt("PoolLogic", POOL_LOGIC, signer);
+  const governance = await ethers.getContractAt('Governance', GOVERNANCE, signer);
+  const assetHandler = await ethers.getContractAt('AssetHandler', ASSET_HANDLER, signer);
+  const tokenLogic = await ethers.getContractAt('TokenLogic', TOKEN_LOGIC, signer);
+  const poolManager = await ethers.getContractAt('PoolManagerLogic', POOL_MANAGER_LOGIC, signer);
+  const poolLogic = await ethers.getContractAt('PoolLogic', POOL_LOGIC, signer);
 
-  const managed = HAS_MANAGED ? await ethers.getContractAt("Managed", MANAGED, signer) : null;
+  const managed = HAS_MANAGED ? await ethers.getContractAt('Managed', MANAGED, signer) : null;
 
   // TokenLogic role identifiers
   const DEFAULT_ADMIN_ROLE = await tokenLogic.DEFAULT_ADMIN_ROLE();
@@ -96,7 +96,11 @@ async function main() {
    * Removes previous owner's access automatically.
    */
   if ((await governance.owner()) !== TIMELOCK) {
-    await sendTx(DRY_RUN, "Governance.transferOwnership(Timelock)", governance.transferOwnership(TIMELOCK));
+    await sendTx(
+      DRY_RUN,
+      'Governance.transferOwnership(Timelock)',
+      governance.transferOwnership(TIMELOCK),
+    );
   }
 
   /**
@@ -104,7 +108,11 @@ async function main() {
    * Removes previous owner's access automatically.
    */
   if ((await assetHandler.owner()) !== TIMELOCK) {
-    await sendTx(DRY_RUN, "AssetHandler.transferOwnership(Timelock)", assetHandler.transferOwnership(TIMELOCK));
+    await sendTx(
+      DRY_RUN,
+      'AssetHandler.transferOwnership(Timelock)',
+      assetHandler.transferOwnership(TIMELOCK),
+    );
   }
 
   /**
@@ -112,7 +120,11 @@ async function main() {
    * Removes previous owner's access automatically.
    */
   if ((await poolLogic.owner()) !== TIMELOCK) {
-    await sendTx(DRY_RUN, "PoolLogic.transferOwnership(Timelock)", poolLogic.transferOwnership(TIMELOCK));
+    await sendTx(
+      DRY_RUN,
+      'PoolLogic.transferOwnership(Timelock)',
+      poolLogic.transferOwnership(TIMELOCK),
+    );
   }
 
   /**
@@ -124,8 +136,8 @@ async function main() {
   if (!(await tokenLogic.hasRole(DEFAULT_ADMIN_ROLE, TIMELOCK))) {
     await sendTx(
       DRY_RUN,
-      "TokenLogic.grantRole(DEFAULT_ADMIN_ROLE, Timelock)",
-      tokenLogic.grantRole(DEFAULT_ADMIN_ROLE, TIMELOCK)
+      'TokenLogic.grantRole(DEFAULT_ADMIN_ROLE, Timelock)',
+      tokenLogic.grantRole(DEFAULT_ADMIN_ROLE, TIMELOCK),
     );
   }
 
@@ -137,7 +149,7 @@ async function main() {
       await sendTx(
         DRY_RUN,
         `TokenLogic.revokeRole(DEFAULT_ADMIN_ROLE, ${prev})`,
-        tokenLogic.revokeRole(DEFAULT_ADMIN_ROLE, prev)
+        tokenLogic.revokeRole(DEFAULT_ADMIN_ROLE, prev),
       );
     }
   }
@@ -149,8 +161,8 @@ async function main() {
   ) {
     await sendTx(
       DRY_RUN,
-      "TokenLogic.revokeRole(DEFAULT_ADMIN_ROLE, GovernanceSafe)",
-      tokenLogic.revokeRole(DEFAULT_ADMIN_ROLE, GOVERNANCE_SAFE)
+      'TokenLogic.revokeRole(DEFAULT_ADMIN_ROLE, GovernanceSafe)',
+      tokenLogic.revokeRole(DEFAULT_ADMIN_ROLE, GOVERNANCE_SAFE),
     );
   }
 
@@ -158,8 +170,8 @@ async function main() {
   if (await tokenLogic.hasRole(DEFAULT_ADMIN_ROLE, signerAddr)) {
     await sendTx(
       DRY_RUN,
-      "TokenLogic.renounceRole(DEFAULT_ADMIN_ROLE, signer)",
-      tokenLogic.renounceRole(DEFAULT_ADMIN_ROLE, signerAddr)
+      'TokenLogic.renounceRole(DEFAULT_ADMIN_ROLE, signer)',
+      tokenLogic.renounceRole(DEFAULT_ADMIN_ROLE, signerAddr),
     );
   }
 
@@ -171,8 +183,8 @@ async function main() {
   if (!(await tokenLogic.hasRole(EMERGENCY_ROLE, EMERGENCY_SAFE))) {
     await sendTx(
       DRY_RUN,
-      "TokenLogic.grantRole(EMERGENCY_ROLE, EmergencySafe)",
-      tokenLogic.grantRole(EMERGENCY_ROLE, EMERGENCY_SAFE)
+      'TokenLogic.grantRole(EMERGENCY_ROLE, EmergencySafe)',
+      tokenLogic.grantRole(EMERGENCY_ROLE, EMERGENCY_SAFE),
     );
   }
 
@@ -183,7 +195,7 @@ async function main() {
       await sendTx(
         DRY_RUN,
         `TokenLogic.revokeRole(EMERGENCY_ROLE, ${prev})`,
-        tokenLogic.revokeRole(EMERGENCY_ROLE, prev)
+        tokenLogic.revokeRole(EMERGENCY_ROLE, prev),
       );
     }
   }
@@ -195,19 +207,27 @@ async function main() {
    * - trader -> TraderSafe (old trader loses access automatically)
    */
   if ((await poolManager.factoryOwner()) !== TIMELOCK) {
-    await sendTx(DRY_RUN, "PoolManagerLogic.setFactoryOwner(Timelock)", poolManager.setFactoryOwner(TIMELOCK));
+    await sendTx(
+      DRY_RUN,
+      'PoolManagerLogic.setFactoryOwner(Timelock)',
+      poolManager.setFactoryOwner(TIMELOCK),
+    );
   }
 
   if ((await poolManager.manager()) !== TIMELOCK) {
     await sendTx(
       DRY_RUN,
-      "PoolManagerLogic.changeManager(Timelock)",
-      poolManager.changeManager(TIMELOCK, "Timelock")
+      'PoolManagerLogic.changeManager(Timelock)',
+      poolManager.changeManager(TIMELOCK, 'Timelock'),
     );
   }
 
   if ((await poolManager.trader()) !== TRADER_SAFE) {
-    await sendTx(DRY_RUN, "PoolManagerLogic.setTrader(TraderSafe)", poolManager.setTrader(TRADER_SAFE));
+    await sendTx(
+      DRY_RUN,
+      'PoolManagerLogic.setTrader(TraderSafe)',
+      poolManager.setTrader(TRADER_SAFE),
+    );
   }
 
   /**
@@ -217,11 +237,15 @@ async function main() {
    */
   if (managed) {
     if ((await managed.manager()) !== TIMELOCK) {
-      await sendTx(DRY_RUN, "Managed.changeManager(Timelock)", managed.changeManager(TIMELOCK, "Timelock"));
+      await sendTx(
+        DRY_RUN,
+        'Managed.changeManager(Timelock)',
+        managed.changeManager(TIMELOCK, 'Timelock'),
+      );
     }
 
     if ((await managed.trader()) !== TRADER_SAFE) {
-      await sendTx(DRY_RUN, "Managed.setTrader(TraderSafe)", managed.setTrader(TRADER_SAFE));
+      await sendTx(DRY_RUN, 'Managed.setTrader(TraderSafe)', managed.setTrader(TRADER_SAFE));
     }
   }
 }

@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IERC20Extended} from "../interfaces/IERC20Extended.sol";
-import {IHasAssetInfo} from "../interfaces/IHasAssetInfo.sol";
+import { IERC20Extended } from "../interfaces/IERC20Extended.sol";
+import { IHasAssetInfo } from "../interfaces/IHasAssetInfo.sol";
 
 /// @title Morpho Blue Math & Oracle Helpers Library
 /// @notice Reusable constants and helper functions for Frgmnt Morpho Blue integrations
 library MorphoMathLib {
-
     /// @dev 100% = 10_000 bps
     uint256 internal constant BPS_DENOMINATOR = 10_000;
 
@@ -17,13 +16,10 @@ library MorphoMathLib {
     /// @dev 100% withdraw/portion = 1e18
     uint256 internal constant PORTION_DENOMINATOR = 1e18;
 
-
-
     /*//////////////////////////////////////////////////////////////
                         ORACLE & MATH HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    
     /// @notice Swaps tokens using Uniswap V3
     /// @dev Only **single-hop paths** are used for exactOutputSingle and exactInputSingle.
     /// Multi-hop exact-output paths (exactOutput with path array) are **not used** in this contract,
@@ -49,7 +45,6 @@ library MorphoMathLib {
         return (out * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
     }
 
-    
     function oracleMaxIn(
         address factory,
         address tokenIn,
@@ -73,11 +68,10 @@ library MorphoMathLib {
     /// @notice Adjusts slippage based on Uniswap fee
     /// @param slippageBps Requested slippage
     /// @param fee Uniswap fee (1e6 denominator)
-    function _getEffectiveSlippage(uint256 slippageBps, uint256 fee)
-        internal
-        pure
-        returns (uint256)
-    {
+    function _getEffectiveSlippage(
+        uint256 slippageBps,
+        uint256 fee
+    ) internal pure returns (uint256) {
         uint256 minSlippageBps = (fee * BPS_DENOMINATOR) / (FEE_DENOMINATOR - fee);
         return slippageBps < minSlippageBps ? minSlippageBps : slippageBps;
     }

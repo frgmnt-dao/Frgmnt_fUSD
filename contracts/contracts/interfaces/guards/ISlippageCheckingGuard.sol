@@ -7,8 +7,8 @@ pragma solidity ^0.8.24;
  * @custom:project Frgmnt
  */
 interface ISlippageCheckingGuard {
-	/**
-	 * @return True if this guard enforces slippage checks
-	 */
-	function isSlippageCheckingGuard() external view returns (bool);
+    /**
+     * @return True if this guard enforces slippage checks
+     */
+    function isSlippageCheckingGuard() external view returns (bool);
 }

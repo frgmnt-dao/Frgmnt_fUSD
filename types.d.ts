@@ -1,2 +1,2 @@
-declare module "@openzeppelin/test-helpers"
-declare module "solidity-coverage"
+declare module '@openzeppelin/test-helpers';
+declare module 'solidity-coverage';

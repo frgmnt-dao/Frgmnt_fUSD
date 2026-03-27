@@ -15,630 +15,662 @@ import { IMorphoBlueLendingPoolAssetGuard } from "./interfaces/guards/IMorphoBlu
 import { Managed } from "./Managed.sol";
 
 contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsset, Managed {
-	event AssetAdded(address indexed fundAddress, address manager, address asset, bool isDeposit);
-	event AssetRemoved(address fundAddress, address manager, address asset);
-	event ManagerFeeSet(
-		address fundAddress,
-		address manager,
-		uint256 performanceFeeNumerator,
-		uint256 managerFeeNumerator,
-		uint256 entryFeeNumerator,
-		uint256 exitFeeNumerator,
-		uint256 denominator
-	);
-	event ManagerFeeIncreaseAnnounced(
-		uint256 performanceFeeNumerator,
-		uint256 managerFeeNumerator,
-		uint256 entryFeeNumerator,
-		uint256 exitFeeNumerator,
-		uint256 announcedFeeActivationTime
-	);
-	event ManagerFeeIncreaseRenounced();
-	event PoolLogicSet(address poolLogic, address from);
-	event MinDepositUpdated(uint256 minDepositUSD);
-	event PoolStatusSet(address indexed pool, bool value);
-	event FactoryOwnerUpdated(address indexed previousOwner, address indexed newOwner);
-	event AssetHandlerUpdated(address indexed previousAssetHandler, address indexed newAssetHandler);
-	event GovernanceUpdated(address indexed previousGovernance, address indexed newGovernance);
-	event FactoryConfigUpdated(
-		uint256 maximumSupportedAssetCount,
-		uint256 maxPerf,
-		uint256 maxMgr,
-		uint256 maxEntry,
-		uint256 maxExit,
-		uint256 feeDenominator,
-		uint256 maxPerfChange,
-		uint256 perfChangeDelay
-	);
-	event TraderAssetChangeDisabledSet(bool disabled);
-	event NftMembershipCollectionAddressSet(address indexed previous, address indexed current);
-	event PoolPrivacyUpdated(bool isPoolPrivate);
-	event AllowedCallbackSenderSet(address indexed caller, bool allowed);
-    event ManagerFeeIncreaseCommitted(uint256 performanceFeeNumerator,
-    uint256 managerFeeNumerator,
-    uint256 entryFeeNumerator,
-    uint256 exitFeeNumerator);
+    event AssetAdded(address indexed fundAddress, address manager, address asset, bool isDeposit);
+    event AssetRemoved(address fundAddress, address manager, address asset);
+    event ManagerFeeSet(
+        address fundAddress,
+        address manager,
+        uint256 performanceFeeNumerator,
+        uint256 managerFeeNumerator,
+        uint256 entryFeeNumerator,
+        uint256 exitFeeNumerator,
+        uint256 denominator
+    );
+    event ManagerFeeIncreaseAnnounced(
+        uint256 performanceFeeNumerator,
+        uint256 managerFeeNumerator,
+        uint256 entryFeeNumerator,
+        uint256 exitFeeNumerator,
+        uint256 announcedFeeActivationTime
+    );
+    event ManagerFeeIncreaseRenounced();
+    event PoolLogicSet(address poolLogic, address from);
+    event MinDepositUpdated(uint256 minDepositUSD);
+    event PoolStatusSet(address indexed pool, bool value);
+    event FactoryOwnerUpdated(address indexed previousOwner, address indexed newOwner);
+    event AssetHandlerUpdated(
+        address indexed previousAssetHandler,
+        address indexed newAssetHandler
+    );
+    event GovernanceUpdated(address indexed previousGovernance, address indexed newGovernance);
+    event FactoryConfigUpdated(
+        uint256 maximumSupportedAssetCount,
+        uint256 maxPerf,
+        uint256 maxMgr,
+        uint256 maxEntry,
+        uint256 maxExit,
+        uint256 feeDenominator,
+        uint256 maxPerfChange,
+        uint256 perfChangeDelay
+    );
+    event TraderAssetChangeDisabledSet(bool disabled);
+    event NftMembershipCollectionAddressSet(address indexed previous, address indexed current);
+    event PoolPrivacyUpdated(bool isPoolPrivate);
+    event AllowedCallbackSenderSet(address indexed caller, bool allowed);
+    event ManagerFeeIncreaseCommitted(
+        uint256 performanceFeeNumerator,
+        uint256 managerFeeNumerator,
+        uint256 entryFeeNumerator,
+        uint256 exitFeeNumerator
+    );
 
-	// Core
-	address public override poolLogic;
+    // Core
+    address public override poolLogic;
 
-	Asset[] public supportedAssets;
-	mapping(address => uint256) public assetPosition;
-	mapping(address => bool) private allowedCallbackSenders; 
+    Asset[] public supportedAssets;
+    mapping(address => uint256) public assetPosition;
+    mapping(address => bool) private allowedCallbackSenders;
 
-	uint256 public announcedPerformanceFeeNumerator;
-	uint256 public announcedFeeIncreaseTimestamp;
-	uint256 public performanceFeeNumerator;
-	uint256 public announcedManagerFeeNumerator;
-	uint256 public managerFeeNumerator;
+    uint256 public announcedPerformanceFeeNumerator;
+    uint256 public announcedFeeIncreaseTimestamp;
+    uint256 public performanceFeeNumerator;
+    uint256 public announcedManagerFeeNumerator;
+    uint256 public managerFeeNumerator;
 
-	address public nftMembershipCollectionAddress;
+    address public nftMembershipCollectionAddress;
 
-	uint256 public announcedEntryFeeNumerator;
-	uint256 public entryFeeNumerator;
-	uint256 public announcedExitFeeNumerator;
-	uint256 public exitFeeNumerator;
+    uint256 public announcedEntryFeeNumerator;
+    uint256 public entryFeeNumerator;
+    uint256 public announcedExitFeeNumerator;
+    uint256 public exitFeeNumerator;
 
-	bool public traderAssetChangeDisabled;
-	bool public privatePool;
+    bool public traderAssetChangeDisabled;
+    bool public privatePool;
 
-	// Governance
-	address public factoryOwner;
-	address public governance;
+    // Governance
+    address public factoryOwner;
+    address public governance;
 
-	// Asset info
-	uint256 private _maximumSupportedAssetCount;
+    // Asset info
+    uint256 private _maximumSupportedAssetCount;
 
-	// Fee caps
-	uint256 private _maximumPerformanceFeeNumerator;
-	uint256 private _maximumManagerFeeNumerator;
-	uint256 private _maximumEntryFeeNumerator;
-	uint256 private _maximumExitFeeNumerator;
-	uint256 private _managerFeeDenominator;
-	uint256 private _maximumPerformanceFeeNumeratorChange;
-	uint256 private _performanceFeeNumeratorChangeDelay;
+    // Fee caps
+    uint256 private _maximumPerformanceFeeNumerator;
+    uint256 private _maximumManagerFeeNumerator;
+    uint256 private _maximumEntryFeeNumerator;
+    uint256 private _maximumExitFeeNumerator;
+    uint256 private _managerFeeDenominator;
+    uint256 private _maximumPerformanceFeeNumeratorChange;
+    uint256 private _performanceFeeNumeratorChangeDelay;
 
-	mapping(address => bool) private _isPool;
+    mapping(address => bool) private _isPool;
 
-	address public assetHandler;
+    address public assetHandler;
 
-	uint256[20] private __gap;
+    uint256[20] private __gap;
 
-	error InvalidFactory();
-	error InvalidPoolLogic();
-	error InvalidGovernance();
-	error CannotAddPoolAsset();
-	error InvalidAsset();
-	error AssetNotSupported();
+    error InvalidFactory();
+    error InvalidPoolLogic();
+    error InvalidGovernance();
+    error CannotAddPoolAsset();
+    error InvalidAsset();
+    error AssetNotSupported();
 
-	modifier onlyFactoryOwner() {
-		require(msg.sender == factoryOwner, "only factoryOwner allowed");
-		_;
-	}
+    modifier onlyFactoryOwner() {
+        require(msg.sender == factoryOwner, "only factoryOwner allowed");
+        _;
+    }
 
-	function initialize(
-		address _factoryOwner,
-		address _manager,
-		string calldata _managerName,
-		address _poolLogic,
-		address _assetHandler,
-		address _governance,
-		uint256 _performanceFeeNumerator,
-		uint256 _managerFeeNumerator
-	) external initializer {
-		if (_factoryOwner == address(0)) revert InvalidFactory();
-		if (_manager == address(0)) revert InvalidManager();
-	//	if (_poolLogic == address(0)) revert InvalidPoolLogic();
-		if (_governance == address(0)) revert InvalidGovernance();
-		_initialize(_manager, _managerName);
-		factoryOwner = _factoryOwner;
-		poolLogic = _poolLogic;
-		governance = _governance;
-		require(_assetHandler != address(0), "invalid assetHandler");
-		assetHandler = _assetHandler;
-		_setFactoryConfig(50, 5000, 300, 100, 100, 10000, 0, 3 days); // Default factory config
-		_setFeeNumerator(_performanceFeeNumerator, _managerFeeNumerator, 0, 0);
-	}
+    function initialize(
+        address _factoryOwner,
+        address _manager,
+        string calldata _managerName,
+        address _poolLogic,
+        address _assetHandler,
+        address _governance,
+        uint256 _performanceFeeNumerator,
+        uint256 _managerFeeNumerator
+    ) external initializer {
+        if (_factoryOwner == address(0)) revert InvalidFactory();
+        if (_manager == address(0)) revert InvalidManager();
+        //	if (_poolLogic == address(0)) revert InvalidPoolLogic();
+        if (_governance == address(0)) revert InvalidGovernance();
+        _initialize(_manager, _managerName);
+        factoryOwner = _factoryOwner;
+        poolLogic = _poolLogic;
+        governance = _governance;
+        require(_assetHandler != address(0), "invalid assetHandler");
+        assetHandler = _assetHandler;
+        _setFactoryConfig(50, 5000, 300, 100, 100, 10000, 0, 3 days); // Default factory config
+        _setFeeNumerator(_performanceFeeNumerator, _managerFeeNumerator, 0, 0);
+    }
 
-	// -----------------------------------------------------------------------
-	// Factory-compatible view
-	// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Factory-compatible view
+    // -----------------------------------------------------------------------
 
-	function factory() external view override returns (address) {
-		return address(this);
-	}
+    function factory() external view override returns (address) {
+        return address(this);
+    }
 
-	function getMaximumSupportedAssetCount() external view returns (uint256) {
-		return _maximumSupportedAssetCount;
-	}
+    function getMaximumSupportedAssetCount() external view returns (uint256) {
+        return _maximumSupportedAssetCount;
+    }
 
-	/// @notice Return the latest price of a given asset
-	/// @param _asset The address of the asset
-	/// @return price The latest price of a given asset
-	function getAssetPrice(address _asset) external view override returns (uint256 price) {
-		price = IAssetHandler(assetHandler).getUSDPrice(_asset);
-	}
+    /// @notice Return the latest price of a given asset
+    /// @param _asset The address of the asset
+    /// @return price The latest price of a given asset
+    function getAssetPrice(address _asset) external view override returns (uint256 price) {
+        price = IAssetHandler(assetHandler).getUSDPrice(_asset);
+    }
 
-	/// @notice Return type of the asset
-	/// @param _asset The address of the asset
-	/// @return assetType The type of the asset
-	function getAssetType(address _asset) public view override returns (uint16 assetType) {
-		assetType = IAssetHandler(assetHandler).assetTypes(_asset);
-	}
-    
-	/// @notice Get address of the asset guard
+    /// @notice Return type of the asset
+    /// @param _asset The address of the asset
+    /// @return assetType The type of the asset
+    function getAssetType(address _asset) public view override returns (uint16 assetType) {
+        assetType = IAssetHandler(assetHandler).assetTypes(_asset);
+    }
+
+    /// @notice Get address of the asset guard
     /// @param _extAsset The address of the external asset
-	function getAssetGuard(address _extAsset) public view returns (address) {
-		uint16 _assetType = getAssetType(_extAsset);
-		return IGovernance(governance).assetGuards(_assetType);
-	}
+    function getAssetGuard(address _extAsset) public view returns (address) {
+        uint16 _assetType = getAssetType(_extAsset);
+        return IGovernance(governance).assetGuards(_assetType);
+    }
 
     /// @notice Get address of the contract guard
     /// @param _extContract The address of the external contract
-	function getContractGuard(address _extContract) public view returns (address) {
-		return IGovernance(governance).contractGuards(_extContract);
-	}
+    function getContractGuard(address _extContract) public view returns (address) {
+        return IGovernance(governance).contractGuards(_extContract);
+    }
 
-	
-	function getMaximumFee() public view returns (uint256, uint256, uint256, uint256, uint256) {
-		return (
-			_maximumPerformanceFeeNumerator,
-			_maximumManagerFeeNumerator,
-			_maximumEntryFeeNumerator,
-			_maximumExitFeeNumerator,
-			_managerFeeDenominator
-		);
-	}
+    function getMaximumFee() public view returns (uint256, uint256, uint256, uint256, uint256) {
+        return (
+            _maximumPerformanceFeeNumerator,
+            _maximumManagerFeeNumerator,
+            _maximumEntryFeeNumerator,
+            _maximumExitFeeNumerator,
+            _managerFeeDenominator
+        );
+    }
 
-	function owner() external view returns (address) {
-		return factoryOwner;
-	}
+    function owner() external view returns (address) {
+        return factoryOwner;
+    }
 
-	function isPool(address _pool) external view returns (bool) {
-		return _isPool[_pool];
-	}
+    function isPool(address _pool) external view returns (bool) {
+        return _isPool[_pool];
+    }
 
-	// -----------------------------------------------------------------------
-	// Admin config
-	// -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Admin config
+    // -----------------------------------------------------------------------
 
-	function setFactoryConfig(
-		uint256 maximumSupportedAssetCount_,
-		uint256 maxPerf_,
-		uint256 maxMgr_,
-		uint256 maxEntry_,
-		uint256 maxExit_,
-		uint256 feeDenominator_,
-		uint256 maxPerfChange_,
-		uint256 perfChangeDelay_
-	) external onlyFactoryOwner {
-		_setFactoryConfig(
-			maximumSupportedAssetCount_,
-			maxPerf_,
-			maxMgr_,
-			maxEntry_,
-			maxExit_,
-			feeDenominator_,
-			maxPerfChange_,
-			perfChangeDelay_
-		);
+    function setFactoryConfig(
+        uint256 maximumSupportedAssetCount_,
+        uint256 maxPerf_,
+        uint256 maxMgr_,
+        uint256 maxEntry_,
+        uint256 maxExit_,
+        uint256 feeDenominator_,
+        uint256 maxPerfChange_,
+        uint256 perfChangeDelay_
+    ) external onlyFactoryOwner {
+        _setFactoryConfig(
+            maximumSupportedAssetCount_,
+            maxPerf_,
+            maxMgr_,
+            maxEntry_,
+            maxExit_,
+            feeDenominator_,
+            maxPerfChange_,
+            perfChangeDelay_
+        );
 
-		emit FactoryConfigUpdated(
-			maximumSupportedAssetCount_,
-			maxPerf_,
-			maxMgr_,
-			maxEntry_,
-			maxExit_,
-			feeDenominator_,
-			maxPerfChange_,
-			perfChangeDelay_
-		);
-	}
+        emit FactoryConfigUpdated(
+            maximumSupportedAssetCount_,
+            maxPerf_,
+            maxMgr_,
+            maxEntry_,
+            maxExit_,
+            feeDenominator_,
+            maxPerfChange_,
+            perfChangeDelay_
+        );
+    }
 
-	function _setFactoryConfig(
-		uint256 maximumSupportedAssetCount_,
-		uint256 maxPerf_,
-		uint256 maxMgr_,
-		uint256 maxEntry_,
-		uint256 maxExit_,
-		uint256 feeDenominator_,
-		uint256 maxPerfChange_,
-		uint256 perfChangeDelay_
-	) internal {
-		_maximumSupportedAssetCount = maximumSupportedAssetCount_;
-		_maximumPerformanceFeeNumerator = maxPerf_;
-		_maximumManagerFeeNumerator = maxMgr_;
-		_maximumEntryFeeNumerator = maxEntry_;
-		_maximumExitFeeNumerator = maxExit_;
-		_managerFeeDenominator = feeDenominator_;
-		_maximumPerformanceFeeNumeratorChange = maxPerfChange_;
-		_performanceFeeNumeratorChangeDelay = perfChangeDelay_;
-	}
+    function _setFactoryConfig(
+        uint256 maximumSupportedAssetCount_,
+        uint256 maxPerf_,
+        uint256 maxMgr_,
+        uint256 maxEntry_,
+        uint256 maxExit_,
+        uint256 feeDenominator_,
+        uint256 maxPerfChange_,
+        uint256 perfChangeDelay_
+    ) internal {
+        _maximumSupportedAssetCount = maximumSupportedAssetCount_;
+        _maximumPerformanceFeeNumerator = maxPerf_;
+        _maximumManagerFeeNumerator = maxMgr_;
+        _maximumEntryFeeNumerator = maxEntry_;
+        _maximumExitFeeNumerator = maxExit_;
+        _managerFeeDenominator = feeDenominator_;
+        _maximumPerformanceFeeNumeratorChange = maxPerfChange_;
+        _performanceFeeNumeratorChangeDelay = perfChangeDelay_;
+    }
 
-	function setIsPool(address _pool, bool value) external onlyFactoryOwner {
-		_isPool[_pool] = value;
-		emit PoolStatusSet(_pool, value);
-	}
+    function setIsPool(address _pool, bool value) external onlyFactoryOwner {
+        _isPool[_pool] = value;
+        emit PoolStatusSet(_pool, value);
+    }
 
-	function setFactoryOwner(address _newOwner) external onlyFactoryOwner {
-		require(_newOwner != address(0), "zero owner");
-		address previousOwner = factoryOwner;
-		factoryOwner = _newOwner;
-		emit FactoryOwnerUpdated(previousOwner, _newOwner);
-	}
+    function setFactoryOwner(address _newOwner) external onlyFactoryOwner {
+        require(_newOwner != address(0), "zero owner");
+        address previousOwner = factoryOwner;
+        factoryOwner = _newOwner;
+        emit FactoryOwnerUpdated(previousOwner, _newOwner);
+    }
 
-	function setAssetHandler(address _assetHandler) external onlyFactoryOwner {
-		require(_assetHandler != address(0), "invalid assetHandler");
-		address previousAssetHandler = assetHandler;
-		assetHandler = _assetHandler;
-		emit AssetHandlerUpdated(previousAssetHandler, _assetHandler);
-	}
+    function setAssetHandler(address _assetHandler) external onlyFactoryOwner {
+        require(_assetHandler != address(0), "invalid assetHandler");
+        address previousAssetHandler = assetHandler;
+        assetHandler = _assetHandler;
+        emit AssetHandlerUpdated(previousAssetHandler, _assetHandler);
+    }
 
-	function setGovernance(address _governance) external onlyFactoryOwner {
-		require(_governance != address(0), "invalid governance");
-		address previousGovernance = governance;
-		governance = _governance;
-		emit GovernanceUpdated(previousGovernance, _governance);
-	}
+    function setGovernance(address _governance) external onlyFactoryOwner {
+        require(_governance != address(0), "invalid governance");
+        address previousGovernance = governance;
+        governance = _governance;
+        emit GovernanceUpdated(previousGovernance, _governance);
+    }
 
+    // -----------------------------------------------------------------------
+    // Supported assets
+    // -----------------------------------------------------------------------
 
-	// -----------------------------------------------------------------------
-	// Supported assets
-	// -----------------------------------------------------------------------
+    function isSupportedAsset(address _asset) public view override returns (bool) {
+        return assetPosition[_asset] != 0;
+    }
 
-	function isSupportedAsset(address _asset) public view override returns (bool) {
-		return assetPosition[_asset] != 0;
-	}
-    
-	// @notice a deposited asset must be a "withdrawable" ERC20 token.
-	function isDepositAsset(address _asset) external view override returns (bool) {
-		uint256 index = assetPosition[_asset];
-		return index != 0 && supportedAssets[index - 1].isDeposit;
-	}
+    // @notice a deposited asset must be a "withdrawable" ERC20 token.
+    function isDepositAsset(address _asset) external view override returns (bool) {
+        uint256 index = assetPosition[_asset];
+        return index != 0 && supportedAssets[index - 1].isDeposit;
+    }
 
-	/// @notice Return boolean if the asset is supported
-	/// @param _asset The address of the asset
-	/// @return True if it's valid asset, false otherwise
-	function validateAsset(address _asset) public view override returns (bool) {
-		return _isValidAsset(_asset);
-	}
+    /// @notice Return boolean if the asset is supported
+    /// @param _asset The address of the asset
+    /// @return True if it's valid asset, false otherwise
+    function validateAsset(address _asset) public view override returns (bool) {
+        return _isValidAsset(_asset);
+    }
 
-	function _isValidAsset(address _asset) internal view returns (bool) {
-		return IAssetHandler(assetHandler).priceAggregators(_asset) != address(0);
-	}
+    function _isValidAsset(address _asset) internal view returns (bool) {
+        return IAssetHandler(assetHandler).priceAggregators(_asset) != address(0);
+    }
 
-	function changeAssets(Asset[] calldata _addAssets, address[] calldata _removeAssets) external {
-		require(
-			(msg.sender == trader && !traderAssetChangeDisabled) || msg.sender == manager || msg.sender == factoryOwner,
-			"only manager, owner or trader"
-		);
+    function changeAssets(Asset[] calldata _addAssets, address[] calldata _removeAssets) external {
+        require(
+            (msg.sender == trader && !traderAssetChangeDisabled) ||
+                msg.sender == manager ||
+                msg.sender == factoryOwner,
+            "only manager, owner or trader"
+        );
 
-		_changeAssets(_addAssets, _removeAssets);
-	}
+        _changeAssets(_addAssets, _removeAssets);
+    }
 
-	function _changeAssets(Asset[] calldata _addAssets, address[] memory _removeAssets) internal {
-		// REMOVE
-		for (uint256 i; i < _removeAssets.length; ++i) {
-			_removeAsset(_removeAssets[i]);
-		}
+    function _changeAssets(Asset[] calldata _addAssets, address[] memory _removeAssets) internal {
+        // REMOVE
+        for (uint256 i; i < _removeAssets.length; ++i) {
+            _removeAsset(_removeAssets[i]);
+        }
 
-		// ADD
-		for (uint256 i; i < _addAssets.length; ++i) {
-			_addAsset(_addAssets[i]);
-		}
+        // ADD
+        for (uint256 i; i < _addAssets.length; ++i) {
+            _addAsset(_addAssets[i]);
+        }
 
-		if (_maximumSupportedAssetCount != 0)
-			require(supportedAssets.length <= _maximumSupportedAssetCount, "max assets reached");
+        if (_maximumSupportedAssetCount != 0)
+            require(supportedAssets.length <= _maximumSupportedAssetCount, "max assets reached");
 
-		require(getDepositAssets().length >= 1, "at least one deposit asset");
-	}
+        require(getDepositAssets().length >= 1, "at least one deposit asset");
+    }
 
-	function _addAsset(Asset calldata _asset) internal {
-		address asset = _asset.asset;
-		bool isDeposit = _asset.isDeposit;
+    function _addAsset(Asset calldata _asset) internal {
+        address asset = _asset.asset;
+        bool isDeposit = _asset.isDeposit;
 
-		if (!validateAsset(asset)) revert InvalidAsset();
+        if (!validateAsset(asset)) revert InvalidAsset();
 
-		if (_isPool[asset]) revert CannotAddPoolAsset();
+        if (_isPool[asset]) revert CannotAddPoolAsset();
 
-		address guard = getAssetGuard(asset);
-		if (guard != address(0)) {
-			(bool hasFn, bytes memory data) = guard.staticcall(abi.encodeWithSignature("isAddAssetCheckGuard()"));
-			if (hasFn && abi.decode(data, (bool))) {
-				IAddAssetCheckGuard(guard).addAssetCheck(poolLogic, _asset);
-			}
-		}
+        address guard = getAssetGuard(asset);
+        if (guard != address(0)) {
+            (bool hasFn, bytes memory data) = guard.staticcall(
+                abi.encodeWithSignature("isAddAssetCheckGuard()")
+            );
+            if (hasFn && abi.decode(data, (bool))) {
+                IAddAssetCheckGuard(guard).addAssetCheck(poolLogic, _asset);
+            }
+        }
 
-		if (isSupportedAsset(asset)) {
-			uint256 idx = assetPosition[asset] - 1;
-			supportedAssets[idx].isDeposit = isDeposit;
-		} else {
-			uint256 len = supportedAssets.length;
-			supportedAssets.push(_asset);
-			assetPosition[asset] = len + 1;
+        if (isSupportedAsset(asset)) {
+            uint256 idx = assetPosition[asset] - 1;
+            supportedAssets[idx].isDeposit = isDeposit;
+        } else {
+            uint256 len = supportedAssets.length;
+            supportedAssets.push(_asset);
+            assetPosition[asset] = len + 1;
 
-			uint16 atype = IAssetHandler(assetHandler).assetTypes(asset);
+            uint16 atype = IAssetHandler(assetHandler).assetTypes(asset);
 
-			// insertion-sort step
-			while (len > 0 && IAssetHandler(assetHandler).assetTypes(supportedAssets[len - 1].asset) < atype) {
-				Asset memory tmp = supportedAssets[len];
-				supportedAssets[len] = supportedAssets[len - 1];
-				assetPosition[supportedAssets[len].asset] = len + 1;
+            // insertion-sort step
+            while (
+                len > 0 &&
+                IAssetHandler(assetHandler).assetTypes(supportedAssets[len - 1].asset) < atype
+            ) {
+                Asset memory tmp = supportedAssets[len];
+                supportedAssets[len] = supportedAssets[len - 1];
+                assetPosition[supportedAssets[len].asset] = len + 1;
 
-				supportedAssets[len - 1] = tmp;
-				assetPosition[supportedAssets[len - 1].asset] = len;
+                supportedAssets[len - 1] = tmp;
+                assetPosition[supportedAssets[len - 1].asset] = len;
 
-				--len;
-			}
-		}
+                --len;
+            }
+        }
 
-		emit AssetAdded(poolLogic, manager, asset, isDeposit);
-	}
+        emit AssetAdded(poolLogic, manager, asset, isDeposit);
+    }
 
-	function _removeAsset(address _asset) internal {
-		if (!isSupportedAsset(_asset)) revert AssetNotSupported();
+    function _removeAsset(address _asset) internal {
+        if (!isSupportedAsset(_asset)) revert AssetNotSupported();
 
-		address guard = getAssetGuard(_asset);
-		if (guard != address(0)) {
-			// Don't rely on on-chain wallet balance as a safe-removal condition.
+        address guard = getAssetGuard(_asset);
+        if (guard != address(0)) {
+            // Don't rely on on-chain wallet balance as a safe-removal condition.
             // Let the guard decide using protocol-aware checks (including external positions).
-			IAssetGuard(guard).removeAssetCheck(poolLogic, _asset);
-		}
+            IAssetGuard(guard).removeAssetCheck(poolLogic, _asset);
+        }
 
-		uint256 idx = assetPosition[_asset] - 1;
-		uint256 len = supportedAssets.length;
+        uint256 idx = assetPosition[_asset] - 1;
+        uint256 len = supportedAssets.length;
 
-		for (uint256 i = idx; i + 1 < len; ++i) {
-			supportedAssets[i] = supportedAssets[i + 1];
-			assetPosition[supportedAssets[i].asset] = i + 1;
-		}
+        for (uint256 i = idx; i + 1 < len; ++i) {
+            supportedAssets[i] = supportedAssets[i + 1];
+            assetPosition[supportedAssets[i].asset] = i + 1;
+        }
 
-		assetPosition[_asset] = 0;
-		supportedAssets.pop();
+        assetPosition[_asset] = 0;
+        supportedAssets.pop();
 
-		emit AssetRemoved(poolLogic, manager, _asset);
-	}
+        emit AssetRemoved(poolLogic, manager, _asset);
+    }
 
+    function getSupportedAssets() external view override returns (Asset[] memory) {
+        return supportedAssets;
+    }
 
-	function getSupportedAssets() external view override returns (Asset[] memory) {
-		return supportedAssets;
-	}
+    function getDepositAssets() public view returns (address[] memory arr) {
+        uint256 len = supportedAssets.length;
+        arr = new address[](len);
+        uint256 count = 0;
 
-	function getDepositAssets() public view returns (address[] memory arr) {
-		uint256 len = supportedAssets.length;
-		arr = new address[](len);
-		uint256 count = 0;
+        for (uint256 i; i < len; ++i) {
+            if (supportedAssets[i].isDeposit) {
+                arr[count] = supportedAssets[i].asset;
+                ++count;
+            }
+        }
 
-		for (uint256 i; i < len; ++i) {
-			if (supportedAssets[i].isDeposit) {
-				arr[count] = supportedAssets[i].asset;
-				++count;
-			}
-		}
+        assembly {
+            mstore(arr, count)
+        }
+    }
 
-		assembly {
-			mstore(arr, count)
-		}
-	}
+    // -----------------------------------------------------------------------
+    // Asset valuation
+    // -----------------------------------------------------------------------
 
-	// -----------------------------------------------------------------------
-	// Asset valuation
-	// -----------------------------------------------------------------------
+    function assetBalance(address _asset) public view override returns (uint256) {
+        address guard = getAssetGuard(_asset);
+        if (guard == address(0)) return 0;
+        return IAssetGuard(guard).getBalance(poolLogic, _asset);
+    }
 
-	function assetBalance(address _asset) public view override returns (uint256) {
-		address guard = getAssetGuard(_asset);
-		if (guard == address(0)) return 0;
-		return IAssetGuard(guard).getBalance(poolLogic, _asset);
-	}
+    function assetDecimal(address _asset) public view returns (uint256) {
+        address guard = getAssetGuard(_asset);
+        require(guard != address(0), "no guard");
+        return IAssetGuard(guard).getDecimals(_asset);
+    }
 
-	function assetDecimal(address _asset) public view returns (uint256) {
-		address guard = getAssetGuard(_asset);
-		require(guard != address(0), "no guard");
-		return IAssetGuard(guard).getDecimals(_asset);
-	}
+    function assetValue(address _asset, uint256 _amount) public view override returns (uint256) {
+        uint256 price = IAssetHandler(assetHandler).getUSDPrice(_asset);
+        if (price == 0 || _amount == 0) return 0;
 
-	function assetValue(address _asset, uint256 _amount) public view override returns (uint256) {
-		uint256 price = IAssetHandler(assetHandler).getUSDPrice(_asset);
-		if (price == 0 || _amount == 0) return 0;
+        uint256 decimals = assetDecimal(_asset);
+        return (price * _amount) / (10 ** decimals);
+    }
 
-		uint256 decimals = assetDecimal(_asset);
-		return (price * _amount) / (10 ** decimals);
-	}
+    function assetValue(address _asset) public view override returns (uint256) {
+        return assetValue(_asset, assetBalance(_asset));
+    }
 
-	function assetValue(address _asset) public view override returns (uint256) {
-		return assetValue(_asset, assetBalance(_asset));
-	}
+    function totalFundValue() external view override returns (uint256 total) {
+        uint256 len = supportedAssets.length;
+        for (uint256 i; i < len; ++i) {
+            total += assetValue(supportedAssets[i].asset);
+        }
+    }
 
-	function totalFundValue() external view override returns (uint256 total) {
-		uint256 len = supportedAssets.length;
-		for (uint256 i; i < len; ++i) {
-			total += assetValue(supportedAssets[i].asset);
-		}
-	}
+    // -----------------------------------------------------------------------
+    // Fees
+    // -----------------------------------------------------------------------
 
-	// -----------------------------------------------------------------------
-	// Fees
-	// -----------------------------------------------------------------------
+    function getFee() external view override returns (uint256, uint256, uint256, uint256, uint256) {
+        return (
+            performanceFeeNumerator,
+            managerFeeNumerator,
+            entryFeeNumerator,
+            exitFeeNumerator,
+            _managerFeeDenominator
+        );
+    }
 
-	function getFee() external view override returns (uint256, uint256, uint256, uint256, uint256) {
-		return (
-			performanceFeeNumerator,
-			managerFeeNumerator,
-			entryFeeNumerator,
-			exitFeeNumerator,
-			_managerFeeDenominator
-		);
-	}
+    function getMaximumPerformanceFeeChange() public view returns (uint256 change) {
+        return _maximumPerformanceFeeNumeratorChange;
+    }
 
-	function getMaximumPerformanceFeeChange() public view returns (uint256 change) {
-		return _maximumPerformanceFeeNumeratorChange;
-	}
+    function setFeeNumerator(
+        uint256 _perf,
+        uint256 _mgr,
+        uint256 _entry,
+        uint256 _exit
+    ) external onlyManager {
+        require(
+            _perf <= performanceFeeNumerator &&
+                _mgr <= managerFeeNumerator &&
+                _entry <= entryFeeNumerator &&
+                _exit <= exitFeeNumerator,
+            "manager fee too high"
+        );
 
-	function setFeeNumerator(uint256 _perf, uint256 _mgr, uint256 _entry, uint256 _exit) external onlyManager {
-		require(
-			_perf <= performanceFeeNumerator &&
-				_mgr <= managerFeeNumerator &&
-				_entry <= entryFeeNumerator &&
-				_exit <= exitFeeNumerator,
-			"manager fee too high"
-		);
+        _setFeeNumerator(_perf, _mgr, _entry, _exit);
+    }
 
-		_setFeeNumerator(_perf, _mgr, _entry, _exit);
-	}
+    function _setFeeNumerator(uint256 _perf, uint256 _mgr, uint256 _entry, uint256 _exit) internal {
+        (
+            uint256 maxPerf,
+            uint256 maxMgr,
+            uint256 maxEntry,
+            uint256 maxExit,
+            uint256 denom
+        ) = getMaximumFee();
 
-	function _setFeeNumerator(uint256 _perf, uint256 _mgr, uint256 _entry, uint256 _exit) internal {
-		(uint256 maxPerf, uint256 maxMgr, uint256 maxEntry, uint256 maxExit, uint256 denom) = getMaximumFee();
+        require(
+            _perf <= maxPerf && _mgr <= maxMgr && _entry <= maxEntry && _exit <= maxExit,
+            "invalid manager fee"
+        );
 
-		require(_perf <= maxPerf && _mgr <= maxMgr && _entry <= maxEntry && _exit <= maxExit, "invalid manager fee");
+        performanceFeeNumerator = _perf;
+        managerFeeNumerator = _mgr;
+        entryFeeNumerator = _entry;
+        exitFeeNumerator = _exit;
 
-		performanceFeeNumerator = _perf;
-		managerFeeNumerator = _mgr;
-		entryFeeNumerator = _entry;
-		exitFeeNumerator = _exit;
+        emit ManagerFeeSet(poolLogic, manager, _perf, _mgr, _entry, _exit, denom);
+    }
 
-		emit ManagerFeeSet(poolLogic, manager, _perf, _mgr, _entry, _exit, denom);
-	}
+    function announceFeeIncrease(
+        uint256 _perf,
+        uint256 _mgr,
+        uint256 _entry,
+        uint256 _exit
+    ) external onlyManager {
+        (uint256 maxPerf, uint256 maxMgr, uint256 maxEntry, uint256 maxExit, ) = getMaximumFee();
 
-	function announceFeeIncrease(uint256 _perf, uint256 _mgr, uint256 _entry, uint256 _exit) external onlyManager {
-		(uint256 maxPerf, uint256 maxMgr, uint256 maxEntry, uint256 maxExit, ) = getMaximumFee();
+        uint256 maxAllowedChange = getMaximumPerformanceFeeChange();
 
-		uint256 maxAllowedChange = getMaximumPerformanceFeeChange();
+        require(
+            _perf <= maxPerf &&
+                _mgr <= maxMgr &&
+                _entry <= maxEntry &&
+                _exit <= maxExit &&
+                _perf <= performanceFeeNumerator + maxAllowedChange,
+            "exceeded allowed increase"
+        );
 
-		require(
-			_perf <= maxPerf &&
-				_mgr <= maxMgr &&
-				_entry <= maxEntry &&
-				_exit <= maxExit &&
-				_perf <= performanceFeeNumerator + maxAllowedChange,
-			"exceeded allowed increase"
-		);
+        uint256 delay = _performanceFeeNumeratorChangeDelay;
 
-		uint256 delay = _performanceFeeNumeratorChangeDelay;
+        announcedPerformanceFeeNumerator = _perf;
+        announcedManagerFeeNumerator = _mgr;
+        announcedEntryFeeNumerator = _entry;
+        announcedExitFeeNumerator = _exit;
+        announcedFeeIncreaseTimestamp = block.timestamp + delay;
 
-		announcedPerformanceFeeNumerator = _perf;
-		announcedManagerFeeNumerator = _mgr;
-		announcedEntryFeeNumerator = _entry;
-		announcedExitFeeNumerator = _exit;
-		announcedFeeIncreaseTimestamp = block.timestamp + delay;
+        emit ManagerFeeIncreaseAnnounced(_perf, _mgr, _entry, _exit, announcedFeeIncreaseTimestamp);
+    }
 
-		emit ManagerFeeIncreaseAnnounced(_perf, _mgr, _entry, _exit, announcedFeeIncreaseTimestamp);
-	}
+    function renounceFeeIncrease() external onlyManager {
+        announcedPerformanceFeeNumerator = 0;
+        announcedManagerFeeNumerator = 0;
+        announcedEntryFeeNumerator = 0;
+        announcedExitFeeNumerator = 0;
+        announcedFeeIncreaseTimestamp = 0;
 
-	function renounceFeeIncrease() external onlyManager {
-		announcedPerformanceFeeNumerator = 0;
-		announcedManagerFeeNumerator = 0;
-		announcedEntryFeeNumerator = 0;
-		announcedExitFeeNumerator = 0;
-		announcedFeeIncreaseTimestamp = 0;
+        emit ManagerFeeIncreaseRenounced();
+    }
 
-		emit ManagerFeeIncreaseRenounced();
-	}
+    function commitFeeIncrease() external onlyManager {
+        require(block.timestamp >= announcedFeeIncreaseTimestamp, "delay active");
 
-	function commitFeeIncrease() external onlyManager {
-		require(block.timestamp >= announcedFeeIncreaseTimestamp, "delay active");
+        IPoolLogic(poolLogic).mintManagerFee();
 
-		IPoolLogic(poolLogic).mintManagerFee();
+        _setFeeNumerator(
+            announcedPerformanceFeeNumerator,
+            announcedManagerFeeNumerator,
+            announcedEntryFeeNumerator,
+            announcedExitFeeNumerator
+        );
 
-		_setFeeNumerator(
-			announcedPerformanceFeeNumerator,
-			announcedManagerFeeNumerator,
-			announcedEntryFeeNumerator,
-			announcedExitFeeNumerator
-		);
+        emit ManagerFeeIncreaseCommitted(
+            announcedPerformanceFeeNumerator,
+            announcedManagerFeeNumerator,
+            announcedEntryFeeNumerator,
+            announcedExitFeeNumerator
+        );
 
-		emit ManagerFeeIncreaseCommitted(
-        announcedPerformanceFeeNumerator,
-        announcedManagerFeeNumerator,
-        announcedEntryFeeNumerator,
-        announcedExitFeeNumerator);
+        announcedPerformanceFeeNumerator = 0;
+        announcedManagerFeeNumerator = 0;
+        announcedEntryFeeNumerator = 0;
+        announcedExitFeeNumerator = 0;
+        announcedFeeIncreaseTimestamp = 0;
+    }
 
-		announcedPerformanceFeeNumerator = 0;
-		announcedManagerFeeNumerator = 0;
-		announcedEntryFeeNumerator = 0;
-		announcedExitFeeNumerator = 0;
-		announcedFeeIncreaseTimestamp = 0;
-	}
+    // -----------------------------------------------------------------------
+    // Access / misc
+    // -----------------------------------------------------------------------
 
-	// -----------------------------------------------------------------------
-	// Access / misc
-	// -----------------------------------------------------------------------
+    function setTraderAssetChangeDisabled(bool _disabled) external onlyManager {
+        traderAssetChangeDisabled = _disabled;
+        emit TraderAssetChangeDisabledSet(_disabled);
+    }
 
-	function setTraderAssetChangeDisabled(bool _disabled) external onlyManager {
-		traderAssetChangeDisabled = _disabled;
-		emit TraderAssetChangeDisabledSet(_disabled);
-	}
+    function getFeeIncreaseInfo()
+        external
+        view
+        returns (uint256, uint256, uint256, uint256, uint256)
+    {
+        return (
+            announcedPerformanceFeeNumerator,
+            announcedManagerFeeNumerator,
+            announcedEntryFeeNumerator,
+            announcedExitFeeNumerator,
+            announcedFeeIncreaseTimestamp
+        );
+    }
 
-	function getFeeIncreaseInfo() external view returns (uint256, uint256, uint256, uint256, uint256) {
-		return (
-			announcedPerformanceFeeNumerator,
-			announcedManagerFeeNumerator,
-			announcedEntryFeeNumerator,
-			announcedExitFeeNumerator,
-			announcedFeeIncreaseTimestamp
-		);
-	}
+    function setPoolLogic(address _poolLogic) external override returns (bool) {
+        require(msg.sender == factoryOwner, "only owner allowed");
+        require(IPoolLogic(_poolLogic).poolManagerLogic() == address(this), "invalid pool logic");
 
-	function setPoolLogic(address _poolLogic) external override returns (bool) {
-		require(msg.sender == factoryOwner, "only owner allowed");
-		require(IPoolLogic(_poolLogic).poolManagerLogic() == address(this), "invalid pool logic");
+        poolLogic = _poolLogic;
+        emit PoolLogicSet(_poolLogic, msg.sender);
+        return true;
+    }
 
-		poolLogic = _poolLogic;
-		emit PoolLogicSet(_poolLogic, msg.sender);
-		return true;
-	}
+    function setPoolPrivate(bool _privatePool) external onlyManager {
+        privatePool = _privatePool;
+        emit PoolPrivacyUpdated(_privatePool);
+    }
 
+    /// @notice Allow/deny protocol contracts that call back into the PoolLogic (e.g., Morpho callbacks).
+    /// @dev Whitelist the protocol contract address that performs the callback (e.g., Morpho),
+    ///      NOT the guard contract.
+    function setAllowedCallbackSender(address caller, bool allowed) external onlyManager {
+        require(caller != address(0), "caller=0");
+        allowedCallbackSenders[caller] = allowed;
+        emit AllowedCallbackSenderSet(caller, allowed);
+    }
 
-	function setPoolPrivate(bool _privatePool) external onlyManager {
-		privatePool = _privatePool;
-		emit PoolPrivacyUpdated(_privatePool);
-	}
+    function setNftMembershipCollectionAddress(address addr) external onlyManager {
+        address previous = nftMembershipCollectionAddress;
 
-	/// @notice Allow/deny protocol contracts that call back into the PoolLogic (e.g., Morpho callbacks).
-	/// @dev Whitelist the protocol contract address that performs the callback (e.g., Morpho),
-	///      NOT the guard contract.
-	function setAllowedCallbackSender(address caller, bool allowed) external onlyManager {
-		require(caller != address(0), "caller=0");
-		allowedCallbackSenders[caller] = allowed;
-		emit AllowedCallbackSenderSet(caller, allowed);
+        if (addr == address(0)) {
+            nftMembershipCollectionAddress = addr;
+            emit NftMembershipCollectionAddressSet(previous, addr);
+            return;
+        }
+        try ERC721Upgradeable(addr).balanceOf(address(this)) returns (uint256) {
+            nftMembershipCollectionAddress = addr;
+            emit NftMembershipCollectionAddressSet(previous, addr);
+        } catch {
+            revert("Invalid collection");
+        }
+    }
 
-	}
+    function isNftMemberAllowed(address _member) public view returns (bool) {
+        return
+            nftMembershipCollectionAddress != address(0) &&
+            ERC721Upgradeable(nftMembershipCollectionAddress).balanceOf(_member) > 0;
+    }
 
+    function getAllowedCallbackSenders(address protocol) external view returns (bool) {
+        return allowedCallbackSenders[protocol];
+    }
 
-	function setNftMembershipCollectionAddress(address addr) external onlyManager {
-		address previous = nftMembershipCollectionAddress;
+    function isMemberAllowed(address _member) public view override returns (bool) {
+        return _isMemberAllowed(_member) || isNftMemberAllowed(_member);
+    }
 
-		if (addr == address(0)) {
-			nftMembershipCollectionAddress = addr;
-			emit NftMembershipCollectionAddressSet(previous, addr);
-			return;
-		}
-		try ERC721Upgradeable(addr).balanceOf(address(this)) returns (uint256) {
-			nftMembershipCollectionAddress = addr;
-			emit NftMembershipCollectionAddressSet(previous, addr);
-		} catch {
-			revert("Invalid collection");
-		}
-	}
-
-	function isNftMemberAllowed(address _member) public view returns (bool) {
-		return
-			nftMembershipCollectionAddress != address(0) &&
-			ERC721Upgradeable(nftMembershipCollectionAddress).balanceOf(_member) > 0;
-	}
-
-
-	function getAllowedCallbackSenders(address protocol) external view returns (bool) {
-		return allowedCallbackSenders[protocol];
-	}
-
-	function isMemberAllowed(address _member) public view override returns (bool) {
-		return _isMemberAllowed(_member) || isNftMemberAllowed(_member);
-	}
-
-	function changeManager(address _newManager, string memory _newManagerName) external onlyManager {
-		if (poolLogic != address(0)) {
-			IPoolLogic(poolLogic).mintManagerFee();
-		}
-		_changeManager(_newManager, _newManagerName);
-	}
+    function changeManager(
+        address _newManager,
+        string memory _newManagerName
+    ) external onlyManager {
+        if (poolLogic != address(0)) {
+            IPoolLogic(poolLogic).mintManagerFee();
+        }
+        _changeManager(_newManager, _newManagerName);
+    }
 }

@@ -43,10 +43,7 @@ contract MorphoBlueManager is IMorphoBlueManager, Ownable {
 
     /// @notice Sets the Morpho markets allowed for a pool
     /// @dev Must match exactly the markets used by the pool strategies
-    function setPoolMarkets(address pool, Id[] calldata markets)
-        external
-        onlyOwner
-    {
+    function setPoolMarkets(address pool, Id[] calldata markets) external onlyOwner {
         require(pool != address(0), "Invalid pool address");
 
         // Read old markets into memory
@@ -73,20 +70,12 @@ contract MorphoBlueManager is IMorphoBlueManager, Ownable {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Returns the list of Morpho markets allowed for a pool
-    function getPoolMarkets(address pool)
-        external
-        view
-        returns (Id[] memory)
-    {
+    function getPoolMarkets(address pool) external view returns (Id[] memory) {
         return poolMarkets[pool];
     }
 
     /// @notice Returns the number of Morpho markets allowed for a pool
-    function getPoolMarketsLength(address pool)
-        external
-        view
-        returns (uint256)
-    {
+    function getPoolMarketsLength(address pool) external view returns (uint256) {
         return poolMarkets[pool].length;
     }
 }
