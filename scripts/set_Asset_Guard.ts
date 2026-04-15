@@ -33,10 +33,8 @@ async function main() {
   // Asset types and their guards
   // --------------------------------------------------
   const assetGuards = [
-    { assetType: 1, guard: '0x91D4a12CaE569b33194C62aCfe8E037fC62f95e1' }, // MorphoBlue
-    { assetType: 2, guard: '0xE5bc2963f3fdE832d798caC2024343C83aDD2A38' }, // aUSDC (AaveV3)
-    { assetType: 3, guard: '0xB186BA1634d4F99798ed663319aF6ac328086DF1' }, // UniswapV3
-    { assetType: 4, guard: '0x26E11DC5C05ee07Cb14A2Fd475C71aAEd2F0A98C' }, // USDC
+    { assetType: 1, guard: '0x27BeceFb6CF59b26CD73dac227Ae3597065E2850' }, // MorphoBlue
+
   ];
 
   // --------------------------------------------------
