@@ -5,6 +5,7 @@ import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
 
 contract MockAssetGuard {
     uint256 public dec;
+    bool public removeTokenCheckResult = true;
 
     constructor(uint256 _dec) {
         dec = _dec;
@@ -29,4 +30,16 @@ contract MockAssetGuard {
         return dec;
     }
     function removeAssetCheck(address /*poolLogic*/, address /*asset*/) external pure {}
+
+    function setRemoveTokenCheckResult(bool result) external {
+        removeTokenCheckResult = result;
+    }
+
+    function removeTokenCheck(
+        address /* pool */,
+        address /* asset */,
+        address /* token */
+    ) external view returns (bool) {
+        return removeTokenCheckResult;
+    }
 }

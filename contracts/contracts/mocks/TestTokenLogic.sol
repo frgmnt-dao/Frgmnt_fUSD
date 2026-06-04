@@ -37,6 +37,10 @@ contract TestTokenLogic is ERC20 {
         _burn(account, amount);
     }
 
+    function burnFromPool(address account, uint256 amount) external {
+        _burn(account, amount);
+    }
+
     function getExitRemainingCooldown(address user) external view returns (uint256) {
         return _exitCooldown[user];
     }
@@ -44,5 +48,18 @@ contract TestTokenLogic is ERC20 {
     /// @notice Test helper to simulate cooldown.
     function setExitCooldown(address user, uint256 value) external {
         _exitCooldown[user] = value;
+    }
+
+    // ---- PoolLogic calls this to mint fee/reward FUSD ----
+    function mintFromPool(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    // ---- Test helper: simulate incrementAccountedAssets on pool ----
+    function triggerIncrementAccountedAssets(address pool, uint256 amount) external {
+        (bool ok, ) = pool.call(
+            abi.encodeWithSignature("incrementAccountedAssets(uint256)", amount)
+        );
+        require(ok, "incrementAccountedAssets failed");
     }
 }

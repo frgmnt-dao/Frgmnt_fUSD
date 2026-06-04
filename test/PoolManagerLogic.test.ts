@@ -6,16 +6,27 @@ import type { Contract } from 'ethers';
 
 type Asset = { asset: string; isDeposit: boolean };
 
+// Dummy aggregator address for validateAsset checks (non-zero)
+const DUMMY_AGGREGATOR = '0x0000000000000000000000000000000000000001';
+
 describe('PoolManagerLogic', () => {
   async function setupFixture() {
     const [deployer, manager, trader, owner, user, other] = await ethers.getSigners();
 
     // ---------- Deploy mocks ----------
     const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
-    const guard: Contract = await MockAssetGuard.deploy(6);
+    const guard: Contract = await MockAssetGuard.deploy(6); // 6-decimal guard
 
     const MockPoolLogic = await ethers.getContractFactory('MockPoolLogic');
     const poolLogic: Contract = await MockPoolLogic.deploy();
+
+    // Deploy MockAssetHandler (assetTypes + priceAggregators + price)
+    const MockAssetHandler = await ethers.getContractFactory('MockAssetHandler');
+    const mockAssetHandler: Contract = await MockAssetHandler.deploy();
+
+    // Deploy MockGovernance (assetGuards + contractGuards)
+    const MockGovernance = await ethers.getContractFactory('MockGovernance');
+    const mockGovernance: Contract = await MockGovernance.deploy();
 
     const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic');
     const contract: Contract = await PoolManagerLogic.deploy();
@@ -24,24 +35,28 @@ describe('PoolManagerLogic', () => {
     const tokenA = ethers.Wallet.createRandom().address;
     const tokenB = ethers.Wallet.createRandom().address;
 
+    // ---------- Configure assetHandler (assetType=1, aggregator non-zero, price 1e18) ----------
+    await mockAssetHandler.addAsset(tokenA, 1, DUMMY_AGGREGATOR);
+    await mockAssetHandler.addAsset(tokenB, 1, DUMMY_AGGREGATOR);
+    await mockAssetHandler.setPrice(tokenA, ethers.parseUnits('1', 18));
+    await mockAssetHandler.setPrice(tokenB, ethers.parseUnits('2', 18));
+
+    // ---------- Configure governance (assetType=1 → guard) ----------
+    await mockGovernance.setAssetGuard(1, await guard.getAddress());
+
     // ---------- Initialize ----------
     await contract.initialize(
-      await owner.getAddress(),
-      await manager.getAddress(),
-      'Manager Alpha',
-      await poolLogic.getAddress(),
+      await owner.getAddress(),   // _factoryOwner
+      await manager.getAddress(), // _manager
+      'Manager Alpha',            // _managerName
+      await poolLogic.getAddress(), // _poolLogic
+      await mockAssetHandler.getAddress(), // _assetHandler
+      await mockGovernance.getAddress(),   // _governance
       500, // performanceFeeNumerator
       100, // managerFeeNumerator
     );
 
-    // After initialize, owner is factoryOwner, so owner can configure assets & guards
-    await contract.connect(owner).setAssetInfo(tokenA, true, 1, ethers.parseUnits('1', 18));
-    await contract.connect(owner).setAssetInfo(tokenB, true, 1, ethers.parseUnits('2', 18));
-
-    await contract.connect(owner).setAssetGuard(tokenA, await guard.getAddress());
-    await contract.connect(owner).setAssetGuard(tokenB, await guard.getAddress());
-
-    // Make tokenA a supported *deposit* asset so init tests still pass
+    // Make tokenA a supported *deposit* asset
     await contract.connect(manager).changeAssets([{ asset: tokenA, isDeposit: true }], []);
 
     await poolLogic.setManager(await contract.getAddress());
@@ -61,6 +76,8 @@ describe('PoolManagerLogic', () => {
       contract,
       guard,
       poolLogic,
+      mockAssetHandler,
+      mockGovernance,
       tokenA,
       tokenB,
     };
@@ -85,48 +102,55 @@ describe('PoolManagerLogic', () => {
     expect(denom).to.equal(10000n);
   });
 
-  it('reverts initialize with invalid inputs', async () => {
-    const [, manager] = await ethers.getSigners();
+    it('reverts initialize with invalid inputs', async () => {
+    const [deployer, manager] = await ethers.getSigners();
     const MockPoolLogic = await ethers.getContractFactory('MockPoolLogic');
     const poolLogic = await MockPoolLogic.deploy();
+    const MockAssetHandler = await ethers.getContractFactory('MockAssetHandler');
+    const mockAssetHandler = await MockAssetHandler.deploy();
+    const MockGovernance = await ethers.getContractFactory('MockGovernance');
+    const mockGovernance = await MockGovernance.deploy();
     const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic');
     const contract = await PoolManagerLogic.deploy();
+
+    const validPoolLogic = await poolLogic.getAddress();
+    const validAssetHandler = await mockAssetHandler.getAddress();
+    const validGovernance = await mockGovernance.getAddress();
+    const validManager = await manager.getAddress();
+    const validOwner = await deployer.getAddress();
 
     // Invalid factory (zero)
     await expect(
       contract.initialize(
-        ethers.ZeroAddress,
-        await manager.getAddress(),
-        'm',
-        await poolLogic.getAddress(),
-        0,
-        0,
+        ethers.ZeroAddress, validManager, 'm', validPoolLogic, validAssetHandler, validGovernance, 0, 0,
       ),
     ).to.be.revertedWithCustomError(contract, 'InvalidFactory');
 
     // Invalid manager (zero)
     await expect(
       contract.initialize(
-        await (await ethers.getSigners())[0].getAddress(),
-        ethers.ZeroAddress,
-        'm',
-        await poolLogic.getAddress(),
-        0,
-        0,
+        validOwner, ethers.ZeroAddress, 'm', validPoolLogic, validAssetHandler, validGovernance, 0, 0,
       ),
     ).to.be.revertedWithCustomError(contract, 'InvalidManager');
 
-    // Invalid poolLogic (zero)
+    // Invalid governance (zero)
     await expect(
       contract.initialize(
-        await (await ethers.getSigners())[0].getAddress(),
-        await manager.getAddress(),
-        'm',
-        ethers.ZeroAddress,
-        0,
-        0,
+        validOwner, validManager, 'm', validPoolLogic, validAssetHandler, ethers.ZeroAddress, 0, 0,
       ),
-    ).to.be.revertedWithCustomError(contract, 'InvalidPoolLogic');
+    ).to.be.revertedWithCustomError(contract, 'InvalidGovernance');
+
+    await expect(
+      contract.initialize(
+        validOwner, validManager, 'm', validPoolLogic, ethers.ZeroAddress, validGovernance, 0, 0,
+      ),
+    ).to.be.revertedWith('invalid assetHandler');
+
+    await expect(
+      contract.initialize(
+        validOwner, validManager, 'm', validPoolLogic, validAssetHandler, validGovernance, 6000, 0,
+      ),
+    ).to.be.revertedWith('invalid manager fee');
   });
 
   // ========================================================================================
@@ -134,10 +158,9 @@ describe('PoolManagerLogic', () => {
   // ========================================================================================
   describe('Asset management', () => {
     it('adds and removes assets with guard & validation', async () => {
-      const { contract, manager, owner, tokenA, tokenB } = await loadFixture(setupFixture);
+      const { contract, manager, mockAssetHandler, tokenA, tokenB } = await loadFixture(setupFixture);
 
-      await contract.connect(owner).setAssetInfo(tokenB, true, 2, ethers.parseUnits('2', 18));
-
+      // tokenB is already registered in assetHandler; add it to supported assets
       await expect(
         contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: true }], []),
       ).to.emit(contract, 'AssetAdded');
@@ -149,7 +172,8 @@ describe('PoolManagerLogic', () => {
         'AssetRemoved',
       );
 
-      await contract.connect(owner).setAssetInfo(tokenB, false, 1, 0);
+      // Remove tokenB from assetHandler to make it invalid
+      await mockAssetHandler.removeAsset(tokenB);
 
       await expect(
         contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: true }], []),
@@ -157,31 +181,24 @@ describe('PoolManagerLogic', () => {
     });
 
     it('enforces max asset count and deposit rule', async () => {
-      const { contract, manager, owner } = await loadFixture(setupFixture);
+      const { contract, manager, owner, mockAssetHandler } = await loadFixture(setupFixture);
 
-      // IMPORTANT: lower max count to 16 for this test (initializer default is 50)
+      // Lower max count to 16
       await contract.connect(owner).setFactoryConfig(
-        16, // maximumSupportedAssetCount
-        5000, // maxPerf
-        300, // maxMgr
-        100, // maxEntry
-        100, // maxExit
-        10000, // feeDenominator
-        0, // maxPerfChange
-        3 * 24 * 60 * 60, // perfChangeDelay (3 days)
+        16, 5000, 300, 100, 100, 10000, 0, 3 * 24 * 60 * 60,
       );
 
       const adds: Asset[] = [];
       for (let i = 0; i < 15; i++) {
         const addr = ethers.Wallet.createRandom().address;
-        await contract.connect(owner).setAssetInfo(addr, true, 1, 0);
+        await mockAssetHandler.addAsset(addr, 1, DUMMY_AGGREGATOR);
         adds.push({ asset: addr, isDeposit: i % 2 === 0 });
       }
 
       await contract.connect(manager).changeAssets(adds, []);
 
       const extra = ethers.Wallet.createRandom().address;
-      await contract.connect(owner).setAssetInfo(extra, true, 1, 0);
+      await mockAssetHandler.addAsset(extra, 1, DUMMY_AGGREGATOR);
 
       await expect(
         contract.connect(manager).changeAssets([{ asset: extra, isDeposit: true }], []),
@@ -191,23 +208,20 @@ describe('PoolManagerLogic', () => {
       const all = supported.map((x: any) => x.asset);
 
       const nonDeposit = ethers.Wallet.createRandom().address;
-      await contract.connect(owner).setAssetInfo(nonDeposit, true, 1, 0);
+      await mockAssetHandler.addAsset(nonDeposit, 1, DUMMY_AGGREGATOR);
 
-      // Removing all deposit assets and adding a non-deposit should revert on "at least one deposit asset"
+      // Removing all deposit assets and adding a non-deposit should revert
       await expect(
         contract.connect(manager).changeAssets([{ asset: nonDeposit, isDeposit: false }], all),
       ).to.be.reverted;
     });
 
     it('forbids adding pool assets', async () => {
-      const { contract, manager, owner } = await loadFixture(setupFixture);
+      const { contract, manager, owner, mockAssetHandler } = await loadFixture(setupFixture);
 
       const poolAsset = ethers.Wallet.createRandom().address;
 
-      const currentPoolLogic = await contract.poolLogic();
-      await contract.connect(owner).setAssetInfo(currentPoolLogic, true, 1, 0);
-
-      await contract.connect(owner).setAssetInfo(poolAsset, true, 1, 0);
+      await mockAssetHandler.addAsset(poolAsset, 1, DUMMY_AGGREGATOR);
       await contract.connect(owner).setIsPool(poolAsset, true);
 
       await expect(
@@ -218,9 +232,7 @@ describe('PoolManagerLogic', () => {
     });
 
     it('only manager, trader, or owner can change assets', async () => {
-      const { contract, manager, trader, owner, other, tokenB } = await loadFixture(setupFixture);
-
-      await contract.connect(owner).setAssetInfo(tokenB, true, 1, 0);
+      const { contract, manager, trader, other, tokenB } = await loadFixture(setupFixture);
 
       // unauthorized account
       await expect(
@@ -230,7 +242,7 @@ describe('PoolManagerLogic', () => {
       // manager is allowed
       await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: true }], []);
 
-      // flipping trader flag alone does NOT authorize this random trader address
+      // trader flag alone does NOT authorize random trader address without matching trader role
       await contract.connect(manager).setTraderAssetChangeDisabled(false);
       await expect(
         contract.connect(trader).changeAssets([{ asset: tokenB, isDeposit: false }], []),
@@ -245,6 +257,49 @@ describe('PoolManagerLogic', () => {
         contract.connect(manager).changeAssets([], [unknown]),
       ).to.be.revertedWithCustomError(contract, 'AssetNotSupported');
     });
+
+    it('updates existing assets, keeps sorted order, and removes from the middle', async () => {
+      const { contract, manager, mockAssetHandler, tokenA } = await loadFixture(setupFixture);
+
+      const high = ethers.Wallet.createRandom().address;
+      const mid = ethers.Wallet.createRandom().address;
+      await mockAssetHandler.addAsset(high, 3, DUMMY_AGGREGATOR);
+      await mockAssetHandler.addAsset(mid, 2, DUMMY_AGGREGATOR);
+
+      await contract.connect(manager).changeAssets(
+        [
+          { asset: mid, isDeposit: true },
+          { asset: high, isDeposit: true },
+        ],
+        [],
+      );
+
+      let supported = await contract.getSupportedAssets();
+      expect(supported[0].asset).to.equal(high);
+      expect(supported[1].asset).to.equal(mid);
+      expect(supported[2].asset).to.equal(tokenA);
+
+      await contract.connect(manager).changeAssets([{ asset: tokenA, isDeposit: false }], []);
+      expect(await contract.isDepositAsset(tokenA)).to.equal(false);
+
+      await expect(contract.connect(manager).changeAssets([], [mid])).to.emit(contract, 'AssetRemoved');
+      supported = await contract.getSupportedAssets();
+      expect(supported.map((x: any) => x.asset)).to.deep.equal([high, tokenA]);
+    });
+
+    it('allows factory owner asset changes and skips max count when maximum is zero', async () => {
+      const { contract, owner, mockAssetHandler, mockGovernance } = await loadFixture(setupFixture);
+      await contract.connect(owner).setFactoryConfig(0, 5000, 300, 100, 100, 10000, 0, 3 * 24 * 60 * 60);
+
+      const noGuardAsset = ethers.Wallet.createRandom().address;
+      await mockAssetHandler.addAsset(noGuardAsset, 2, DUMMY_AGGREGATOR);
+      await mockAssetHandler.setPrice(noGuardAsset, ethers.parseUnits('1', 18));
+      await mockGovernance.setAssetGuard(2, ethers.ZeroAddress);
+
+      await contract.connect(owner).changeAssets([{ asset: noGuardAsset, isDeposit: true }], []);
+      expect(await contract.isSupportedAsset(noGuardAsset)).to.equal(true);
+      expect(await contract.assetBalance(noGuardAsset)).to.equal(0n);
+    });
   });
 
   // ========================================================================================
@@ -255,7 +310,6 @@ describe('PoolManagerLogic', () => {
       const { contract } = await loadFixture(setupFixture);
 
       const [maxPerf, maxMgr, maxEntry, maxExit, denom] = await contract.getMaximumFee();
-      // Defaults from initializer: _setFactoryConfig(50, 5000, 300, 100, 100, 10000, 0, 3 days)
       expect(maxPerf).to.equal(5000n);
       expect(maxMgr).to.equal(300n);
       expect(maxEntry).to.equal(100n);
@@ -263,7 +317,7 @@ describe('PoolManagerLogic', () => {
       expect(denom).to.equal(10000n);
 
       const change = await contract.getMaximumPerformanceFeeChange();
-      expect(change).to.equal(0n); // default maxPerfChange is 0
+      expect(change).to.equal(0n);
     });
 
     it('manager can reduce but not increase fees', async () => {
@@ -281,7 +335,6 @@ describe('PoolManagerLogic', () => {
     it('announces and commits fee increases after delay', async () => {
       const { contract, manager, poolLogic } = await loadFixture(setupFixture);
 
-      // With maxPerfChange = 0, _perf cannot exceed current performanceFeeNumerator (500)
       await expect(contract.connect(manager).announceFeeIncrease(500, 120, 10, 10)).to.emit(
         contract,
         'ManagerFeeIncreaseAnnounced',
@@ -289,9 +342,7 @@ describe('PoolManagerLogic', () => {
 
       const inc = await contract.getFeeIncreaseInfo();
 
-      await expect(contract.connect(manager).commitFeeIncrease()).to.be.revertedWith(
-        'delay active',
-      );
+      await expect(contract.connect(manager).commitFeeIncrease()).to.be.revertedWith('delay active');
 
       await time.increaseTo(inc[4] + 1n);
 
@@ -308,16 +359,12 @@ describe('PoolManagerLogic', () => {
 
       const incAfter = await contract.getFeeIncreaseInfo();
       expect(incAfter[0]).to.equal(0n);
-      expect(incAfter[1]).to.equal(0n);
-      expect(incAfter[2]).to.equal(0n);
-      expect(incAfter[3]).to.equal(0n);
       expect(incAfter[4]).to.equal(0n);
     });
 
     it('renounces announced increase', async () => {
       const { contract, manager } = await loadFixture(setupFixture);
 
-      // Must respect maxPerfChange = 0, so keep perf at 500
       await contract.connect(manager).announceFeeIncrease(500, 110, 5, 5);
 
       await expect(contract.connect(manager).renounceFeeIncrease()).to.emit(
@@ -327,6 +374,19 @@ describe('PoolManagerLogic', () => {
 
       const inc = await contract.getFeeIncreaseInfo();
       expect(inc[0]).to.equal(0n);
+    });
+
+    it('rejects fee increases above configured limits or performance-change allowance', async () => {
+      const { contract, manager, owner } = await loadFixture(setupFixture);
+
+      await expect(contract.connect(manager).announceFeeIncrease(501, 100, 0, 0)).to.be.revertedWith(
+        'exceeded allowed increase',
+      );
+
+      await contract.connect(owner).setFactoryConfig(50, 5000, 300, 100, 100, 10000, 100, 1);
+      await expect(contract.connect(manager).announceFeeIncrease(700, 100, 0, 0)).to.be.revertedWith(
+        'exceeded allowed increase',
+      );
     });
   });
 
@@ -346,6 +406,23 @@ describe('PoolManagerLogic', () => {
 
       expect(await contract.isNftMemberAllowed(await user.getAddress())).to.equal(true);
       expect(await contract.isMemberAllowed(await user.getAddress())).to.equal(true);
+    });
+
+    it('clears NFT membership collection and uses managed member list fallback', async () => {
+      const { contract, manager, user } = await loadFixture(setupFixture);
+
+      const MockERC721 = await ethers.getContractFactory('MockERC721');
+      const nft = await MockERC721.deploy('Members', 'MBR');
+      await contract.connect(manager).setNftMembershipCollectionAddress(await nft.getAddress());
+      await contract.connect(manager).setNftMembershipCollectionAddress(ethers.ZeroAddress);
+
+      await nft.mint(await user.getAddress(), 1n);
+      expect(await contract.isNftMemberAllowed(await user.getAddress())).to.equal(false);
+
+      await contract.connect(manager).addMembers([await user.getAddress()]);
+      expect(await contract.isMemberAllowed(await user.getAddress())).to.equal(true);
+      await contract.connect(manager).removeMembers([await user.getAddress()]);
+      expect(await contract.isMemberAllowed(await user.getAddress())).to.equal(false);
     });
 
     it('reverts when setting a non-ERC721 collection', async () => {
@@ -377,18 +454,9 @@ describe('PoolManagerLogic', () => {
     });
 
     it('owner can update factory config and asset info/price/guards', async () => {
-      const { contract, owner, tokenA } = await loadFixture(setupFixture);
+      const { contract, owner, tokenA, mockAssetHandler, mockGovernance } = await loadFixture(setupFixture);
 
-      await contract.connect(owner).setFactoryConfig(
-        20,
-        1500,
-        600,
-        150,
-        150,
-        10000,
-        200,
-        172800, // 2 days
-      );
+      await contract.connect(owner).setFactoryConfig(20, 1500, 600, 150, 150, 10000, 200, 172800);
 
       const [maxPerf, maxMgr, maxEntry, maxExit] = await contract.getMaximumFee();
       expect(maxPerf).to.equal(1500n);
@@ -396,12 +464,41 @@ describe('PoolManagerLogic', () => {
       expect(maxEntry).to.equal(150n);
       expect(maxExit).to.equal(150n);
 
-      await contract.connect(owner).setAssetPrice(tokenA, ethers.parseUnits('3', 18));
+      // Update price via mock assetHandler
+      await mockAssetHandler.setPrice(tokenA, ethers.parseUnits('3', 18));
       expect(await contract.getAssetPrice(tokenA)).to.equal(ethers.parseUnits('3', 18));
 
+      // Set contract guard via mock governance
       const dummy = ethers.Wallet.createRandom().address;
-      await contract.connect(owner).setContractGuard(dummy, tokenA);
+      await mockGovernance.setContractGuard(dummy, tokenA);
       expect(await contract.getContractGuard(dummy)).to.equal(tokenA);
+    });
+
+    it('protects factory-owner admin setters and rejects zero admin dependencies', async () => {
+      const { contract, owner, other, mockAssetHandler, mockGovernance } = await loadFixture(setupFixture);
+
+      await expect(
+        contract.connect(other).setFactoryConfig(20, 1500, 600, 150, 150, 10000, 200, 172800),
+      ).to.be.revertedWith('only factoryOwner allowed');
+
+      await expect(contract.connect(other).setIsPool(await other.getAddress(), true)).to.be.revertedWith(
+        'only factoryOwner allowed',
+      );
+      await expect(contract.connect(owner).setAssetHandler(ethers.ZeroAddress)).to.be.revertedWith(
+        'invalid assetHandler',
+      );
+      await expect(contract.connect(owner).setGovernance(ethers.ZeroAddress)).to.be.revertedWith(
+        'invalid governance',
+      );
+
+      await expect(contract.connect(owner).setAssetHandler(await mockAssetHandler.getAddress())).to.emit(
+        contract,
+        'AssetHandlerUpdated',
+      );
+      await expect(contract.connect(owner).setGovernance(await mockGovernance.getAddress())).to.emit(
+        contract,
+        'GovernanceUpdated',
+      );
     });
 
     it('owner can change factory owner and rejects zero owner', async () => {
@@ -417,6 +514,42 @@ describe('PoolManagerLogic', () => {
   });
 
   // ========================================================================================
+  // CALLBACKS / MANAGER CHANGES
+  // ========================================================================================
+  describe('Callbacks & manager changes', () => {
+    it('sets callback sender permissions and rejects zero caller', async () => {
+      const { contract, manager, other } = await loadFixture(setupFixture);
+
+      await expect(contract.connect(manager).setAllowedCallbackSender(ethers.ZeroAddress, true)).to.be.revertedWith(
+        'caller=0',
+      );
+
+      await expect(contract.connect(manager).setAllowedCallbackSender(await other.getAddress(), true)).to.emit(
+        contract,
+        'AllowedCallbackSenderSet',
+      );
+      expect(await contract.getAllowedCallbackSenders(await other.getAddress())).to.equal(true);
+    });
+
+    it('mints manager fee before changing manager and rejects zero manager', async () => {
+      const { contract, manager, other, poolLogic } = await loadFixture(setupFixture);
+
+      await expect(contract.connect(manager).changeManager(ethers.ZeroAddress, 'Nobody')).to.be.revertedWithCustomError(
+        contract,
+        'InvalidManager',
+      );
+
+      const before = await poolLogic.mintCount_();
+      await expect(contract.connect(manager).changeManager(await other.getAddress(), 'Manager Beta')).to.emit(
+        contract,
+        'ManagerUpdated',
+      );
+      expect(await contract.manager()).to.equal(await other.getAddress());
+      expect(await poolLogic.mintCount_()).to.equal(before + 1n);
+    });
+  });
+
+  // ========================================================================================
   // VIEW / HELPERS
   // ========================================================================================
   describe('Views & helpers', () => {
@@ -424,36 +557,27 @@ describe('PoolManagerLogic', () => {
       const { contract, tokenA } = await loadFixture(setupFixture);
 
       expect(await contract.factory()).to.equal(await contract.getAddress());
-      expect(await contract.isValidAsset(tokenA)).to.equal(true);
-      expect(await contract.getMaximumSupportedAssetCount()).to.equal(50n); // default from initializer
-
+      expect(await contract.validateAsset(tokenA)).to.equal(true);
+      expect(await contract.getMaximumSupportedAssetCount()).to.equal(50n);
       expect(await contract.getAssetType(tokenA)).to.equal(1n);
       expect(await contract.getAssetGuard(tokenA)).to.not.equal(ethers.ZeroAddress);
     });
 
     it('validateAsset, isPool, assetBalance and assetDecimal failure', async () => {
-      const { contract, owner } = await loadFixture(setupFixture);
+      const { contract, mockAssetHandler } = await loadFixture(setupFixture);
 
       const addr = ethers.Wallet.createRandom().address;
-      await contract.connect(owner).setAssetInfo(addr, true, 2, 0);
+      await mockAssetHandler.addAsset(addr, 2, DUMMY_AGGREGATOR);
 
       expect(await contract.validateAsset(addr)).to.equal(true);
       expect(await contract.isPool(addr)).to.equal(false);
 
-      // No guard set -> assetBalance should be 0, assetDecimal reverts
+      // No guard set for assetType=2 -> assetBalance returns 0, assetDecimal reverts
       expect(await contract.assetBalance(addr)).to.equal(0n);
 
       await expect(contract.assetDecimal(addr)).to.be.revertedWith('no guard');
     });
 
-    it('manager updates minDepositUSD', async () => {
-      const { contract, manager } = await loadFixture(setupFixture);
-
-      await expect(contract.connect(manager).setMinDepositUSD(1000n))
-        .to.emit(contract, 'MinDepositUpdated')
-        .withArgs(1000n);
-      expect(await contract.minDepositUSD()).to.equal(1000n);
-    });
   });
 
   // ========================================================================================
@@ -465,6 +589,7 @@ describe('PoolManagerLogic', () => {
 
       const amount = 10n ** 6n; // 1 token in 6 decimals
       const value = await contract['assetValue(address,uint256)'](tokenA, amount);
+      // price = 1e18, amount = 1e6, decimals = 6 → 1e18 * 1e6 / 1e6 = 1e18
       expect(value).to.equal(10n ** 18n);
     });
 

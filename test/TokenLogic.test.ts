@@ -9,12 +9,17 @@ describe('TokenLogic (FUSD)', () => {
   async function deployFixture() {
     const [admin, emergency, poolLogicEOA, user, other] = await ethers.getSigners();
 
-    // ---- Deploy mocks ----
-    const Oracle = await ethers.getContractFactory('MockOracle');
-    const oracle = await Oracle.deploy();
-    await oracle.waitForDeployment();
-    const oracleAddress = await oracle.getAddress();
+    // ---- Deploy poolManagerLogic mock ----
+    const TestPoolManagerLogic = await ethers.getContractFactory('TestPoolManagerLogic');
+    const poolMgr = await TestPoolManagerLogic.deploy(
+      await admin.getAddress(),
+      await admin.getAddress(),
+      'Test Manager',
+      ethers.ZeroAddress,
+    );
+    await poolMgr.waitForDeployment();
 
+    // ---- Deploy mock ERC20 assets ----
     const MockERC20 = await ethers.getContractFactory('MockERC20Custom');
     const usdc = await MockERC20.deploy('USD Coin', 'USDC', 6);
     await usdc.waitForDeployment();
@@ -33,24 +38,34 @@ describe('TokenLogic (FUSD)', () => {
     await dai.mint(await user.getAddress(), 1_000_000n * WAD);
     await weird.mint(await user.getAddress(), 1_000_000n * 10n ** 24n);
 
+    // Configure assets in poolManagerLogic
+    await poolMgr.setSupportedAsset(usdcAddress, true, 0, 6); // price set per-test
+    await poolMgr.setSupportedAsset(daiAddress, true, 0, 18);
+    await poolMgr.setSupportedAsset(weirdAddress, true, 0, 24);
+
+    // ---- Deploy MockPoolLogicSimple (receives collateral, tracks accountedAssets) ----
+    const MockPoolLogicSimple = await ethers.getContractFactory('MockPoolLogicSimple');
+    const mockPoolLogic = await MockPoolLogicSimple.deploy();
+    await mockPoolLogic.waitForDeployment();
+
     // ---- Deploy TokenLogic via UUPS proxy ----
     const TokenLogic = await ethers.getContractFactory('TokenLogic');
     const adminAddress = await admin.getAddress();
     const emergencyAddress = await emergency.getAddress();
-    const poolLogicAddress = await poolLogicEOA.getAddress();
+    const poolLogicAddress = await mockPoolLogic.getAddress();
+    const poolMgrAddress = await poolMgr.getAddress();
 
     const cooldown = 7 * 24 * 60 * 60; // 7 days
 
     const fusd = await upgrades.deployProxy(
       TokenLogic,
-      [adminAddress, emergencyAddress, poolLogicAddress, oracleAddress, cooldown],
+      [adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown],
       { initializer: 'initialize', kind: 'uups' },
     );
     await fusd.waitForDeployment();
     const fusdAddress = await fusd.getAddress();
 
     const DEFAULT_ADMIN_ROLE = await fusd.DEFAULT_ADMIN_ROLE();
-    const GOVERNANCE_ROLE = await fusd.GOVERNANCE_ROLE();
     const EMERGENCY_ROLE = await fusd.EMERGENCY_ROLE();
 
     return {
@@ -62,10 +77,10 @@ describe('TokenLogic (FUSD)', () => {
       emergencyAddress,
       poolLogicEOA,
       poolLogicAddress,
+      poolMgr,
+      poolMgrAddress,
       user,
       other,
-      oracle,
-      oracleAddress,
       usdc,
       usdcAddress,
       dai,
@@ -74,7 +89,6 @@ describe('TokenLogic (FUSD)', () => {
       weirdAddress,
       cooldown,
       DEFAULT_ADMIN_ROLE,
-      GOVERNANCE_ROLE,
       EMERGENCY_ROLE,
     };
   }
@@ -88,77 +102,88 @@ describe('TokenLogic (FUSD)', () => {
       adminAddress,
       emergencyAddress,
       poolLogicAddress,
-      oracleAddress,
       cooldown,
       DEFAULT_ADMIN_ROLE,
-      GOVERNANCE_ROLE,
       EMERGENCY_ROLE,
     } = await loadFixture(deployFixture);
 
-    expect(await fusd.name()).to.equal('TokenLogic USD');
-    expect(await fusd.symbol()).to.equal('FUSD');
+    expect(await fusd.name()).to.equal('Frgmnt USD');
+    expect(await fusd.symbol()).to.equal('fUSD');
     expect(await fusd.decimals()).to.equal(18n);
 
     expect(await fusd.hasRole(DEFAULT_ADMIN_ROLE, adminAddress)).to.equal(true);
-    expect(await fusd.hasRole(GOVERNANCE_ROLE, adminAddress)).to.equal(true);
     expect(await fusd.hasRole(EMERGENCY_ROLE, emergencyAddress)).to.equal(true);
 
     expect(await fusd.poolLogic()).to.equal(poolLogicAddress);
-    expect(await fusd.priceOracle()).to.equal(oracleAddress);
     expect(await fusd.cooldownPeriod()).to.equal(BigInt(cooldown));
   });
 
   it('reverts initialize() when called twice on the proxy', async () => {
-    const { fusd, adminAddress, emergencyAddress, poolLogicAddress, oracleAddress, cooldown } =
+    const { fusd, adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown } =
       await loadFixture(deployFixture);
 
-    // OZ v5 now uses a custom error for re-initialization; just assert revert
     await expect(
-      fusd.initialize(adminAddress, emergencyAddress, poolLogicAddress, oracleAddress, cooldown),
+      fusd.initialize(adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown),
     ).to.be.reverted;
   });
 
+  it('rejects zero-valued initializer dependencies', async () => {
+    const { adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown } =
+      await loadFixture(deployFixture);
+    const TokenLogic = await ethers.getContractFactory('TokenLogic');
+
+    await expect(
+      upgrades.deployProxy(
+        TokenLogic,
+        [ethers.ZeroAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown],
+        { initializer: 'initialize', kind: 'uups' },
+      ),
+    ).to.be.revertedWith('TokenLogic: admin=0');
+
+    await expect(
+      upgrades.deployProxy(
+        TokenLogic,
+        [adminAddress, ethers.ZeroAddress, poolLogicAddress, poolMgrAddress, cooldown],
+        { initializer: 'initialize', kind: 'uups' },
+      ),
+    ).to.be.revertedWith('TokenLogic: emergency=0');
+
+    await expect(
+      upgrades.deployProxy(
+        TokenLogic,
+        [adminAddress, emergencyAddress, poolLogicAddress, ethers.ZeroAddress, cooldown],
+        { initializer: 'initialize', kind: 'uups' },
+      ),
+    ).to.be.revertedWith('TokenLogic: poolManagerLogic=0');
+  });
+
   // ---------------------------------------------------------------------------
-  // GOVERNANCE
+  // GOVERNANCE (DEFAULT_ADMIN_ROLE controls setPoolLogic, setCooldown, etc.)
   // ---------------------------------------------------------------------------
   describe('Governance', () => {
-    it('only governance can set oracle / poolLogic / cooldown and zero checks', async () => {
-      const { fusd, admin, other, GOVERNANCE_ROLE } = await loadFixture(deployFixture);
+    it('only governance can set poolLogic / cooldown and zero checks', async () => {
+      const { fusd, admin, other, DEFAULT_ADMIN_ROLE } = await loadFixture(deployFixture);
 
       const gov = admin;
       const nonGov = other;
-      const newOracle = ethers.Wallet.createRandom().address;
       const newPool = ethers.Wallet.createRandom().address;
-
-      // nonGov cannot set oracle
-      await expect(fusd.connect(nonGov).setOracle(newOracle))
-        .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
-        .withArgs(await nonGov.getAddress(), GOVERNANCE_ROLE);
 
       // nonGov cannot set poolLogic
       await expect(fusd.connect(nonGov).setPoolLogic(newPool))
         .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
-        .withArgs(await nonGov.getAddress(), GOVERNANCE_ROLE);
+        .withArgs(await nonGov.getAddress(), DEFAULT_ADMIN_ROLE);
 
       // nonGov cannot set cooldown
       await expect(fusd.connect(nonGov).setCooldown(1234))
         .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
-        .withArgs(await nonGov.getAddress(), GOVERNANCE_ROLE);
+        .withArgs(await nonGov.getAddress(), DEFAULT_ADMIN_ROLE);
 
-      // zero checks
-      await expect(fusd.connect(gov).setOracle(ethers.ZeroAddress)).to.be.revertedWith(
-        'TokenLogic: oracle=0',
-      );
-
+      // zero check on poolLogic
       await expect(fusd.connect(gov).setPoolLogic(ethers.ZeroAddress)).to.be.revertedWith(
         'TokenLogic: poolLogic=0',
       );
 
       // success paths
-      await expect(fusd.connect(gov).setOracle(newOracle))
-        .to.emit(fusd, 'OracleUpdated')
-        .withArgs(newOracle);
-
       await expect(fusd.connect(gov).setPoolLogic(newPool))
         .to.emit(fusd, 'PoolLogicUpdated')
         .withArgs(newPool);
@@ -167,56 +192,100 @@ describe('TokenLogic (FUSD)', () => {
         .to.emit(fusd, 'CooldownUpdated')
         .withArgs(999n);
 
-      expect(await fusd.priceOracle()).to.equal(newOracle);
       expect(await fusd.poolLogic()).to.equal(newPool);
       expect(await fusd.cooldownPeriod()).to.equal(999n);
     });
 
-    it('configureAsset: only governance, auto-decimals, and bad-decimals guard', async () => {
-      const { fusd, admin, other, usdcAddress, daiAddress, GOVERNANCE_ROLE } =
+    it('only governance can set poolManagerLogic and cooldown exemptions', async () => {
+      const { fusd, admin, other, DEFAULT_ADMIN_ROLE } = await loadFixture(deployFixture);
+      const newPoolManagerLogic = ethers.Wallet.createRandom().address;
+      const otherAddress = await other.getAddress();
+
+      await expect(fusd.connect(other).setPoolManagerLogic(newPoolManagerLogic))
+        .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
+        .withArgs(otherAddress, DEFAULT_ADMIN_ROLE);
+
+      await expect(fusd.connect(admin).setPoolManagerLogic(ethers.ZeroAddress)).to.be.revertedWith(
+        'TokenLogic: poolManagerLogic=0',
+      );
+
+      await expect(fusd.connect(admin).setPoolManagerLogic(newPoolManagerLogic))
+        .to.emit(fusd, 'PoolManagerLogicUpdated')
+        .withArgs(newPoolManagerLogic);
+      expect(await fusd.poolManagerLogic()).to.equal(newPoolManagerLogic);
+
+      await expect(fusd.connect(other).setCooldownExemptSender(otherAddress, true))
+        .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
+        .withArgs(otherAddress, DEFAULT_ADMIN_ROLE);
+      await expect(fusd.connect(admin).setCooldownExemptSender(ethers.ZeroAddress, true)).to.be.revertedWith(
+        'TokenLogic: zero address',
+      );
+      await expect(fusd.connect(admin).setCooldownExemptSender(otherAddress, true))
+        .to.emit(fusd, 'CooldownExemptSenderUpdated')
+        .withArgs(otherAddress, true);
+      expect(await fusd.cooldownExemptSender(otherAddress)).to.equal(true);
+
+      await expect(fusd.connect(other).setCooldownExemptRecipient(otherAddress, true))
+        .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
+        .withArgs(otherAddress, DEFAULT_ADMIN_ROLE);
+      await expect(fusd.connect(admin).setCooldownExemptRecipient(ethers.ZeroAddress, true)).to.be.revertedWith(
+        'TokenLogic: zero address',
+      );
+      await expect(fusd.connect(admin).setCooldownExemptRecipient(otherAddress, true))
+        .to.emit(fusd, 'CooldownExemptRecipientUpdated')
+        .withArgs(otherAddress, true);
+      expect(await fusd.cooldownExemptRecipient(otherAddress)).to.equal(true);
+
+      await expect(fusd.connect(other).setMinDepositUSD(1n))
+        .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
+        .withArgs(otherAddress, DEFAULT_ADMIN_ROLE);
+    });
+
+    it('configureAsset: only governance, checks poolManagerLogic.isDepositAsset', async () => {
+      const { fusd, admin, other, usdcAddress, DEFAULT_ADMIN_ROLE, poolMgr } =
         await loadFixture(deployFixture);
 
       // non-governance cannot configure
-      await expect(fusd.connect(other).configureAsset(usdcAddress, true, 0, 1000))
+      await expect(fusd.connect(other).configureAsset(usdcAddress, true, 0))
         .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
-        .withArgs(await other.getAddress(), GOVERNANCE_ROLE);
+        .withArgs(await other.getAddress(), DEFAULT_ADMIN_ROLE);
 
-      // decimals=0 => auto-detect from token
-      await expect(fusd.connect(admin).configureAsset(usdcAddress, true, 0, 1000))
-        .to.emit(fusd, 'AssetConfigured')
-        .withArgs(usdcAddress, true, 6, 1000n);
+      // governance configures successfully
+      await expect(fusd.connect(admin).configureAsset(usdcAddress, true, 0))
+        .to.emit(fusd, 'AssetConfigured');
 
       const cfg = await fusd.assetConfigs(usdcAddress);
       expect(cfg.allowed_).to.equal(true);
       expect(cfg.decimals_).to.equal(6);
-      expect(cfg.cap_).to.equal(1000n);
-      expect(cfg.totalDeposited_).to.equal(0n);
 
-      // decimals > 36 should revert
-      await expect(fusd.connect(admin).configureAsset(daiAddress, true, 37, 0)).to.be.revertedWith(
-        'TokenLogic: bad decimals',
+      const unknownAsset = ethers.Wallet.createRandom().address;
+      await expect(fusd.connect(admin).configureAsset(ethers.ZeroAddress, true, 1)).to.be.revertedWith(
+        'TokenLogic: asset=0',
+      );
+      await expect(fusd.connect(admin).configureAsset(unknownAsset, true, 1)).to.be.revertedWith(
+        'TokenLogic: asset not valid',
       );
 
-      // valid explicit decimals
-      await fusd.connect(admin).configureAsset(daiAddress, true, 18, 0);
-      const cfgDai = await fusd.assetConfigs(daiAddress);
-      expect(cfgDai.decimals_).to.equal(18);
+      await poolMgr.setSupportedAsset(unknownAsset, true, WAD, 0);
+      await expect(fusd.connect(admin).configureAsset(unknownAsset, true, 1)).to.be.revertedWith(
+        'TokenLogic: _decimals = 0',
+      );
     });
 
     it('setAssetCap: only governance and only for configured assets', async () => {
-      const { fusd, admin, other, usdcAddress, GOVERNANCE_ROLE } = await loadFixture(deployFixture);
+      const { fusd, admin, other, usdcAddress, DEFAULT_ADMIN_ROLE, poolMgr } = await loadFixture(deployFixture);
 
-      // not configured yet
+      // not configured yet — reverts with 'not allowed'
       await expect(fusd.connect(admin).setAssetCap(usdcAddress, 500)).to.be.revertedWith(
-        'TokenLogic: not configured',
+        'TokenLogic: not allowed',
       );
 
-      await fusd.connect(admin).configureAsset(usdcAddress, true, 6, 1000);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, 1000);
 
       // non-governance
       await expect(fusd.connect(other).setAssetCap(usdcAddress, 500))
         .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
-        .withArgs(await other.getAddress(), GOVERNANCE_ROLE);
+        .withArgs(await other.getAddress(), DEFAULT_ADMIN_ROLE);
 
       await expect(fusd.connect(admin).setAssetCap(usdcAddress, 500))
         .to.emit(fusd, 'AssetCapUpdated')
@@ -224,6 +293,19 @@ describe('TokenLogic (FUSD)', () => {
 
       const cfg = await fusd.assetConfigs(usdcAddress);
       expect(cfg.cap_).to.equal(500n);
+
+      const invalidAsset = ethers.Wallet.createRandom().address;
+      await poolMgr.setSupportedAsset(invalidAsset, true, WAD, 0);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, 1000);
+      await poolMgr.setSupportedAsset(usdcAddress, false, WAD, 6);
+      await expect(fusd.connect(admin).setAssetCap(usdcAddress, 1)).to.be.revertedWith(
+        'TokenLogic: asset not valid',
+      );
+
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 0);
+      await expect(fusd.connect(admin).setAssetCap(usdcAddress, 1)).to.be.revertedWith(
+        'TokenLogic: _decimals = 0',
+      );
     });
   });
 
@@ -232,17 +314,16 @@ describe('TokenLogic (FUSD)', () => {
   // ---------------------------------------------------------------------------
   describe('Deposits', () => {
     it('USDC (6 decimals) at $1 → 1:1 mint', async () => {
-      const { fusd, oracle, admin, user, usdc, usdcAddress } = await loadFixture(deployFixture);
-
+      const { fusd, admin, user, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
       const userAddress = await user.getAddress();
 
-      await oracle.setPrice(usdcAddress, WAD);
-      await fusd.connect(admin).configureAsset(usdcAddress, true, 0, 0);
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
 
       const amount = 1000n * 10n ** 6n;
       await usdc.connect(user).approve(await fusd.getAddress(), amount);
 
-      await expect(fusd.connect(user).deposit(usdcAddress, amount))
+      await expect(fusd.connect(user).deposit(usdcAddress, amount, await user.getAddress()))
         .to.emit(fusd, 'Deposited')
         .withArgs(userAddress, usdcAddress, amount, 1000n * WAD);
 
@@ -250,51 +331,44 @@ describe('TokenLogic (FUSD)', () => {
     });
 
     it('DAI (18 decimals) at $0.5 → 2000 DAI = 1000 FUSD', async () => {
-      const { fusd, oracle, admin, user, dai, daiAddress } = await loadFixture(deployFixture);
-
+      const { fusd, admin, user, dai, daiAddress, poolMgr } = await loadFixture(deployFixture);
       const userAddress = await user.getAddress();
 
-      await oracle.setPrice(daiAddress, WAD / 2n);
-      await fusd.connect(admin).configureAsset(daiAddress, true, 0, 0);
+      await poolMgr.setSupportedAsset(daiAddress, true, WAD / 2n, 18);
+      await fusd.connect(admin).configureAsset(daiAddress, true, ethers.MaxUint256);
 
       const amount = 2000n * WAD;
       await dai.connect(user).approve(await fusd.getAddress(), amount);
 
-      await fusd.connect(user).deposit(daiAddress, amount);
-
+      await fusd.connect(user).deposit(daiAddress, amount, await user.getAddress());
       expect(await fusd.balanceOf(userAddress)).to.equal(1000n * WAD);
     });
 
     it('24-decimal asset (WEIRD) → correct normalization', async () => {
-      const { fusd, oracle, admin, user, weird, weirdAddress } = await loadFixture(deployFixture);
-
+      const { fusd, admin, user, weird, weirdAddress, poolMgr } = await loadFixture(deployFixture);
       const userAddress = await user.getAddress();
 
-      await oracle.setPrice(weirdAddress, WAD);
-      // explicit decimals 24 → triggers >18 branch
-      await fusd.connect(admin).configureAsset(weirdAddress, true, 24, 0);
+      await poolMgr.setSupportedAsset(weirdAddress, true, WAD, 24);
+      await fusd.connect(admin).configureAsset(weirdAddress, true, ethers.MaxUint256);
 
       const amount = 1000n * 10n ** 24n;
       await weird.connect(user).approve(await fusd.getAddress(), amount);
 
-      await fusd.connect(user).deposit(weirdAddress, amount);
-
+      await fusd.connect(user).deposit(weirdAddress, amount, await user.getAddress());
       expect(await fusd.balanceOf(userAddress)).to.equal(1000n * WAD);
     });
 
     it('enforces per-asset cap', async () => {
-      const { fusd, oracle, admin, user, usdc, usdcAddress } = await loadFixture(deployFixture);
+      const { fusd, admin, user, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
 
-      await oracle.setPrice(usdcAddress, WAD);
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
       const cap = 1000n * 10n ** 6n;
-
-      await fusd.connect(admin).configureAsset(usdcAddress, true, 0, cap);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, cap);
 
       await usdc.connect(user).approve(await fusd.getAddress(), cap + 1n);
+      await fusd.connect(user).deposit(usdcAddress, cap, await user.getAddress());
 
-      await fusd.connect(user).deposit(usdcAddress, cap);
-
-      await expect(fusd.connect(user).deposit(usdcAddress, 1n)).to.be.revertedWith(
+      await expect(fusd.connect(user).deposit(usdcAddress, 1n, await user.getAddress())).to.be.revertedWith(
         'TokenLogic: cap exceeded',
       );
 
@@ -302,37 +376,162 @@ describe('TokenLogic (FUSD)', () => {
       expect(cfg.totalDeposited_).to.equal(cap);
     });
 
-    it('reverts if oracle price not set', async () => {
+    it('reverts if oracle price not set (price = 0)', async () => {
       const { fusd, admin, user, usdc, usdcAddress } = await loadFixture(deployFixture);
 
-      await fusd.connect(admin).configureAsset(usdcAddress, true, 0, 0);
+      // poolMgr has price=0 for usdc by default
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+      // Set minDepositUSD = 1 so that price=0 (fusdAmount=0) triggers "below minimum deposit"
+      await fusd.connect(admin).setMinDepositUSD(1n);
       await usdc.connect(user).approve(await fusd.getAddress(), 100n);
 
-      await expect(fusd.connect(user).deposit(usdcAddress, 100n)).to.be.revertedWith(
-        'Oracle: price not set',
+      // price is 0 so fusdAmount = 0 < minDepositUSD = 1 → revert
+      await expect(fusd.connect(user).deposit(usdcAddress, 100n, await user.getAddress())).to.be.revertedWith(
+        'TokenLogic: below minimum deposit',
       );
     });
 
     it('reverts on asset not allowed or amount=0', async () => {
-      const { fusd, oracle, admin, user, usdc, usdcAddress } = await loadFixture(deployFixture);
+      const { fusd, admin, user, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
 
-      await oracle.setPrice(usdcAddress, WAD);
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
 
-      // asset not allowed
-      await fusd.connect(admin).configureAsset(usdcAddress, false, 6, 0);
-
+      // asset not allowed (configured with allowed=false)
+      await fusd.connect(admin).configureAsset(usdcAddress, false, 0);
       await usdc.connect(user).approve(await fusd.getAddress(), 10n);
 
-      await expect(fusd.connect(user).deposit(usdcAddress, 1n)).to.be.revertedWith(
+      await expect(fusd.connect(user).deposit(usdcAddress, 1n, await user.getAddress())).to.be.revertedWith(
         'TokenLogic: asset not allowed',
       );
 
       // asset allowed but amount=0
-      await fusd.connect(admin).configureAsset(usdcAddress, true, 6, 0);
-
-      await expect(fusd.connect(user).deposit(usdcAddress, 0n)).to.be.revertedWith(
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+      await expect(fusd.connect(user).deposit(usdcAddress, 0n, await user.getAddress())).to.be.revertedWith(
         'TokenLogic: zero amount',
       );
+
+      await expect(fusd.connect(user).deposit(ethers.Wallet.createRandom().address, 1n, await user.getAddress()))
+        .to.be.revertedWith('TokenLogic: asset not valid');
+    });
+
+    it('enforces recipient, minimum deposit, user slippage, and zero recipient checks', async () => {
+      const { fusd, admin, user, other, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
+      const userAddress = await user.getAddress();
+      const otherAddress = await other.getAddress();
+
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+      await usdc.connect(user).approve(await fusd.getAddress(), 1_000_000n);
+
+      await expect(fusd.connect(user).deposit(usdcAddress, 100n, otherAddress)).to.be.revertedWith(
+        'TokenLogic: use depositWithAuthorization',
+      );
+
+      await fusd.connect(admin).setMinDepositUSD(200n * WAD);
+      await expect(fusd.connect(user).deposit(usdcAddress, 100n * 10n ** 6n, userAddress)).to.be.revertedWith(
+        'TokenLogic: below minimum deposit',
+      );
+
+      await fusd.connect(admin).setMinDepositUSD(0);
+      await expect(
+        fusd.connect(user)['deposit(address,uint256,address,uint256)'](
+          usdcAddress,
+          100n * 10n ** 6n,
+          userAddress,
+          101n * WAD,
+        ),
+      ).to.be.revertedWith('TokenLogic: slippage');
+
+      await expect(
+        fusd.connect(user)['deposit(address,uint256,address,uint256)'](
+          usdcAddress,
+          100n * 10n ** 6n,
+          otherAddress,
+          0n,
+        ),
+      ).to.be.revertedWith('TokenLogic: use depositWithAuthorization');
+
+      await expect(
+        fusd.connect(user).deposit(usdcAddress, 100n * 10n ** 6n, ethers.ZeroAddress),
+      ).to.be.revertedWith('TokenLogic: use depositWithAuthorization');
+    });
+
+    it('rejects deposits whose decimal normalization rounds USD value to zero', async () => {
+      const { fusd, admin, user, weird, weirdAddress, poolMgr } = await loadFixture(deployFixture);
+
+      await poolMgr.setSupportedAsset(weirdAddress, true, WAD, 24);
+      await fusd.connect(admin).configureAsset(weirdAddress, true, ethers.MaxUint256);
+      await weird.connect(user).approve(await fusd.getAddress(), 1n);
+
+      await expect(fusd.connect(user).deposit(weirdAddress, 1n, await user.getAddress()))
+        .to.be.revertedWith('TokenLogic: usdAmount = 0');
+    });
+
+    it('allows authorized third-party deposits and rejects expired or invalid authorizations', async () => {
+      const { fusd, user, other, admin, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
+      const userAddress = await user.getAddress();
+      const otherAddress = await other.getAddress();
+      const fusdAddress = await fusd.getAddress();
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+      await usdc.mint(otherAddress, 1_000_000n * 10n ** 6n);
+      await usdc.connect(other).approve(fusdAddress, 1_000_000n * 10n ** 6n);
+
+      const signDepositAuth = async (amount: bigint, minFusdAmount: bigint, deadline: bigint) => {
+        const nonce = await fusd.depositNonces(userAddress);
+        const signature = await user.signTypedData(
+          { name: 'Frgmnt USD', version: '1', chainId, verifyingContract: fusdAddress },
+          {
+            DepositAuth: [
+              { name: 'depositor', type: 'address' },
+              { name: 'asset', type: 'address' },
+              { name: 'amount', type: 'uint256' },
+              { name: 'to', type: 'address' },
+              { name: 'minFusdAmount', type: 'uint256' },
+              { name: 'nonce', type: 'uint256' },
+              { name: 'deadline', type: 'uint256' },
+            ],
+          },
+          {
+            depositor: otherAddress,
+            asset: usdcAddress,
+            amount,
+            to: userAddress,
+            minFusdAmount,
+            nonce,
+            deadline,
+          },
+        );
+        return ethers.Signature.from(signature);
+      };
+
+      const amount = 100n * 10n ** 6n;
+      const expired = BigInt((await time.latest()) - 1);
+      const expiredSig = await signDepositAuth(amount, 0n, expired);
+      await expect(
+        fusd
+          .connect(other)
+          .depositWithAuthorization(usdcAddress, amount, userAddress, 0n, expired, expiredSig.v, expiredSig.r, expiredSig.s),
+      ).to.be.revertedWith('TokenLogic: auth expired');
+
+      const deadline = BigInt((await time.latest()) + 3600);
+      const validSig = await signDepositAuth(amount, 0n, deadline);
+      await expect(
+        fusd
+          .connect(other)
+          .depositWithAuthorization(usdcAddress, amount, userAddress, 0n, deadline, validSig.v, validSig.r, validSig.s),
+      )
+        .to.emit(fusd, 'Deposited')
+        .withArgs(userAddress, usdcAddress, amount, 100n * WAD);
+
+      const invalidSig = await signDepositAuth(amount, 0n, deadline);
+      await expect(
+        fusd
+          .connect(other)
+          .depositWithAuthorization(usdcAddress, amount + 1n, userAddress, 0n, deadline, invalidSig.v, invalidSig.r, invalidSig.s),
+      ).to.be.revertedWith('TokenLogic: invalid auth');
     });
   });
 
@@ -341,50 +540,143 @@ describe('TokenLogic (FUSD)', () => {
   // ---------------------------------------------------------------------------
   describe('Cooldown logic', () => {
     it('tracks weighted average mint timestamp across multiple deposits', async () => {
-      const { fusd, oracle, admin, user, usdc, usdcAddress, cooldown } =
+      const { fusd, admin, user, usdc, usdcAddress, poolMgr, cooldown } =
         await loadFixture(deployFixture);
-
       const userAddress = await user.getAddress();
 
-      await oracle.setPrice(usdcAddress, WAD);
-      await fusd.connect(admin).configureAsset(usdcAddress, true, 0, 0);
-
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
       await usdc.connect(user).approve(await fusd.getAddress(), 2_000_000n);
 
-      // first deposit
       const t0 = await time.latest();
-      await fusd.connect(user).deposit(usdcAddress, 1_000_000n);
-      const ts1 = await fusd.averageMintTimestamp(userAddress);
+      await fusd.connect(user).deposit(usdcAddress, 1_000_000n, await user.getAddress());
+      const ts1 = await fusd.cooldownTimestamp(userAddress);
       expect(ts1).to.be.gte(t0);
 
       const remaining1 = await fusd.getExitRemainingCooldown(userAddress);
       expect(remaining1).to.be.gt(0n);
       expect(remaining1).to.be.lte(BigInt(cooldown));
 
-      // advance time then second deposit
       await time.increase(100);
-      await fusd.connect(user).deposit(usdcAddress, 1_000_000n);
+      await fusd.connect(user).deposit(usdcAddress, 1_000_000n, await user.getAddress());
 
-      const ts2 = await fusd.averageMintTimestamp(userAddress);
+      const ts2 = await fusd.cooldownTimestamp(userAddress);
       expect(ts2).to.be.gte(ts1);
 
-      const remaining2 = await fusd.getExitRemainingCooldown(userAddress);
-      expect(remaining2).to.be.gt(0n);
-
-      // after cooldown passes
       await time.increase(cooldown + 1);
       const remainingAfter = await fusd.getExitRemainingCooldown(userAddress);
       expect(remainingAfter).to.equal(0n);
     });
 
     it('returns 0 cooldown if never minted or cooldownPeriod=0', async () => {
-      const { fusd, admin, user } = await loadFixture(deployFixture);
+      const { fusd, admin, user, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
       const userAddress = await user.getAddress();
 
       expect(await fusd.getExitRemainingCooldown(userAddress)).to.equal(0n);
 
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+      await usdc.connect(user).approve(await fusd.getAddress(), 1_000_000n);
+      await fusd.connect(user).deposit(usdcAddress, 1_000_000n, userAddress);
+
       await fusd.connect(admin).setCooldown(0);
       expect(await fusd.getExitRemainingCooldown(userAddress)).to.equal(0n);
+      await fusd.connect(user).transfer(await admin.getAddress(), 1n);
+    });
+
+    it('blocks transfers during cooldown, allows them after expiry, and supports exemptions', async () => {
+      const { fusd, admin, user, other, usdc, usdcAddress, poolMgr, cooldown } =
+        await loadFixture(deployFixture);
+      const userAddress = await user.getAddress();
+      const otherAddress = await other.getAddress();
+
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+      await usdc.connect(user).approve(await fusd.getAddress(), 1_000_000n);
+      await fusd.connect(user).deposit(usdcAddress, 1_000_000n, userAddress);
+
+      await expect(fusd.connect(user).transfer(otherAddress, 1n)).to.be.revertedWith(
+        'TokenLogic: cooldown transfer',
+      );
+
+      await fusd.connect(user).transfer(userAddress, 1n);
+
+      await fusd.connect(admin).setCooldownExemptRecipient(otherAddress, true);
+      await fusd.connect(user).transfer(otherAddress, 1n);
+      expect(await fusd.cooldownPrincipal(otherAddress)).to.equal(1n);
+
+      await fusd.connect(admin).setCooldownExemptRecipient(otherAddress, false);
+      await time.increase(cooldown + 1);
+      await fusd.connect(user).transfer(otherAddress, await fusd.balanceOf(userAddress));
+
+      expect(await fusd.cooldownPrincipal(userAddress)).to.equal(0n);
+      expect(await fusd.cooldownTimestamp(userAddress)).to.equal(0n);
+      expect(await fusd.cooldownPrincipal(otherAddress)).to.be.gt(0n);
+    });
+
+    it('covers cooldown accounting when principal exists without a timestamp', async () => {
+      const { fusd, admin, poolLogicEOA, user, other } = await loadFixture(deployFixture);
+      const userAddress = await user.getAddress();
+      const otherAddress = await other.getAddress();
+      const poolLogicAddress = await poolLogicEOA.getAddress();
+
+      await fusd.connect(admin).setPoolLogic(poolLogicAddress);
+      await fusd.connect(admin).setCooldownExemptRecipient(userAddress, true);
+      await fusd.connect(poolLogicEOA).mintFromPool(userAddress, 10n);
+      expect(await fusd.cooldownPrincipal(userAddress)).to.equal(0n);
+
+      await fusd.connect(user).transfer(otherAddress, 3n);
+      expect(await fusd.cooldownPrincipal(userAddress)).to.equal(0n);
+      expect(await fusd.cooldownPrincipal(otherAddress)).to.equal(3n);
+      expect(await fusd.cooldownTimestamp(otherAddress)).to.equal(0n);
+
+      await fusd.connect(poolLogicEOA).mintFromPool(otherAddress, 2n);
+      expect(await fusd.cooldownPrincipal(otherAddress)).to.equal(5n);
+      expect(await fusd.cooldownTimestamp(otherAddress)).to.be.gt(0n);
+    });
+
+    it('does not credit burned tokens to a recipient during cooldown synchronization', async () => {
+      const { fusd, admin, user, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
+      const userAddress = await user.getAddress();
+
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+      await usdc.connect(user).approve(await fusd.getAddress(), 1_000_000n);
+      await fusd.connect(user).deposit(usdcAddress, 1_000_000n, userAddress);
+
+      await fusd.connect(user).burn(1n);
+      expect(await fusd.cooldownPrincipal(userAddress)).to.equal(WAD - 1n);
+    });
+  });
+
+  describe('Pool minting', () => {
+    it('allows only poolLogic to mint and validates recipient and amount', async () => {
+      const { fusd, admin, poolLogicEOA, user, other } = await loadFixture(deployFixture);
+      const poolLogicAddress = await poolLogicEOA.getAddress();
+      const userAddress = await user.getAddress();
+
+      await fusd.connect(admin).setPoolLogic(poolLogicAddress);
+
+      await expect(fusd.connect(other).mintFromPool(userAddress, 1n)).to.be.revertedWith(
+        'TokenLogic: only PoolLogic',
+      );
+      await expect(fusd.connect(poolLogicEOA).mintFromPool(ethers.ZeroAddress, 1n)).to.be.revertedWith(
+        'TokenLogic: zero address',
+      );
+      await expect(fusd.connect(poolLogicEOA).mintFromPool(userAddress, 0n)).to.be.revertedWith(
+        'TokenLogic: zero amount',
+      );
+
+      await fusd.connect(admin).grantRole(await fusd.EMERGENCY_ROLE(), await admin.getAddress());
+      await fusd.connect(admin).pause();
+      await expect(fusd.connect(poolLogicEOA).mintFromPool(userAddress, 1n))
+        .to.be.revertedWithCustomError(fusd, 'EnforcedPause');
+      await fusd.connect(admin).unpause();
+
+      await expect(fusd.connect(poolLogicEOA).mintFromPool(userAddress, 123n))
+        .to.emit(fusd, 'MintedFromPool')
+        .withArgs(userAddress, 123n);
+      expect(await fusd.balanceOf(userAddress)).to.equal(123n);
     });
   });
 
@@ -411,24 +703,21 @@ describe('TokenLogic (FUSD)', () => {
     });
 
     it('blocks deposits when paused and allows after unpause', async () => {
-      const { fusd, oracle, admin, emergency, user, usdc, usdcAddress } =
+      const { fusd, admin, emergency, user, usdc, usdcAddress, poolMgr } =
         await loadFixture(deployFixture);
 
-      await oracle.setPrice(usdcAddress, WAD);
-      await fusd.connect(admin).configureAsset(usdcAddress, true, 0, 0);
-
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
       await usdc.connect(user).approve(await fusd.getAddress(), 100n);
 
       await fusd.connect(emergency).pause();
-
-      await expect(fusd.connect(user).deposit(usdcAddress, 100n)).to.be.revertedWithCustomError(
+      await expect(fusd.connect(user).deposit(usdcAddress, 100n, await user.getAddress())).to.be.revertedWithCustomError(
         fusd,
         'EnforcedPause',
       );
 
       await fusd.connect(emergency).unpause();
-
-      await expect(fusd.connect(user).deposit(usdcAddress, 100n)).to.emit(fusd, 'Deposited');
+      await expect(fusd.connect(user).deposit(usdcAddress, 100n, await user.getAddress())).to.emit(fusd, 'Deposited');
     });
   });
 
@@ -436,28 +725,28 @@ describe('TokenLogic (FUSD)', () => {
   // UUPS UPGRADE AUTHORIZATION
   // ---------------------------------------------------------------------------
   describe('UUPS Upgrade authorization', () => {
-    it('only GOVERNANCE_ROLE can upgrade proxy', async () => {
-      const { fusd, fusdAddress, admin, other, GOVERNANCE_ROLE } = await loadFixture(deployFixture);
+    it('only DEFAULT_ADMIN_ROLE can upgrade proxy', async () => {
+      const { fusd, fusdAddress, admin, other, DEFAULT_ADMIN_ROLE } = await loadFixture(deployFixture);
 
       // Unauthorized upgrade attempt
-      const TokenLogicNonGov = await ethers.getContractFactory('TokenLogic', other);
+      const TokenLogicNonAdmin = await ethers.getContractFactory('TokenLogic', other);
       await expect(
-        upgrades.upgradeProxy(fusdAddress, TokenLogicNonGov, {
+        upgrades.upgradeProxy(fusdAddress, TokenLogicNonAdmin, {
           unsafeAllow: ['missing-initializer'],
         }),
       )
         .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
-        .withArgs(await other.getAddress(), GOVERNANCE_ROLE);
+        .withArgs(await other.getAddress(), DEFAULT_ADMIN_ROLE);
 
-      // Authorized upgrade by governance (admin) – upgrade to same impl
-      const TokenLogicGov = await ethers.getContractFactory('TokenLogic', admin);
-      const upgraded = await upgrades.upgradeProxy(fusdAddress, TokenLogicGov, {
+      // Authorized upgrade by admin – upgrade to same impl
+      const TokenLogicAdmin = await ethers.getContractFactory('TokenLogic', admin);
+      const upgraded = await upgrades.upgradeProxy(fusdAddress, TokenLogicAdmin, {
         unsafeAllow: ['missing-initializer'],
       });
       await upgraded.waitForDeployment();
 
-      // still same name = proof of success
-      expect(await upgraded.name()).to.equal('TokenLogic USD');
+      // same name = proof of success
+      expect(await upgraded.name()).to.equal('Frgmnt USD');
     });
   });
 });

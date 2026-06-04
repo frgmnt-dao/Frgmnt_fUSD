@@ -158,6 +158,44 @@ describe('ERC20Guard', () => {
     expect(txs.length).to.equal(0);
   });
 
+  it('withdrawProcessing deducts reserved assets before calculating pro-rata amount', async () => {
+    const { guard, poolManager, token } = await deployMocks();
+    const pool = await poolManager.getAddress();
+
+    const total = 1000n * 10n ** 18n;
+    const reserved = 200n * 10n ** 18n;
+    await token.mint(pool, total);
+    await poolManager.setReservedAssetBalance(reserved);
+
+    const [withdrawAsset, withdrawAmount, txs] = await guard.withdrawProcessing.staticCall(
+      pool,
+      await token.getAddress(),
+      10n ** 18n,
+      ethers.ZeroAddress,
+    );
+
+    expect(withdrawAsset).to.equal(await token.getAddress());
+    expect(withdrawAmount).to.equal(total - reserved);
+    expect(txs.length).to.equal(0);
+  });
+
+  it('withdrawProcessing caps reserved assets to the actual balance', async () => {
+    const { guard, poolManager, token } = await deployMocks();
+    const pool = await poolManager.getAddress();
+
+    await token.mint(pool, 100n);
+    await poolManager.setReservedAssetBalance(1_000n);
+
+    const [, withdrawAmount] = await guard.withdrawProcessing.staticCall(
+      pool,
+      await token.getAddress(),
+      10n ** 18n,
+      ethers.ZeroAddress,
+    );
+
+    expect(withdrawAmount).to.equal(0n);
+  });
+
   it('getBalance returns ERC20 balance of pool', async () => {
     const { guard, poolManager, token } = await deployMocks();
     const pool = await poolManager.getAddress();
@@ -198,5 +236,35 @@ describe('ERC20Guard', () => {
 
     await guard.removeAssetCheck(pool, await token.getAddress());
     // no revert = success
+  });
+
+  it('removeAssetCheck reverts when another asset guard reports the token is in use', async () => {
+    const { guard, poolManager, token } = await deployMocks();
+    const pool = await poolManager.getAddress();
+    const protocolAsset = ethers.Wallet.createRandom().address;
+
+    const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
+    const protocolGuard = await MockAssetGuard.deploy(18);
+    await protocolGuard.waitForDeployment();
+    await protocolGuard.setRemoveTokenCheckResult(false);
+
+    await poolManager.setSupportedAsset(protocolAsset, false);
+    await poolManager.setAssetGuard(protocolAsset, await protocolGuard.getAddress());
+
+    await expect(
+      guard.removeAssetCheck(pool, await token.getAddress()),
+    ).to.be.revertedWithCustomError(guard, 'UsedAsset');
+  });
+
+  it('removeTokenCheck returns true for a plain ERC20 token', async () => {
+    const { guard, poolManager, token } = await deployMocks();
+
+    expect(
+      await guard.removeTokenCheck(
+        await poolManager.getAddress(),
+        await token.getAddress(),
+        await token.getAddress(),
+      ),
+    ).to.equal(true);
   });
 });

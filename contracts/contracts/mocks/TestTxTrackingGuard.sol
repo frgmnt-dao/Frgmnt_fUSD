@@ -8,6 +8,7 @@ pragma solidity ^0.8.24;
 contract TestTxTrackingGuard {
     uint16 public txType_;
     bool public isPublic_;
+    bool public tracking_ = true;
 
     address public lastPool;
     address public lastTo;
@@ -16,6 +17,10 @@ contract TestTxTrackingGuard {
     function setTxType(uint16 t, bool isPublicTx) external {
         txType_ = t;
         isPublic_ = isPublicTx;
+    }
+
+    function setTracking(bool tracking) external {
+        tracking_ = tracking;
     }
 
     function txGuard(
@@ -28,8 +33,8 @@ contract TestTxTrackingGuard {
         isPublic = isPublic_;
     }
 
-    function isTxTrackingGuard() external pure returns (bool) {
-        return true;
+    function isTxTrackingGuard() external view returns (bool) {
+        return tracking_;
     }
 
     function afterTxGuard(address poolManagerLogic, address to, bytes calldata data) external {

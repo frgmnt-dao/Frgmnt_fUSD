@@ -3,6 +3,10 @@ pragma solidity ^0.8.24;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+interface IMintManagerFeePool {
+    function mintManagerFee() external;
+}
+
 /// @notice Full-featured mock for IPoolManagerLogic / IManaged / IHasSupportedAsset
 /// implementing only what PoolLogic uses.
 contract TestPoolManagerLogic {
@@ -27,6 +31,11 @@ contract TestPoolManagerLogic {
     mapping(address => uint8) public assetDecimals; // asset decimals
     mapping(address => address) public assetGuard;
     mapping(address => address) public contractGuard;
+    mapping(address => bool) public allowedCallbackSenders;
+
+    // Ordered list for getSupportedAssets()
+    address[] private _assetList;
+    mapping(address => bool) private _assetInList;
 
     address public pool; // optional reference (not used by PoolLogic, but handy in tests)
 
@@ -78,6 +87,10 @@ contract TestPoolManagerLogic {
         return _totalFundValue;
     }
 
+    function factory() external view returns (address) {
+        return address(this);
+    }
+
     function setTotalFundValue(uint256 v) external {
         _totalFundValue = v;
     }
@@ -88,15 +101,51 @@ contract TestPoolManagerLogic {
         return supportedAssets[asset];
     }
 
+    function isDepositAsset(address asset) external view returns (bool) {
+        return supportedAssets[asset];
+    }
+
+    // Pool membership / privacy (always open by default)
+    bool public privatePool = false;
+    bool public memberAllowed = true;
+
+    function setPrivatePool(bool _private) external {
+        privatePool = _private;
+    }
+
+    function setMemberAllowed(bool allowed) external {
+        memberAllowed = allowed;
+    }
+
+    function isMemberAllowed(address) external view returns (bool) {
+        return memberAllowed;
+    }
+
     function setSupportedAsset(
         address asset,
         bool isSupported,
         uint256 price,
         uint8 decimals_
     ) external {
+        if (isSupported && !_assetInList[asset]) {
+            _assetList.push(asset);
+            _assetInList[asset] = true;
+        }
         supportedAssets[asset] = isSupported;
         assetPrice[asset] = price;
         assetDecimals[asset] = decimals_;
+    }
+
+    struct Asset {
+        address asset;
+        bool isDeposit;
+    }
+
+    function getSupportedAssets() external view returns (Asset[] memory assets) {
+        assets = new Asset[](_assetList.length);
+        for (uint256 i = 0; i < _assetList.length; i++) {
+            assets[i] = Asset({ asset: _assetList[i], isDeposit: true });
+        }
     }
 
     function getAssetPrice(address asset) external view returns (uint256) {
@@ -134,10 +183,22 @@ contract TestPoolManagerLogic {
         return contractGuard[target];
     }
 
+    function setAllowedCallbackSender(address caller, bool allowed) external {
+        allowedCallbackSenders[caller] = allowed;
+    }
+
+    function getAllowedCallbackSenders(address caller) external view returns (bool) {
+        return allowedCallbackSenders[caller];
+    }
+
     // ---- Optional pool backref ----
 
     function setPool(address _pool) external {
         pool = _pool;
+    }
+
+    function callMintManagerFee(address poolLogic_) external {
+        IMintManagerFeePool(poolLogic_).mintManagerFee();
     }
 
     // ---- trader (used in PoolLogic access control) ----
