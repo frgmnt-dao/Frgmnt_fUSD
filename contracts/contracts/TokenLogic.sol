@@ -100,7 +100,7 @@ contract TokenLogic is
         bool allowed_;
         /// @notice Asset decimals.
         uint256 decimals_;
-        /// @notice Maximum allowed deposit amount (raw units, not USD).
+        /// @notice Deprecated legacy per-asset cap field. maxDepositFusdSupply is enforced instead.
         uint256 cap_;
         /// @notice Total deposited in this asset (raw units).
         uint256 totalDeposited_;
@@ -108,6 +108,14 @@ contract TokenLogic is
 
     /// @notice Mapping from collateral token => its config.
     mapping(address => AssetConfig) public assetConfigs;
+
+    /// @notice Maximum outstanding fUSD level at which deposits may mint more fUSD.
+    /// @dev PoolLogic reward and fee mints still increase utilization but are not capped.
+    uint256 public maxDepositFusdSupply;
+
+    /// @notice Current fUSD outstanding used for deposit-cap utilization.
+    /// @dev Updated on every mint and burn, including deposits, PoolLogic mints, and withdrawals.
+    uint256 public protocolFusdOutstanding;
 
     // ---------------------------------------------------------------------
     //                                EVENTS
@@ -133,14 +141,24 @@ contract TokenLogic is
     /// @param asset Asset address.
     /// @param allowed Whether the asset is allowed for deposits.
     /// @param decimals Decimals of the asset.
-    /// @param cap Maximum total deposit cap for the asset (raw units).
+    /// @param cap Deprecated legacy per-asset cap value (raw units).
     event AssetConfigured(address indexed asset, bool allowed, uint256 decimals, uint256 cap);
 
-    /// @notice Emitted when an asset cap is updated.
+    /// @notice Emitted when a legacy asset cap value is updated.
+    /// @dev The stored value is kept for ABI/storage compatibility; deposits enforce maxDepositFusdSupply.
     /// @param asset Asset address.
-    /// @param oldCap Previous cap value.
-    /// @param newCap New cap value.
+    /// @param oldCap Previous legacy cap value.
+    /// @param newCap New legacy cap value.
     event AssetCapUpdated(address indexed asset, uint256 oldCap, uint256 newCap);
+
+    /// @notice Emitted when the deposit fUSD supply threshold is updated.
+    /// @param oldCap Previous cap in 18-decimal fUSD units.
+    /// @param newCap New cap in 18-decimal fUSD units.
+    event MaxDepositFusdSupplyUpdated(uint256 oldCap, uint256 newCap);
+
+    /// @notice Emitted when protocol fUSD outstanding is initialized for an upgrade.
+    /// @param outstanding Current tracked outstanding amount in 18-decimal fUSD units.
+    event ProtocolFusdOutstandingInitialized(uint256 outstanding);
 
     /// @notice Emitted when a user deposits collateral and mints FUSD.
     /// @param user Address receiving the FUSD.
@@ -274,7 +292,7 @@ contract TokenLogic is
      * @notice Configure or update a supported collateral asset.
      * @param _asset ERC20 token address.
      * @param _allowed Whether the asset is allowed to be deposited.
-     * @param _cap Maximum total deposit amount for this asset (raw units).
+     * @param _cap Deprecated legacy per-asset cap value (raw units).
      */
     function configureAsset(
         address _asset,
@@ -293,9 +311,9 @@ contract TokenLogic is
     }
 
     /**
-     * @notice Update only the cap of a previously configured asset.
+     * @notice Update only the deprecated legacy cap of a previously configured asset.
      * @param asset Asset address.
-     * @param newCap New cap value (raw units).
+     * @param newCap New legacy cap value (raw units).
      */
     function setAssetCap(address asset, uint256 newCap) external onlyRole(DEFAULT_ADMIN_ROLE) {
         AssetConfig storage cfg = assetConfigs[asset];
@@ -306,6 +324,32 @@ contract TokenLogic is
         uint256 old = cfg.cap_;
         cfg.cap_ = newCap;
         emit AssetCapUpdated(asset, old, newCap);
+    }
+
+    /**
+     * @notice Update the fUSD outstanding threshold enforced only for deposits.
+     * @dev PoolLogic reward and fee mints are not capped, but they increase cap utilization.
+     * @param newCap New cap value in 18-decimal fUSD units.
+     */
+    function setMaxDepositFusdSupply(uint256 newCap) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        uint256 oldCap = maxDepositFusdSupply;
+        maxDepositFusdSupply = newCap;
+        emit MaxDepositFusdSupplyUpdated(oldCap, newCap);
+    }
+
+    /**
+     * @notice Initialize deposit cap state during an upgrade from a version without this tracker.
+     * @dev Must be called once after upgrade so existing fUSD supply is counted for deposit capacity.
+     * @param newCap New cap value in 18-decimal fUSD units.
+     */
+    function initializeDepositFusdCap(
+        uint256 newCap
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) reinitializer(2) {
+        uint256 oldCap = maxDepositFusdSupply;
+        protocolFusdOutstanding = totalSupply();
+        maxDepositFusdSupply = newCap;
+        emit ProtocolFusdOutstandingInitialized(protocolFusdOutstanding);
+        emit MaxDepositFusdSupplyUpdated(oldCap, newCap);
     }
 
     // Optional governance hook to exempt other system contracts or addresses if needed.
@@ -448,12 +492,15 @@ contract TokenLogic is
         require(cfg.allowed_, "TokenLogic: asset not allowed");
         require(amount > 0, "TokenLogic: zero amount");
         require(to != address(0), "TokenLogic: zero address");
-        require(cfg.totalDeposited_ + amount <= cfg.cap_, "TokenLogic: cap exceeded");
 
         //  Compute USD value of the deposit, normalized to 18 decimals
         uint256 priceUSD = poolManagerLogic.getAssetPrice(asset); // 18 decimals
         uint256 fusdAmount = _convertToUSD(amount, cfg.decimals_, priceUSD);
         require(fusdAmount >= minDepositUSD, "TokenLogic: below minimum deposit");
+        require(
+            protocolFusdOutstanding + fusdAmount <= maxDepositFusdSupply,
+            "TokenLogic: deposit cap exceeded"
+        );
 
         // User-defined minimum output protection
         require(fusdAmount >= minFusdAmount, "TokenLogic: slippage");
@@ -635,6 +682,13 @@ contract TokenLogic is
             return;
         }
 
+        if (isMint) {
+            protocolFusdOutstanding += amount;
+        } else if (to == address(0)) {
+            uint256 outstanding = protocolFusdOutstanding;
+            protocolFusdOutstanding = amount > outstanding ? 0 : outstanding - amount;
+        }
+
         // --------------------------------------------------
         // HANDLE MINT COOLDOWN (future-proof safety)
         // --------------------------------------------------
@@ -676,5 +730,5 @@ contract TokenLogic is
     }
 
     // Reserve storage gap for future upgrades
-    uint256[40] private __gap;
+    uint256[38] private __gap;
 }

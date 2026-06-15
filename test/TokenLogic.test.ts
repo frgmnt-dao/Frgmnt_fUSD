@@ -64,6 +64,7 @@ describe('TokenLogic (FUSD)', () => {
     );
     await fusd.waitForDeployment();
     const fusdAddress = await fusd.getAddress();
+    await fusd.connect(admin).setMaxDepositFusdSupply(ethers.MaxUint256);
 
     const DEFAULT_ADMIN_ROLE = await fusd.DEFAULT_ADMIN_ROLE();
     const EMERGENCY_ROLE = await fusd.EMERGENCY_ROLE();
@@ -77,6 +78,7 @@ describe('TokenLogic (FUSD)', () => {
       emergencyAddress,
       poolLogicEOA,
       poolLogicAddress,
+      mockPoolLogic,
       poolMgr,
       poolMgrAddress,
       user,
@@ -272,7 +274,7 @@ describe('TokenLogic (FUSD)', () => {
       );
     });
 
-    it('setAssetCap: only governance and only for configured assets', async () => {
+    it('setAssetCap: only governance and only for configured assets as legacy metadata', async () => {
       const { fusd, admin, other, usdcAddress, DEFAULT_ADMIN_ROLE, poolMgr } = await loadFixture(deployFixture);
 
       // not configured yet — reverts with 'not allowed'
@@ -306,6 +308,21 @@ describe('TokenLogic (FUSD)', () => {
       await expect(fusd.connect(admin).setAssetCap(usdcAddress, 1)).to.be.revertedWith(
         'TokenLogic: _decimals = 0',
       );
+    });
+
+    it('setMaxDepositFusdSupply: only governance and updates the deposit fUSD threshold', async () => {
+      const { fusd, admin, other, DEFAULT_ADMIN_ROLE } = await loadFixture(deployFixture);
+      const newCap = 10_000n * WAD;
+
+      await expect(fusd.connect(other).setMaxDepositFusdSupply(newCap))
+        .to.be.revertedWithCustomError(fusd, 'AccessControlUnauthorizedAccount')
+        .withArgs(await other.getAddress(), DEFAULT_ADMIN_ROLE);
+
+      await expect(fusd.connect(admin).setMaxDepositFusdSupply(newCap))
+        .to.emit(fusd, 'MaxDepositFusdSupplyUpdated')
+        .withArgs(ethers.MaxUint256, newCap);
+
+      expect(await fusd.maxDepositFusdSupply()).to.equal(newCap);
     });
   });
 
@@ -358,22 +375,71 @@ describe('TokenLogic (FUSD)', () => {
       expect(await fusd.balanceOf(userAddress)).to.equal(1000n * WAD);
     });
 
-    it('enforces per-asset cap', async () => {
-      const { fusd, admin, user, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
+    it('enforces the deposit fUSD threshold across supported assets', async () => {
+      const { fusd, admin, user, usdc, usdcAddress, dai, daiAddress, poolMgr } =
+        await loadFixture(deployFixture);
 
       await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
-      const cap = 1000n * 10n ** 6n;
-      await fusd.connect(admin).configureAsset(usdcAddress, true, cap);
+      await poolMgr.setSupportedAsset(daiAddress, true, WAD / 2n, 18);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, 1n);
+      await fusd.connect(admin).configureAsset(daiAddress, true, 1n);
+      await fusd.connect(admin).setMaxDepositFusdSupply(1000n * WAD);
 
-      await usdc.connect(user).approve(await fusd.getAddress(), cap + 1n);
-      await fusd.connect(user).deposit(usdcAddress, cap, await user.getAddress());
+      const usdcAmount = 600n * 10n ** 6n;
+      const daiAmount = 800n * WAD;
+      await usdc.connect(user).approve(await fusd.getAddress(), usdcAmount + 1n);
+      await dai.connect(user).approve(await fusd.getAddress(), daiAmount);
+      await fusd.connect(user).deposit(usdcAddress, usdcAmount, await user.getAddress());
+      await fusd.connect(user).deposit(daiAddress, daiAmount, await user.getAddress());
+
+      expect(await fusd.protocolFusdOutstanding()).to.equal(1000n * WAD);
 
       await expect(fusd.connect(user).deposit(usdcAddress, 1n, await user.getAddress())).to.be.revertedWith(
-        'TokenLogic: cap exceeded',
+        'TokenLogic: deposit cap exceeded',
       );
 
       const cfg = await fusd.assetConfigs(usdcAddress);
-      expect(cfg.totalDeposited_).to.equal(cap);
+      expect(cfg.totalDeposited_).to.equal(usdcAmount);
+      expect(cfg.cap_).to.equal(1n);
+    });
+
+    it('allows PoolLogic rewards above the deposit threshold but blocks further deposits', async () => {
+      const { fusd, admin, poolLogicEOA, user, usdc, usdcAddress, poolMgr } =
+        await loadFixture(deployFixture);
+      const fusdAddress = await fusd.getAddress();
+      const poolLogicAddress = await poolLogicEOA.getAddress();
+
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, 1n);
+      await fusd.connect(admin).setMaxDepositFusdSupply(1000n * WAD);
+      await usdc.connect(user).approve(fusdAddress, 900n * 10n ** 6n);
+      await fusd.connect(user).deposit(usdcAddress, 900n * 10n ** 6n, await user.getAddress());
+
+      await fusd.connect(admin).setPoolLogic(poolLogicAddress);
+      await fusd.connect(poolLogicEOA).mintFromPool(await user.getAddress(), 200n * WAD);
+      expect(await fusd.protocolFusdOutstanding()).to.equal(1100n * WAD);
+
+      await usdc.connect(user).approve(fusdAddress, 1n * 10n ** 6n);
+      await expect(fusd.connect(user).deposit(usdcAddress, 1n * 10n ** 6n, await user.getAddress()))
+        .to.be.revertedWith('TokenLogic: deposit cap exceeded');
+    });
+
+    it('restores deposit capacity when FUSD is burned', async () => {
+      const { fusd, admin, user, usdc, usdcAddress, poolMgr } = await loadFixture(deployFixture);
+      const fusdAddress = await fusd.getAddress();
+
+      await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+      await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+      await fusd.connect(admin).setMaxDepositFusdSupply(1000n * WAD);
+      await usdc.connect(user).approve(fusdAddress, 1001n * 10n ** 6n);
+      await fusd.connect(user).deposit(usdcAddress, 1000n * 10n ** 6n, await user.getAddress());
+
+      await expect(fusd.connect(user).deposit(usdcAddress, 1n, await user.getAddress()))
+        .to.be.revertedWith('TokenLogic: deposit cap exceeded');
+
+      await fusd.connect(user).burn(1n * WAD);
+      await fusd.connect(user).deposit(usdcAddress, 1n * 10n ** 6n, await user.getAddress());
+      expect(await fusd.protocolFusdOutstanding()).to.equal(1000n * WAD);
     });
 
     it('reverts if oracle price not set (price = 0)', async () => {
