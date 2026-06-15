@@ -7,6 +7,7 @@ import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IManaged } from "./interfaces/IManaged.sol";
 import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
@@ -120,13 +121,13 @@ contract PoolLogic is
     /// @notice Pool creation time
     uint256 public creationTime;
 
-    /// @notice Reward per share in FUSD (scaled 1e18)
+    /// @notice Legacy reward-per-share accumulator retained for upgrade migration.
     uint256 public rewardPerShare;
 
     /// assets that users already have a claim on
     uint256 public accountedAssets;
 
-    // Total rewards ever accrued by the protocol (USD-denominated, via rewardPerShare)
+    // Total rewards ever accrued by the protocol (USD-denominated)
     uint256 public totalRewardAccrued;
 
     // Total rewards harvested (claimed) by users
@@ -160,6 +161,15 @@ contract PoolLogic is
     ///      committed to Finalized requests and not yet released via claim.
     mapping(address => uint256) public reservedAssetBalance;
 
+    /// @notice Compounded reward index for implicit auto-compounding rewards, scaled by 1e18.
+    uint256 public compoundedRewardIndex;
+
+    /// @notice Old rewardPerShare snapshot used to lazily migrate existing stakers.
+    uint256 public autoCompoundStartRewardPerShare;
+
+    /// @notice Tracks users already migrated from rewardDebt accounting to index snapshots.
+    mapping(address => bool) public rewardIndexInitialized;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -192,6 +202,8 @@ contract PoolLogic is
     error QueuedWithdrawalDisabled();
     error OnlyMemberAllowed();
     error WithdrawAmountTooSmall();
+    error AutoCompoundingAlreadyInitialized();
+    error AutoCompoundingNotInitialized();
 
     /// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
     error ComplexWithdrawFailed(address asset, address guard);
@@ -291,6 +303,14 @@ contract PoolLogic is
         lastFeeMintTime = block.timestamp;
         tokenPriceAtLastFeeMint = 1e18;
         isImmediateWithdrawEnabled = true;
+        compoundedRewardIndex = 1e18;
+    }
+
+    /// @custom:oz-upgrades-validate-as-initializer
+    function initializeAutoCompounding() external onlyOwner reinitializer(2) {
+        if (compoundedRewardIndex != 0) revert AutoCompoundingAlreadyInitialized();
+        compoundedRewardIndex = 1e18;
+        autoCompoundStartRewardPerShare = rewardPerShare;
     }
 
     // ============================================================
@@ -323,6 +343,19 @@ contract PoolLogic is
         return IPoolManagerLogic(poolManagerLogic).totalFundValue();
     }
 
+    function _unclaimedRewards() internal view returns (uint256) {
+        return totalRewardAccrued - totalRewardHarvested;
+    }
+
+    function _managementFeeBase() internal view returns (uint256) {
+        return IERC20(fusd).totalSupply() + _unclaimedRewards();
+    }
+
+    function _requireAutoCompoundingInitialized() internal view returns (uint256 index) {
+        index = compoundedRewardIndex;
+        if (index == 0) revert AutoCompoundingNotInitialized();
+    }
+
     // ============================================================
     // =                MANAGEMENT FEE & REWARDS                   =
     // ============================================================
@@ -347,10 +380,10 @@ contract PoolLogic is
      *    Net yield and Performance fee are computed in USD.
      * 3) Compute time-based management fee using
      *    FundCalculationLibrary.calculateManagementFee().
-     * 4) Settle the manager's pending rewards BEFORE modifying rewardPerShare
+     * 4) Settle the manager's pending rewards BEFORE modifying the reward index
      *    or minting new shares, to avoid retroactive reward dilution.
-     * 5) Distribute net yield (after removing management fee) to existing stakers by
-     *    increasing rewardPerShare.
+     * 5) Distribute net yield (after removing management fee) to existing stakers and
+     *    unharvested rewards by increasing compoundedRewardIndex.
      * 6) Mint performance and management fee shares to the manager in FUSD.
      * 7) Update manager reward debt.
      *
@@ -361,8 +394,9 @@ contract PoolLogic is
      */
 
     function _accrueYield() internal {
+        uint256 index = _requireAutoCompoundingInitialized();
         uint256 totalValue = _totalValue();
-        uint256 totalFusd = IERC20(fusd).totalSupply();
+        uint256 totalFusd = _managementFeeBase();
 
         (
             uint256 _performanceFeeNumerator,
@@ -390,24 +424,28 @@ contract PoolLogic is
 
         address mgr = _manager();
 
-        // 0) Settle manager pending rewards BEFORE changing rewardPerShare or balance
+        // 0) Settle manager pending rewards BEFORE changing the reward index
         _updateUserReward(mgr);
 
         // 1) distribute net yield to stakers
-        uint256 _supply = totalSupply();
         if (_managementFee > _netYield) {
             _managementFee = _netYield;
         }
         _netYield = _netYield - _managementFee;
-        totalRewardAccrued += _netYield;
         totalManagementFee += _managementFee;
         totalPerformanceFee += _performanceFee;
         if (totalValue > accountedAssets) {
             accountedAssets = totalValue;
         }
 
-        if (_supply > 0 && _netYield > 0) {
-            rewardPerShare += (_netYield * 1e18) / _supply;
+        uint256 effectiveSupply = totalSupply() + _unclaimedRewards();
+        if (effectiveSupply > 0 && _netYield > 0) {
+            compoundedRewardIndex = Math.mulDiv(
+                index,
+                effectiveSupply + _netYield,
+                effectiveSupply
+            );
+            totalRewardAccrued += _netYield;
         }
 
         // 2) mint performance and management fee to manager in FUSD
@@ -422,18 +460,65 @@ contract PoolLogic is
         lastFeeMintTime = _lastFeeMintTime;
     }
 
+    function _currentPendingReward(address user) internal view returns (uint256) {
+        uint256 index = _requireAutoCompoundingInitialized();
+        UserReward memory ur = userRewards[user];
+        uint256 balance = balanceOf(user);
+        uint256 pending = ur.pending;
+        uint256 snapshot = ur.rewardDebt;
+
+        if (!rewardIndexInitialized[user]) {
+            uint256 accumulated = Math.mulDiv(
+                balance,
+                autoCompoundStartRewardPerShare,
+                1e18
+            );
+
+            if (accumulated > ur.rewardDebt) {
+                pending += accumulated - ur.rewardDebt;
+            }
+
+            snapshot = 1e18;
+        } else if (snapshot == 0) {
+            snapshot = 1e18;
+        }
+
+        uint256 effectiveBalance = balance + pending;
+        uint256 currentEffective = Math.mulDiv(effectiveBalance, index, snapshot);
+
+        if (currentEffective <= balance) {
+            return 0;
+        }
+
+        return currentEffective - balance;
+    }
+
+    function _migrateRewardIndex(address user) internal {
+        if (user == address(0) || rewardIndexInitialized[user]) return;
+
+        UserReward storage ur = userRewards[user];
+        uint256 accumulated = Math.mulDiv(
+            balanceOf(user),
+            autoCompoundStartRewardPerShare,
+            1e18
+        );
+
+        if (accumulated > ur.rewardDebt) {
+            ur.pending += accumulated - ur.rewardDebt;
+        }
+
+        ur.rewardDebt = 1e18;
+        rewardIndexInitialized[user] = true;
+    }
+
     function _updateUserReward(address user) internal {
         if (user == address(0)) return;
 
+        _migrateRewardIndex(user);
+
         UserReward storage ur = userRewards[user];
-        uint256 balance = balanceOf(user);
-        uint256 accumulated = (balance * rewardPerShare) / 1e18;
-
-        if (accumulated > ur.rewardDebt) {
-            ur.pending += (accumulated - ur.rewardDebt);
-        }
-
-        ur.rewardDebt = accumulated;
+        ur.pending = _currentPendingReward(user);
+        ur.rewardDebt = _requireAutoCompoundingInitialized();
     }
 
     /// @notice Called by PoolManagerLogic.commitFeeIncrease()
@@ -492,7 +577,7 @@ contract PoolLogic is
 
         // update rewardDebt after mint
         UserReward storage ur = userRewards[msg.sender];
-        ur.rewardDebt = (balanceOf(msg.sender) * rewardPerShare) / 1e18;
+        ur.rewardDebt = _requireAutoCompoundingInitialized();
 
         if (feeFusd > 0) {
             IERC20(fusd).safeTransfer(_manager(), feeFusd);
@@ -512,7 +597,7 @@ contract PoolLogic is
         _burn(msg.sender, shareAmount);
 
         UserReward storage ur = userRewards[msg.sender];
-        ur.rewardDebt = (balanceOf(msg.sender) * rewardPerShare) / 1e18;
+        ur.rewardDebt = _requireAutoCompoundingInitialized();
 
         IERC20(fusd).safeTransfer(msg.sender, shareAmount);
 
@@ -525,6 +610,7 @@ contract PoolLogic is
         if (amount == 0) revert NothingToHarvest();
         ur.pending = 0;
         totalRewardHarvested += amount;
+        ur.rewardDebt = _requireAutoCompoundingInitialized();
         ITokenLogic(fusd).mintFromPool(msg.sender, amount);
         emit Harvest(msg.sender, amount);
     }
@@ -1026,14 +1112,7 @@ contract PoolLogic is
     // ============================================================
 
     function pendingReward(address user) external view returns (uint256) {
-        UserReward memory ur = userRewards[user];
-        uint256 balance = balanceOf(user);
-        uint256 acc = (balance * rewardPerShare) / 1e18;
-
-        if (acc > ur.rewardDebt) {
-            return ur.pending + (acc - ur.rewardDebt);
-        }
-        return ur.pending;
+        return _currentPendingReward(user);
     }
 
     function getUserRequests(address user) external view returns (uint256[] memory) {
@@ -1050,7 +1129,7 @@ contract PoolLogic is
     /// @return fee available manager fee of the pool (in pool tokens)
     function calculateAvailableManagerFee() public view returns (uint256 fee) {
         uint256 totalValue = _totalValue();
-        uint256 totalFusd = IERC20(fusd).totalSupply();
+        uint256 totalFusd = _managementFeeBase();
 
         (
             uint256 _performanceFeeNumerator,

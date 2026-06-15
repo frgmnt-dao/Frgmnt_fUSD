@@ -108,6 +108,13 @@ const config: HardhatUserConfig = {
     ],
 
     overrides: {
+      'contracts/contracts/PoolLogic.sol': {
+        version: '0.8.24',
+        settings: {
+          optimizer: { enabled: true, runs: 1 },
+        },
+      },
+
       '@uniswap/v3-core/contracts/**/*.sol': {
         version: '0.7.6',
         settings: {
