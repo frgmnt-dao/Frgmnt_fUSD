@@ -1,4 +1,8 @@
 module.exports = {
+  // Normal Hardhat compilation stays on the faster non-IR path.
+  // Coverage instrumentation adds stack pressure, so coverage uses IR only here.
+  viaIR: true,
+  irMinimum: true,
   skipFiles: [
     // Mocks — test helpers, not production code
     'contracts/mocks',
