@@ -15,12 +15,7 @@ contract MockPoolManagerLogicWithAssets {
 
     struct Asset {
         address asset;
-        // If your real IHasSupportedAsset.Asset struct has more fields,
-        // add them here in the same order, e.g.:
-        // bool isDeposit;
-        // bool isWithdraw;
-        // bool isBorrow;
-        // bool isShort;
+        bool isDeposit; // matches IHasSupportedAsset.Asset layout
     }
 
     mapping(address => bool) public supported;
@@ -53,7 +48,7 @@ contract MockPoolManagerLogicWithAssets {
     ///      getSupportedAssets() returns a non-empty set for the guard loops.
     function setSupportedAsset(address asset, bool isSupported) external {
         if (!supported[asset] && isSupported) {
-            _assets.push(Asset({ asset: asset }));
+            _assets.push(Asset({ asset: asset, isDeposit: true }));
         }
         supported[asset] = isSupported;
     }
@@ -68,5 +63,34 @@ contract MockPoolManagerLogicWithAssets {
     ///      existing debt positions via the Aave data provider.
     function getSupportedAssets() external view returns (Asset[] memory) {
         return _assets;
+    }
+
+    // ----------------- IHasAssetInfo-like -----------------
+
+    /// @notice Delegates asset type lookup to the factory (IHasAssetInfo).
+    function getAssetType(address asset) external view returns (uint16) {
+        (bool ok, bytes memory data) = _factory.staticcall(
+            abi.encodeWithSignature("getAssetType(address)", asset)
+        );
+        if (!ok || data.length == 0) return 0;
+        return abi.decode(data, (uint16));
+    }
+
+    /// @notice Delegates asset price lookup to the factory.
+    function getAssetPrice(address asset) external view returns (uint256) {
+        (bool ok, bytes memory data) = _factory.staticcall(
+            abi.encodeWithSignature("getAssetPrice(address)", asset)
+        );
+        if (!ok || data.length == 0) return 0;
+        return abi.decode(data, (uint256));
+    }
+
+    /// @notice Delegates maximum supported asset count to the factory.
+    function getMaximumSupportedAssetCount() external view returns (uint256) {
+        (bool ok, bytes memory data) = _factory.staticcall(
+            abi.encodeWithSignature("getMaximumSupportedAssetCount()")
+        );
+        if (!ok || data.length == 0) return 50;
+        return abi.decode(data, (uint256));
     }
 }

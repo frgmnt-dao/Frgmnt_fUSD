@@ -3,6 +3,12 @@ pragma solidity ^0.8.24;
 
 import { CLPriceLibrary } from "../utils/CLPriceLibrary.sol";
 import { FundCalculationLibrary } from "../utils/FundCalculationLibrary.sol";
+import { AddressHelper } from "../utils/AddressHelper.sol";
+import { MorphoChecksLib } from "../utils/MorphoChecksLib.sol";
+import { MorphoMathLib } from "../utils/MorphoMathLib.sol";
+import { PrecisionHelper } from "../utils/PrecisionHelper.sol";
+import { SafeERC20 } from "../utils/SafeERC20.sol";
+import { IERC20 } from "../interfaces/IERC20.sol";
 import { TxDataUtils } from "../utils/TxDataUtils.sol";
 
 contract TestCLPriceLibrary {
@@ -72,6 +78,167 @@ contract TestFundCalculationLibrary {
 contract TestTxDataUtils is TxDataUtils {
     function exposedSliceUint(bytes memory data, uint256 start) external pure returns (uint256) {
         return sliceUint(data, start);
+    }
+}
+
+contract TestAddressHelper {
+    uint256 public value;
+
+    function tryCall(address to, bytes memory data) external returns (bool) {
+        return AddressHelper.tryAssemblyCall(to, data);
+    }
+
+    function tryDelegateCall(address to, bytes memory data) external returns (bool) {
+        return AddressHelper.tryAssemblyDelegateCall(to, data);
+    }
+}
+
+contract TestAddressHelperTarget {
+    uint256 public value;
+
+    function setValue(uint256 newValue) external {
+        value = newValue;
+    }
+
+    function failWithReason() external pure {
+        revert("target failed");
+    }
+}
+
+contract TestMorphoMathLib {
+    function oracleMinOut(
+        address factory,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 slippageBps,
+        uint24 fee
+    ) external view returns (uint256) {
+        return MorphoMathLib.oracleMinOut(factory, tokenIn, tokenOut, amountIn, slippageBps, fee);
+    }
+
+    function oracleMaxIn(
+        address factory,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountOut,
+        uint256 slippageBps,
+        uint24 fee
+    ) external view returns (uint256) {
+        return MorphoMathLib.oracleMaxIn(factory, tokenIn, tokenOut, amountOut, slippageBps, fee);
+    }
+
+    function effectiveSlippage(uint256 slippageBps, uint256 fee) external pure returns (uint256) {
+        return MorphoMathLib._getEffectiveSlippage(slippageBps, fee);
+    }
+
+    function mulPortionRoundUp(uint256 x, uint256 p) external pure returns (uint256) {
+        return MorphoMathLib.mulPortionRoundUp(x, p);
+    }
+
+    function mulPortionRoundDown(uint256 x, uint256 p) external pure returns (uint256) {
+        return MorphoMathLib.mulPortionRoundDown(x, p);
+    }
+}
+
+contract TestMorphoChecksLib {
+    function removeAssetCheck(address morpho, address morphoManager, address pool) external view {
+        MorphoChecksLib.removeAssetCheck(morpho, morphoManager, pool);
+    }
+
+    function removeTokenCheck(
+        address morpho,
+        address morphoManager,
+        address pool,
+        address token
+    ) external view returns (bool) {
+        return MorphoChecksLib.removeTokenCheck(morpho, morphoManager, pool, token);
+    }
+}
+
+contract TestPrecisionHelper {
+    function getPrecisionForConversion(address token) external view returns (uint256) {
+        return PrecisionHelper.getPrecisionForConversion(token);
+    }
+}
+
+contract TestSafeERC20 {
+    using SafeERC20 for IERC20;
+
+    function safeTransfer(IERC20 token, address to, uint256 value) external {
+        token.safeTransfer(to, value);
+    }
+
+    function safeTransferFrom(IERC20 token, address from, address to, uint256 value) external {
+        token.safeTransferFrom(from, to, value);
+    }
+
+    function safeApprove(IERC20 token, address spender, uint256 value) external {
+        token.safeApprove(spender, value);
+    }
+
+    function safeIncreaseAllowance(IERC20 token, address spender, uint256 value) external {
+        token.safeIncreaseAllowance(spender, value);
+    }
+
+    function safeDecreaseAllowance(IERC20 token, address spender, uint256 value) external {
+        token.safeDecreaseAllowance(spender, value);
+    }
+}
+
+contract TestFalseReturnERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
+    function transfer(address, uint256) external pure returns (bool) {
+        return false;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        allowance[msg.sender][spender] = value;
+        return false;
+    }
+
+    function transferFrom(address, address, uint256) external pure returns (bool) {
+        return false;
+    }
+}
+
+contract TestNoReturnERC20 {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function totalSupply() external pure returns (uint256) {
+        return 0;
+    }
+
+    function transfer(address to, uint256 value) external {
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+    }
+
+    function approve(address spender, uint256 value) external {
+        allowance[msg.sender][spender] = value;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external {
+        uint256 currentAllowance = allowance[from][msg.sender];
+        require(currentAllowance >= value, "allowance");
+        allowance[from][msg.sender] = currentAllowance - value;
+        balanceOf[from] -= value;
+        balanceOf[to] += value;
     }
 }
 

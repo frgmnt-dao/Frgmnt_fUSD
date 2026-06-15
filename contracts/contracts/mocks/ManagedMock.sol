@@ -13,4 +13,9 @@ contract ManagedMock is Managed {
     function isMember(address a) external view returns (bool) {
         return _isMemberAllowed(a);
     }
+
+    // Expose _changeManager as a public function for tests
+    function changeManager(address newManager, string memory newManagerName) external onlyManager {
+        _changeManager(newManager, newManagerName);
+    }
 }

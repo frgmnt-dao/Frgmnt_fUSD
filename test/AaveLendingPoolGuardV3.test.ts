@@ -7,6 +7,8 @@ describe('AaveLendingPoolGuardV3', () => {
   let dataProvider: Contract;
   let factory: Contract;
   let poolManager: Contract;
+  let poolLogicCaller: Contract; // acts as poolLogic (msg.sender for txGuard calls)
+  let aavePool: Contract;
 
   let poolLogicAddr: string;
   let lendingPool: string;
@@ -43,13 +45,21 @@ describe('AaveLendingPoolGuardV3', () => {
   }
 
   beforeEach(async () => {
-    poolLogicAddr = ethers.Wallet.createRandom().address;
-    lendingPool = ethers.Wallet.createRandom().address;
-
     assetLending = ethers.Wallet.createRandom().address;
     assetLending2 = ethers.Wallet.createRandom().address;
     assetNonLending = ethers.Wallet.createRandom().address;
     unsupportedAsset = ethers.Wallet.createRandom().address;
+
+    const AavePool = await ethers.getContractFactory('MockAaveV3Pool');
+    aavePool = await AavePool.deploy();
+    await aavePool.waitForDeployment();
+    lendingPool = await aavePool.getAddress();
+
+    // Deploy pool logic caller (acts as poolLogic, msg.sender for txGuard)
+    const CallerFactory = await ethers.getContractFactory('MockPoolLogicCaller');
+    poolLogicCaller = await CallerFactory.deploy();
+    await poolLogicCaller.waitForDeployment();
+    poolLogicAddr = await poolLogicCaller.getAddress();
 
     // Data provider
     const DP = await ethers.getContractFactory('MockAaveProtocolDataProvider');
@@ -89,6 +99,23 @@ describe('AaveLendingPoolGuardV3', () => {
     await expect(G.deploy(ZeroAddress)).to.be.revertedWith('Frgmnt: zero V3 provider');
   });
 
+  it('txGuard reverts unless called by pool logic and ignores unknown selectors', async () => {
+    const data = aaveIface.encodeFunctionData('supply', [assetLending, ethers.parseEther('1'), poolLogicAddr, 0]);
+
+    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+      'Frgmnt: not pool logic',
+    );
+
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(
+      guard.target,
+      poolManager.target,
+      lendingPool,
+      '0x12345678',
+    );
+    expect(txType).to.equal(0);
+    expect(isPublic).to.equal(false);
+  });
+
   /*──────────────────────────────────────────────────────────────
                          SUPPLY / DEPOSIT
   ──────────────────────────────────────────────────────────────*/
@@ -98,11 +125,7 @@ describe('AaveLendingPoolGuardV3', () => {
 
     const data = aaveIface.encodeFunctionData('supply', [assetLending, amount, poolLogicAddr, 0]);
 
-    const [txType, isPublic] = await guard.txGuard.staticCall(
-      poolManager.target,
-      lendingPool,
-      data,
-    );
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(guard.target, poolManager.target, lendingPool, data);
 
     expect(txType).to.equal(TX.AaveDeposit);
     expect(isPublic).to.equal(false);
@@ -116,7 +139,7 @@ describe('AaveLendingPoolGuardV3', () => {
       0,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: not lending-enabled',
     );
   });
@@ -131,7 +154,7 @@ describe('AaveLendingPoolGuardV3', () => {
       0,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: aave not enabled',
     );
   });
@@ -147,7 +170,7 @@ describe('AaveLendingPoolGuardV3', () => {
       0,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: unsupported deposit asset',
     );
   });
@@ -160,7 +183,7 @@ describe('AaveLendingPoolGuardV3', () => {
       0,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: recipient not pool',
     );
   });
@@ -174,11 +197,7 @@ describe('AaveLendingPoolGuardV3', () => {
 
     const data = aaveIface.encodeFunctionData('withdraw', [assetLending, amount, poolLogicAddr]);
 
-    const [txType, isPublic] = await guard.txGuard.staticCall(
-      poolManager.target,
-      lendingPool,
-      data,
-    );
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(guard.target, poolManager.target, lendingPool, data);
     expect(txType).to.equal(TX.AaveWithdraw);
     expect(isPublic).to.equal(false);
   });
@@ -192,7 +211,7 @@ describe('AaveLendingPoolGuardV3', () => {
       poolLogicAddr,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: aave not enabled',
     );
   });
@@ -204,7 +223,7 @@ describe('AaveLendingPoolGuardV3', () => {
       poolLogicAddr,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: unsupported withdraw asset',
     );
   });
@@ -216,7 +235,7 @@ describe('AaveLendingPoolGuardV3', () => {
       ethers.Wallet.createRandom().address,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: recipient not pool',
     );
   });
@@ -231,11 +250,7 @@ describe('AaveLendingPoolGuardV3', () => {
       true,
     ]);
 
-    const [txType, isPublic] = await guard.txGuard.staticCall(
-      poolManager.target,
-      lendingPool,
-      data,
-    );
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(guard.target, poolManager.target, lendingPool, data);
     expect(txType).to.equal(TX.AaveSetUserUseReserveAsCollateral);
     expect(isPublic).to.equal(false);
   });
@@ -246,7 +261,7 @@ describe('AaveLendingPoolGuardV3', () => {
       true,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: not borrow-enabled',
     );
   });
@@ -259,7 +274,7 @@ describe('AaveLendingPoolGuardV3', () => {
       true,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: aave not enabled',
     );
   });
@@ -272,7 +287,7 @@ describe('AaveLendingPoolGuardV3', () => {
       true,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: unsupported asset',
     );
   });
@@ -281,20 +296,21 @@ describe('AaveLendingPoolGuardV3', () => {
                                 BORROW
   ──────────────────────────────────────────────────────────────*/
 
-  // NOTE:
-  // A fully successful borrow in the happy path depends on full Aave + governance wiring,
-  // which is not replicated in our minimal mocks. All logic branches (rate check,
-  // asset type, aave enabled, supported asset, recipient, single-debt-asset rule)
-  // are already tested by the failure tests below.
-  it.skip('borrow → txType=12 (happy path)', async () => {
+  it('borrow → txType=12 (happy path)', async () => {
+    const Debt = await ethers.getContractFactory('MockDebtToken');
+    const stableDebtToken = await Debt.deploy();
+    const variableDebtToken = await Debt.deploy();
+    await dataProvider.setReserveTokens(
+      assetLending2,
+      ZeroAddress,
+      await stableDebtToken.getAddress(),
+      await variableDebtToken.getAddress(),
+    );
+
     const amount = ethers.parseEther('1');
     const data = encodeBorrow(assetLending, amount, 2, poolLogicAddr);
 
-    const [txType, isPublic] = await guard.txGuard.staticCall(
-      poolManager.target,
-      lendingPool,
-      data,
-    );
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(guard.target, poolManager.target, lendingPool, data);
     expect(txType).to.equal(TX.AaveBorrow);
     expect(isPublic).to.equal(false);
   });
@@ -302,7 +318,7 @@ describe('AaveLendingPoolGuardV3', () => {
   it('borrow fails: rateMode != 2', async () => {
     const data = encodeBorrow(assetLending, ethers.parseEther('1'), 1, poolLogicAddr);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: only variable rate',
     );
   });
@@ -310,7 +326,7 @@ describe('AaveLendingPoolGuardV3', () => {
   it('borrow fails: asset not borrow-enabled', async () => {
     const data = encodeBorrow(assetNonLending, ethers.parseEther('1'), 2, poolLogicAddr);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: not borrow-enabled',
     );
   });
@@ -320,7 +336,7 @@ describe('AaveLendingPoolGuardV3', () => {
 
     const data = encodeBorrow(assetLending, ethers.parseEther('1'), 2, poolLogicAddr);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: aave not enabled',
     );
   });
@@ -330,7 +346,7 @@ describe('AaveLendingPoolGuardV3', () => {
 
     const data = encodeBorrow(unsupportedAsset, ethers.parseEther('1'), 2, poolLogicAddr);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: unsupported borrow asset',
     );
   });
@@ -343,7 +359,7 @@ describe('AaveLendingPoolGuardV3', () => {
       ethers.Wallet.createRandom().address,
     );
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: recipient not pool',
     );
   });
@@ -358,7 +374,72 @@ describe('AaveLendingPoolGuardV3', () => {
 
     const data = encodeBorrow(assetLending, ethers.parseEther('1'), 2, poolLogicAddr);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.reverted;
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.reverted;
+  });
+
+  /*──────────────────────────────────────────────────────────────
+                              AFTER TX
+  ──────────────────────────────────────────────────────────────*/
+
+  it('afterTxGuard enforces caller and skips non-risk operations', async () => {
+    await aavePool.setHealthFactor(1);
+
+    await expect(
+      guard.afterTxGuard(poolManager.target, lendingPool, '0x12345678'),
+    ).to.be.revertedWith('Frgmnt: not pool logic');
+
+    await poolLogicCaller.callAfterTxGuard(
+      guard.target,
+      poolManager.target,
+      lendingPool,
+      '0x12345678',
+    );
+  });
+
+  it('afterTxGuard checks borrow health factor', async () => {
+    const data = encodeBorrow(assetLending, ethers.parseEther('1'), 2, poolLogicAddr);
+
+    await aavePool.setHealthFactor(ethers.parseEther('2'));
+    await poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data);
+
+    await aavePool.setHealthFactor(ethers.parseEther('1'));
+    await expect(
+      poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data),
+    ).to.be.revertedWith('Frgmnt: health factor too low');
+  });
+
+  it('afterTxGuard checks collateral withdrawals only when collateral is enabled', async () => {
+    const data = aaveIface.encodeFunctionData('withdraw', [
+      assetLending,
+      ethers.parseEther('1'),
+      poolLogicAddr,
+    ]);
+
+    await aavePool.setHealthFactor(ethers.parseEther('1'));
+    await poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data);
+
+    await dataProvider.setUserReserveData(assetLending, poolLogicAddr, ethers.parseEther('1'), 0, 0);
+    await expect(
+      poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data),
+    ).to.be.revertedWith('Frgmnt: health factor too low');
+  });
+
+  it('afterTxGuard checks disabling collateral', async () => {
+    const disableData = aaveIface.encodeFunctionData('setUserUseReserveAsCollateral', [
+      assetLending,
+      false,
+    ]);
+    const enableData = aaveIface.encodeFunctionData('setUserUseReserveAsCollateral', [
+      assetLending,
+      true,
+    ]);
+
+    await aavePool.setHealthFactor(ethers.parseEther('1'));
+    await poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, enableData);
+
+    await expect(
+      poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, disableData),
+    ).to.be.revertedWith('Frgmnt: health factor too low');
   });
 
   /*──────────────────────────────────────────────────────────────
@@ -370,11 +451,7 @@ describe('AaveLendingPoolGuardV3', () => {
 
     const data = aaveIface.encodeFunctionData('repay', [assetLending, amount, 2, poolLogicAddr]);
 
-    const [txType, isPublic] = await guard.txGuard.staticCall(
-      poolManager.target,
-      lendingPool,
-      data,
-    );
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(guard.target, poolManager.target, lendingPool, data);
     expect(txType).to.equal(TX.AaveRepay);
     expect(isPublic).to.equal(false);
   });
@@ -389,7 +466,7 @@ describe('AaveLendingPoolGuardV3', () => {
       poolLogicAddr,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: aave not enabled',
     );
   });
@@ -404,7 +481,7 @@ describe('AaveLendingPoolGuardV3', () => {
       poolLogicAddr,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: unsupported repay asset',
     );
   });
@@ -419,7 +496,7 @@ describe('AaveLendingPoolGuardV3', () => {
       poolLogicAddr,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: not borrow-enabled',
     );
   });
@@ -432,7 +509,7 @@ describe('AaveLendingPoolGuardV3', () => {
       ethers.Wallet.createRandom().address,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: recipient not pool',
     );
   });
@@ -446,11 +523,7 @@ describe('AaveLendingPoolGuardV3', () => {
 
     const data = aaveIface.encodeFunctionData('repayWithATokens', [assetLending, amount, 2]);
 
-    const [txType, isPublic] = await guard.txGuard.staticCall(
-      poolManager.target,
-      lendingPool,
-      data,
-    );
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(guard.target, poolManager.target, lendingPool, data);
     expect(txType).to.equal(TX.AaveRepay);
     expect(isPublic).to.equal(false);
   });
@@ -464,7 +537,7 @@ describe('AaveLendingPoolGuardV3', () => {
       2,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: aave not enabled',
     );
   });
@@ -478,7 +551,7 @@ describe('AaveLendingPoolGuardV3', () => {
       2,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: unsupported repay asset',
     );
   });
@@ -492,7 +565,7 @@ describe('AaveLendingPoolGuardV3', () => {
       2,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: not borrow-enabled',
     );
   });
@@ -504,11 +577,7 @@ describe('AaveLendingPoolGuardV3', () => {
   it('swapBorrowRateMode → txType=14 (stable → variable)', async () => {
     const data = aaveIface.encodeFunctionData('swapBorrowRateMode', [assetLending, 1]);
 
-    const [txType, isPublic] = await guard.txGuard.staticCall(
-      poolManager.target,
-      lendingPool,
-      data,
-    );
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(guard.target, poolManager.target, lendingPool, data);
     expect(txType).to.equal(TX.AaveSwapBorrowRateMode);
     expect(isPublic).to.equal(false);
   });
@@ -516,7 +585,7 @@ describe('AaveLendingPoolGuardV3', () => {
   it('swapBorrowRateMode fails: wrong rateMode', async () => {
     const data = aaveIface.encodeFunctionData('swapBorrowRateMode', [assetLending, 2]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: only stable->variable',
     );
   });
@@ -524,7 +593,7 @@ describe('AaveLendingPoolGuardV3', () => {
   it('swapBorrowRateMode fails: unsupported asset', async () => {
     const data = aaveIface.encodeFunctionData('swapBorrowRateMode', [unsupportedAsset, 1]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: unsupported asset',
     );
   });
@@ -539,11 +608,7 @@ describe('AaveLendingPoolGuardV3', () => {
       poolLogicAddr,
     ]);
 
-    const [txType, isPublic] = await guard.txGuard.staticCall(
-      poolManager.target,
-      lendingPool,
-      data,
-    );
+    const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(guard.target, poolManager.target, lendingPool, data);
     expect(txType).to.equal(TX.AaveRebalanceStableBorrowRate);
     expect(isPublic).to.equal(false);
   });
@@ -554,7 +619,7 @@ describe('AaveLendingPoolGuardV3', () => {
       poolLogicAddr,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: unsupported asset',
     );
   });
@@ -565,7 +630,7 @@ describe('AaveLendingPoolGuardV3', () => {
       ethers.Wallet.createRandom().address,
     ]);
 
-    await expect(guard.txGuard(poolManager.target, lendingPool, data)).to.be.revertedWith(
+    await expect(poolLogicCaller.callTxGuard(guard.target, poolManager.target, lendingPool, data)).to.be.revertedWith(
       'Frgmnt: user not pool',
     );
   });

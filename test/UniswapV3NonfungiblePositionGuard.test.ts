@@ -196,7 +196,13 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
   }
 
   async function staticTxGuard(to: string, data: string) {
-    return guard.txGuard.staticCall(await poolManagerLogic.getAddress(), to, data);
+    // Route through poolLogic so msg.sender == poolLogic inside txGuard
+    return poolLogic.callTxGuard.staticCall(
+      await guard.getAddress(),
+      await poolManagerLogic.getAddress(),
+      to,
+      data,
+    );
   }
 
   async function callAfterTx(to: string, data: string) {
@@ -218,7 +224,7 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
 
     const [txType, isPublic] = await staticTxGuard(await positionManager.getAddress(), data);
 
-    expect(txType).to.equal(20);
+    expect(txType).to.equal(3); // UniswapV3Mint
     expect(isPublic).to.equal(false);
   });
 
@@ -235,7 +241,7 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     const data = await encodeMintToPool();
 
     const [txType] = await staticTxGuard(await positionManager.getAddress(), data);
-    expect(txType).to.equal(20);
+    expect(txType).to.equal(3); // UniswapV3Mint
 
     await callAfterTx(await positionManager.getAddress(), data);
 
@@ -296,16 +302,19 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
   });
 
   it('txGuard - collect checks underlying token support and recipient', async () => {
+    // Set up position in the mock NFT manager
     await positionManager.setPosition(
       1,
       await token0.getAddress(),
       await token1.getAddress(),
       FEE_3000,
     );
+    // Track the NFT so collect validation passes
+    await nftTracker.addDataByUintId(NFT_TYPE, await poolLogic.getAddress(), 1);
     const data = await encodeCollect(1n);
 
     const [txType] = await staticTxGuard(await positionManager.getAddress(), data);
-    expect(txType).to.equal(24);
+    expect(txType).to.equal(7); // UniswapV3Collect
 
     await poolManagerLogic.setSupportedAsset(await token1.getAddress(), false);
 
@@ -350,7 +359,7 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
 
     // txGuard should pass
     const [txType] = await staticTxGuard(await positionManager.getAddress(), data);
-    expect(txType).to.equal(20);
+    expect(txType).to.equal(3); // UniswapV3Mint
 
     // afterTxGuard should revert. The inner revert reason is
     // "Frgmnt: too many Uniswap V3 positions" but it is wrapped by
@@ -375,7 +384,7 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     const multiData = encodeMulticall([mintData, mintData]);
 
     const [txType] = await staticTxGuard(await positionManager.getAddress(), multiData);
-    expect(txType).to.equal(25);
+    expect(txType).to.equal(8); // UniswapV3Multicall
 
     // MockPoolLogicV3Guard wraps the revert from guard.afterTxGuard()
     await expect(callAfterTx(await positionManager.getAddress(), multiData)).to.be.revertedWith(
