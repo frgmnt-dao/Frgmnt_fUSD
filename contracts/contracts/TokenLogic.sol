@@ -37,6 +37,10 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "./interfaces/IPoolManagerLogic.sol";
 import "./interfaces/IPoolLogic.sol";
 
+interface IUserActionSender {
+    function actionUser() external view returns (address);
+}
+
 contract TokenLogic is
     ERC20BurnableUpgradeable,
     ERC20PermitUpgradeable,
@@ -396,9 +400,10 @@ contract TokenLogic is
 
         // prevent arbitrary users from setting cooldown state for other users/system contracts.
         // Third-party deposits must use depositWithAuthorization().
-        require(to == msg.sender, "TokenLogic: use depositWithAuthorization");
+        address user = _actionSender();
+        require(to == user, "TokenLogic: use depositWithAuthorization");
 
-        _deposit(asset, amount, to, 0);
+        _deposit(user, asset, amount, to, 0);
     }
 
     /**
@@ -418,9 +423,10 @@ contract TokenLogic is
     ) public nonReentrant whenNotPaused {
         // prevent arbitrary users from setting cooldown state for other users/system contracts.
         // Third-party deposits must use depositWithAuthorization().
-        require(to == msg.sender, "TokenLogic: use depositWithAuthorization");
+        address user = _actionSender();
+        require(to == user, "TokenLogic: use depositWithAuthorization");
 
-        _deposit(asset, amount, to, minFusdAmount);
+        _deposit(user, asset, amount, to, minFusdAmount);
     }
 
     /**
@@ -447,7 +453,7 @@ contract TokenLogic is
         bytes32 s
     ) external nonReentrant whenNotPaused {
         _verifyDepositAuth(msg.sender, asset, amount, to, minFusdAmount, deadline, v, r, s);
-        _deposit(asset, amount, to, minFusdAmount);
+        _deposit(msg.sender, asset, amount, to, minFusdAmount);
     }
 
     function _verifyDepositAuth(
@@ -486,16 +492,23 @@ contract TokenLogic is
         require(signer == to, "TokenLogic: invalid auth");
     }
 
-    function _deposit(address asset, uint256 amount, address to, uint256 minFusdAmount) internal {
+    function _deposit(
+        address payer,
+        address asset,
+        uint256 amount,
+        address to,
+        uint256 minFusdAmount
+    ) internal returns (uint256 fusdAmount) {
         AssetConfig storage cfg = assetConfigs[asset];
         require(poolManagerLogic.isDepositAsset(asset), "TokenLogic: asset not valid");
         require(cfg.allowed_, "TokenLogic: asset not allowed");
         require(amount > 0, "TokenLogic: zero amount");
+        require(payer != address(0), "TokenLogic: zero address");
         require(to != address(0), "TokenLogic: zero address");
 
         //  Compute USD value of the deposit, normalized to 18 decimals
         uint256 priceUSD = poolManagerLogic.getAssetPrice(asset); // 18 decimals
-        uint256 fusdAmount = _convertToUSD(amount, cfg.decimals_, priceUSD);
+        fusdAmount = _convertToUSD(amount, cfg.decimals_, priceUSD);
         require(fusdAmount >= minDepositUSD, "TokenLogic: below minimum deposit");
         require(
             protocolFusdOutstanding + fusdAmount <= maxDepositFusdSupply,
@@ -512,12 +525,19 @@ contract TokenLogic is
         _mint(to, fusdAmount);
 
         // Forward collateral to PoolLogic
-        IERC20(asset).safeTransferFrom(msg.sender, poolLogic, amount);
+        IERC20(asset).safeTransferFrom(payer, poolLogic, amount);
 
         // Increment accountedAssets
         IPoolLogic(poolLogic).incrementAccountedAssets(fusdAmount);
 
         emit Deposited(to, asset, amount, fusdAmount);
+    }
+
+    function _actionSender() internal view returns (address sender) {
+        sender = msg.sender;
+        if (poolManagerLogic.getAllowedCallbackSenders(sender)) {
+            sender = IUserActionSender(sender).actionUser();
+        }
     }
 
     /**
