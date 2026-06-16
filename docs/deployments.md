@@ -107,3 +107,13 @@ These are the external protocol contracts that the Frgmnt vault integrates with 
 - PoolLogic, PoolManagerLogic, and AssetHandler use **Transparent proxies** — each has a dedicated ProxyAdmin
 - All contracts are verified on [Basescan](https://basescan.org)
 - The deployer EOA (`0xafb9B883637f72767ADf7193Bb3B8e59C02Ea05d`) should not retain any privileged roles in production — all admin roles should be transferred to the Timelock
+
+## EUR Deployment Oracle Checklist
+
+For the EUR-pegged deployment, `AssetHandler` keeps the existing `getUSDPrice()` ABI but returns EUR-denominated prices after the EUR/USD conversion feed is configured.
+
+- `EUR_USD_FEED` must be the Chainlink EUR/USD feed for the target chain, meaning USD per 1 EUR
+- Asset feeds must remain USD-denominated
+- Do not register direct EUR-denominated asset feeds while `eurUsdAggregator` is enabled
+- The core deployment script validates the feed description, decimals, freshness, positive answer, and sane EUR/USD range before calling `setEurUsdAggregator`
+- After deployment, sanity-check USDC pricing: if `EUR/USD = 1.08`, `getUSDPrice(USDC)` should be about `0.9259e18`, not `1.08e18`

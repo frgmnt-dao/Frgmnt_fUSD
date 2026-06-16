@@ -5,7 +5,7 @@ import { loadFixture, time } from '@nomicfoundation/hardhat-toolbox/network-help
 
 const WAD = 10n ** 18n;
 
-describe('TokenLogic (FUSD)', () => {
+describe('TokenLogic (fEURO)', () => {
   async function deployFixture() {
     const [admin, emergency, poolLogicEOA, user, other] = await ethers.getSigners();
 
@@ -109,8 +109,8 @@ describe('TokenLogic (FUSD)', () => {
       EMERGENCY_ROLE,
     } = await loadFixture(deployFixture);
 
-    expect(await fusd.name()).to.equal('Frgmnt USD');
-    expect(await fusd.symbol()).to.equal('fUSD');
+    expect(await fusd.name()).to.equal('Frgmnt EURO');
+    expect(await fusd.symbol()).to.equal('fEURO');
     expect(await fusd.decimals()).to.equal(18n);
 
     expect(await fusd.hasRole(DEFAULT_ADMIN_ROLE, adminAddress)).to.equal(true);
@@ -548,7 +548,7 @@ describe('TokenLogic (FUSD)', () => {
       const signDepositAuth = async (amount: bigint, minFusdAmount: bigint, deadline: bigint) => {
         const nonce = await fusd.depositNonces(userAddress);
         const signature = await user.signTypedData(
-          { name: 'Frgmnt USD', version: '1', chainId, verifyingContract: fusdAddress },
+          { name: 'Frgmnt EURO', version: '1', chainId, verifyingContract: fusdAddress },
           {
             DepositAuth: [
               { name: 'depositor', type: 'address' },
@@ -812,7 +812,7 @@ describe('TokenLogic (FUSD)', () => {
       await upgraded.waitForDeployment();
 
       // same name = proof of success
-      expect(await upgraded.name()).to.equal('Frgmnt USD');
+      expect(await upgraded.name()).to.equal('Frgmnt EURO');
     });
   });
 });

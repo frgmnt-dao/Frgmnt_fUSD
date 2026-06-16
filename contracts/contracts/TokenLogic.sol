@@ -211,9 +211,9 @@ contract TokenLogic is
         //	require(_poolLogic != address(0), "TokenLogic: poolLogic=0");
         require(_poolManagerLogic != address(0), "TokenLogic: poolManagerLogic=0");
 
-        __ERC20_init("Frgmnt USD", "fUSD");
+        __ERC20_init("Frgmnt EURO", "fEURO");
         __ERC20Burnable_init();
-        __ERC20Permit_init("Frgmnt USD");
+        __ERC20Permit_init("Frgmnt EURO");
         __Pausable_init();
         __AccessControl_init();
         __UUPSUpgradeable_init();

@@ -1,13 +1,15 @@
 # AssetHandler
 
 **Source:** `contracts/contracts/priceAggregators/AssetHandler.sol`
-**Proxy Pattern:** UUPS
+**Proxy Pattern:** Transparent proxy
 
 ---
 
 ## Overview
 
-AssetHandler is the protocol's central oracle registry. It maps asset addresses to their Chainlink price feeds and asset type classifications, providing normalized 18-decimal USD prices to PoolManagerLogic and any other consumer.
+AssetHandler is the protocol's central oracle registry. It maps asset addresses to their Chainlink price feeds and asset type classifications, providing normalized 18-decimal prices to PoolManagerLogic and any other consumer.
+
+For the EUR-pegged deployment, asset feeds remain USD-denominated and AssetHandler applies an optional Chainlink EUR/USD conversion feed. The `getUSDPrice()` ABI name is intentionally preserved for compatibility, but once `eurUsdAggregator` is configured its returned values are EUR-denominated.
 
 It includes L2 sequencer uptime validation (critical for Base) and per-asset staleness timeout configuration.
 
@@ -17,7 +19,8 @@ It includes L2 sequencer uptime validation (critical for Base) and per-asset sta
 
 - Store Chainlink aggregator addresses for all protocol-supported assets
 - Classify each asset by type (used for guard dispatch)
-- Return USD prices normalized to 18 decimals
+- Return prices normalized to 18 decimals
+- Optionally convert USD-denominated asset feeds into EUR-denominated prices
 - Validate Chainlink data freshness (staleness timeout)
 - Validate Base L2 sequencer is online and past the grace period
 - Support batch asset registration
@@ -32,6 +35,8 @@ It includes L2 sequencer uptime validation (critical for Base) and per-asset sta
 | `priceAggregators` | `mapping(address → address)` | Chainlink aggregator address per token |
 | `chainlinkTimeouts` | `mapping(address → uint256)` | Per-asset staleness threshold in seconds |
 | `sequencerUptimeFeed` | `address` | Chainlink L2 sequencer uptime feed address |
+| `eurUsdAggregator` | `address` | Optional Chainlink EUR/USD conversion feed |
+| `eurUsdTimeout` | `uint256` | Staleness threshold for the EUR/USD feed |
 | `SEQUENCER_GRACE_PERIOD` | `uint256` | Fixed 3600-second grace period after sequencer restart |
 
 ---
@@ -60,13 +65,22 @@ Initializes the contract and batch-registers the initial asset list.
 function getUSDPrice(address asset) external view returns (uint256)
 ```
 
-Returns the USD price of `asset` normalized to 18 decimals.
+Returns the price of `asset` normalized to 18 decimals.
 
-**Returns:** Price in 18-decimal format (e.g., `1e18` = $1.00)
+**Returns:** Price in 18-decimal format. If `eurUsdAggregator` is unset, the value is USD-denominated. If `eurUsdAggregator` is set, the value is EUR-denominated.
+
+EUR conversion formula:
+
+```
+assetEUR = assetUSD / EURUSD
+```
+
+Example: `USDC/USD = 1.00`, `EUR/USD = 1.08`, so `USDC/EUR = 0.9259`.
 
 **Reverts if:**
 - L2 sequencer is down or within grace period
 - Price data is stale (age > `chainlinkTimeouts[asset]`)
+- EUR/USD data is stale when conversion is enabled
 - Price is zero or negative
 
 **Side effects:** None (view only)
@@ -138,6 +152,30 @@ Configures the Chainlink L2 sequencer uptime feed address.
 
 ---
 
+### `setEurUsdAggregator`
+
+```solidity
+function setEurUsdAggregator(address feed, uint256 timeout) external onlyOwner
+```
+
+Configures the Chainlink EUR/USD conversion feed. The feed must return USD per 1 EUR.
+
+**Side effects:** Emits `SetEurUsdAggregator`.
+
+---
+
+### `clearEurUsdAggregator`
+
+```solidity
+function clearEurUsdAggregator() external onlyOwner
+```
+
+Disables EUR conversion and returns raw USD-denominated asset prices again.
+
+**Side effects:** Emits `ClearedEurUsdAggregator`.
+
+---
+
 ## Events
 
 | Event | Parameters | Emitted When |
@@ -146,6 +184,8 @@ Configures the Chainlink L2 sequencer uptime feed address.
 | `RemovedAsset` | `asset` | Asset removed |
 | `SetChainlinkTimeout` | `asset, timeout` | Staleness window updated |
 | `SetSequencerUptimeFeed` | `feed` | Sequencer feed updated |
+| `SetEurUsdAggregator` | `feed, timeout` | EUR/USD conversion feed configured |
+| `ClearedEurUsdAggregator` | `oldFeed` | EUR/USD conversion feed disabled |
 
 ---
 
@@ -153,7 +193,7 @@ Configures the Chainlink L2 sequencer uptime feed address.
 
 | Role | Permissions |
 |------|------------|
-| Owner (Factory Owner / Timelock) | Register/remove assets, update timeouts, set sequencer feed |
+| Owner (Factory Owner / Timelock) | Register/remove assets, update timeouts, set sequencer feed, configure EUR/USD conversion |
 | Any caller | `getUSDPrice()` (view) |
 
 ---
@@ -166,11 +206,17 @@ Chainlink aggregators return prices with varying decimal precision (typically 8 
 normalizedPrice = rawPrice × 10^(18 - aggregatorDecimals)
 ```
 
-Consumers can then calculate USD value as:
+Consumers can then calculate value as:
 
 ```
-usdValue = assetAmount × normalizedPrice / 10^assetDecimals
+assetValue = assetAmount × normalizedPrice / 10^assetDecimals
 ```
+
+For EUR deployments, deployment and governance operations must preserve this oracle invariant:
+
+- Asset feeds are USD-denominated
+- `eurUsdAggregator` is Chainlink EUR/USD, meaning USD per 1 EUR
+- Direct EUR-denominated asset feeds are not registered while `eurUsdAggregator` is enabled
 
 ---
 

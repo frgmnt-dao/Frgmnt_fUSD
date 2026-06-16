@@ -292,7 +292,7 @@ contract PoolLogic is
         if (_poolManagerLogic == address(0)) revert ZeroAddress();
         if (_owner == address(0)) revert ZeroAddress();
 
-        __ERC20_init("Staked Frgmnt USD", "sfUSD");
+        __ERC20_init("Staked Frgmnt EURO", "sfEURO");
         __Ownable_init(_owner);
         __ReentrancyGuard_init();
 

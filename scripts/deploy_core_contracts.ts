@@ -1,6 +1,7 @@
 import { ethers, upgrades } from 'hardhat';
 import fs from 'fs';
 import path from 'path';
+import { validateEurUsdFeed } from './utils/validateEurUsdFeed';
 
 // ============================================================
 // USER CONFIG
@@ -15,6 +16,8 @@ const COOLDOWN_SECONDS = 24n * 60n * 60n;
 const PERFORMANCE_FEE_NUMERATOR = 2000n;
 const MANAGER_FEE_NUMERATOR = 0n;
 const TIMELOCK_DELAY_SECONDS = 48n * 60n * 60n;
+const EUR_USD_TIMEOUT_SECONDS = 24n * 60n * 60n;
+const EUR_USD_FEED = process.env.EUR_USD_FEED ?? '';
 
 const INITIAL_ASSETS: { asset: string; assetType: number; aggregator: string }[] = [];
 
@@ -65,6 +68,19 @@ async function main() {
   assertAddress('GOVERNANCE_SAFE', GOVERNANCE_SAFE);
   assertAddress('POOL_MANAGER_ADDRESS', POOL_MANAGER_ADDRESS);
   assertAddress('EMERGENCY_ADDRESS', EMERGENCY_ADDRESS);
+  assertAddress('EUR_USD_FEED', EUR_USD_FEED);
+
+  const eurUsdFeed = await validateEurUsdFeed(
+    EUR_USD_FEED,
+    EUR_USD_TIMEOUT_SECONDS,
+    provider,
+    signer,
+  );
+  console.log('EUR/USD feed validated');
+  console.log('  feed        :', eurUsdFeed.feed);
+  console.log('  description :', eurUsdFeed.description);
+  console.log('  price       :', eurUsdFeed.formattedAnswer);
+  console.log('  updatedAt   :', eurUsdFeed.updatedAt.toString());
 
   // ============================================================
   // NONCE + GAS MANAGEMENT
@@ -147,6 +163,13 @@ async function main() {
   console.log('AssetHandler (proxy) deployed at:', assetHandlerProxy);
   nonce++;
 
+  await sendTxWithRetry(
+    () => assetHandler.setEurUsdAggregator(EUR_USD_FEED, EUR_USD_TIMEOUT_SECONDS, txOpts()),
+    'AssetHandler.setEurUsdAggregator',
+  );
+  nonce++;
+  console.log('AssetHandler EUR/USD conversion configured');
+
   // ============================================================
   // 5) PoolManagerLogic (proxy + initialize with poolLogic = 0)
   // ============================================================
@@ -172,7 +195,7 @@ async function main() {
   nonce++;
 
   // ============================================================
-  // 6) TokenLogic / FUSD (UUPS proxy + initialize with poolLogic = 0)
+  // 6) TokenLogic / fEURO (UUPS proxy + initialize with poolLogic = 0)
   // ============================================================
 
   const TokenLogic = await ethers.getContractFactory('TokenLogic', signer);
@@ -189,7 +212,7 @@ async function main() {
   );
   await tokenLogic.waitForDeployment();
   const fusdProxy = await tokenLogic.getAddress();
-  console.log('TokenLogic / FUSD (proxy) deployed at:', fusdProxy);
+  console.log('TokenLogic / fEURO (proxy) deployed at:', fusdProxy);
   nonce++;
 
   // ============================================================
@@ -271,6 +294,17 @@ async function main() {
     deployer: await signer.getAddress(),
     governance: governance.target,
     timelock: timelock.target,
+    priceFeeds: {
+      eurUsd: {
+        feed: eurUsdFeed.feed,
+        description: eurUsdFeed.description,
+        decimals: eurUsdFeed.decimals.toString(),
+        answer: eurUsdFeed.answer.toString(),
+        formattedAnswer: eurUsdFeed.formattedAnswer,
+        timeout: EUR_USD_TIMEOUT_SECONDS.toString(),
+        updatedAt: eurUsdFeed.updatedAt.toString(),
+      },
+    },
     upgradeable: implementations,
   };
 

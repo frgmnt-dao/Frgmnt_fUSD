@@ -147,15 +147,15 @@ describe('PoolLogic', () => {
 
     expect(await pool.fusd()).to.equal(await fusd.getAddress());
     expect(await pool.poolManagerLogic()).to.equal(await poolManager.getAddress());
-    expect(await pool.name()).to.equal('Staked Frgmnt USD');
-    expect(await pool.symbol()).to.equal('sfUSD');
+    expect(await pool.name()).to.equal('Staked Frgmnt EURO');
+    expect(await pool.symbol()).to.equal('sfEURO');
 
     const creationTime = await pool.creationTime();
     expect(Number(creationTime)).to.be.greaterThan(0);
 
     const summary = await pool.getFundSummary();
     expect(summary.privatePool).to.equal(false);
-    expect(summary.name).to.equal('Staked Frgmnt USD');
+    expect(summary.name).to.equal('Staked Frgmnt EURO');
     expect(summary.manager).to.equal(await poolManager.manager());
     expect(summary.managerName).to.equal('Test Manager');
   });
