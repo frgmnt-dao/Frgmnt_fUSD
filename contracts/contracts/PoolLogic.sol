@@ -30,6 +30,10 @@ interface ITokenLogic is IERC20 {
     function mintFromPool(address to, uint256 amount) external;
 }
 
+interface IUserActionSender {
+    function actionUser() external view returns (address);
+}
+
 contract PoolLogic is
     IPoolLogic,
     ERC20Upgradeable,
@@ -204,7 +208,6 @@ contract PoolLogic is
     error WithdrawAmountTooSmall();
     error AutoCompoundingAlreadyInitialized();
     error AutoCompoundingNotInitialized();
-
     /// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
     error ComplexWithdrawFailed(address asset, address guard);
 
@@ -356,14 +359,25 @@ contract PoolLogic is
         if (index == 0) revert AutoCompoundingNotInitialized();
     }
 
+    function _actionSender() internal view returns (address sender) {
+        sender = msg.sender;
+        if (_isAllowedCallbackSender(sender)) {
+            sender = IUserActionSender(sender).actionUser();
+        }
+    }
+
     // ============================================================
     // =                MANAGEMENT FEE & REWARDS                   =
     // ============================================================
 
     modifier updateFeesAndRewards(address user) {
+        _updateFeesAndRewardsFor(user);
+        _;
+    }
+
+    function _updateFeesAndRewardsFor(address user) internal {
         _accrueYield();
         _updateUserReward(user);
-        _;
     }
 
     /**
@@ -533,28 +547,34 @@ contract PoolLogic is
 
     function stake(uint256 amountFusd) external nonReentrant updateFeesAndRewards(msg.sender) {
         // Backward-compatible wrapper: no minimum output enforced by the user
-        _stake(amountFusd, 0);
+        _stake(msg.sender, amountFusd, 0);
     }
 
     /// @notice Stake with user-defined minimum shares
     function stake(
         uint256 amountFusd,
         uint256 minShares
-    ) public nonReentrant updateFeesAndRewards(msg.sender) {
-        _stake(amountFusd, minShares);
+    ) public nonReentrant {
+        address user = _actionSender();
+        _updateFeesAndRewardsFor(user);
+        _stake(user, amountFusd, minShares);
     }
 
-    function _stake(uint256 amountFusd, uint256 minShares) internal {
+    function _stake(
+        address user,
+        uint256 amountFusd,
+        uint256 minShares
+    ) internal returns (uint256 sharesMinted) {
         if (
-            !(msg.sender == _manager() ||
+            !(user == _manager() ||
                 !IPoolManagerLogic(poolManagerLogic).privatePool() ||
-                IPoolManagerLogic(poolManagerLogic).isMemberAllowed(msg.sender))
+                IPoolManagerLogic(poolManagerLogic).isMemberAllowed(user))
         ) revert OnlyMemberAllowed();
 
         if (amountFusd == 0) revert ZeroAmount();
 
         // Pull FUSD from user
-        IERC20(fusd).safeTransferFrom(msg.sender, address(this), amountFusd);
+        IERC20(fusd).safeTransferFrom(user, address(this), amountFusd);
 
         // Entry fee in FUSD
         (, , uint256 entryFeeNumerator, , uint256 feeDenominator) = _managerFees();
@@ -573,35 +593,43 @@ contract PoolLogic is
         // Minimum shares protection (sharesMinted == netFusd in this implementation)
         if (netFusd < minShares) revert SlippageExceeded();
 
-        _mint(msg.sender, netFusd);
+        _mint(user, netFusd);
+        sharesMinted = netFusd;
 
         // update rewardDebt after mint
-        UserReward storage ur = userRewards[msg.sender];
+        UserReward storage ur = userRewards[user];
         ur.rewardDebt = _requireAutoCompoundingInitialized();
 
         if (feeFusd > 0) {
             IERC20(fusd).safeTransfer(_manager(), feeFusd);
         }
 
-        emit Stake(msg.sender, amountFusd, netFusd, feeFusd);
+        emit Stake(user, amountFusd, netFusd, feeFusd);
     }
 
     // ============================================================
     // =                          UNSTAKE                          =
     // ============================================================
 
-    function unstake(uint256 shareAmount) external nonReentrant updateFeesAndRewards(msg.sender) {
+    function unstake(uint256 shareAmount) external nonReentrant {
+        address user = _actionSender();
+        _updateFeesAndRewardsFor(user);
+        _unstake(user, shareAmount);
+    }
+
+    function _unstake(address user, uint256 shareAmount) internal returns (uint256 fusdOut) {
         if (shareAmount == 0) revert ZeroAmount();
-        if (balanceOf(msg.sender) < shareAmount) revert InsufficientShares();
+        if (balanceOf(user) < shareAmount) revert InsufficientShares();
 
-        _burn(msg.sender, shareAmount);
+        _burn(user, shareAmount);
 
-        UserReward storage ur = userRewards[msg.sender];
+        UserReward storage ur = userRewards[user];
         ur.rewardDebt = _requireAutoCompoundingInitialized();
 
-        IERC20(fusd).safeTransfer(msg.sender, shareAmount);
+        IERC20(fusd).safeTransfer(user, shareAmount);
+        fusdOut = shareAmount;
 
-        emit Unstake(msg.sender, shareAmount, shareAmount);
+        emit Unstake(user, shareAmount, shareAmount);
     }
 
     function harvest() external nonReentrant updateFeesAndRewards(msg.sender) {
@@ -660,12 +688,15 @@ contract PoolLogic is
 
     function withdrawCashImmediate(
         uint256 fusdAmount
-    ) external nonReentrant updateFeesAndRewards(msg.sender) {
+    ) external nonReentrant {
+        address user = _actionSender();
+        _updateFeesAndRewardsFor(user);
+
         IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic)
             .getSupportedAssets();
         ComplexAsset[] memory complexAssetsData = new ComplexAsset[](supportedAssets.length);
 
-        _withdrawCashImmediateToSafe(msg.sender, fusdAmount, complexAssetsData);
+        _withdrawCashImmediateToSafe(user, user, fusdAmount, complexAssetsData);
     }
 
     function withdrawCashImmediateTo(
@@ -678,14 +709,14 @@ contract PoolLogic is
             .getSupportedAssets();
         ComplexAsset[] memory complexAssetsData = new ComplexAsset[](supportedAssets.length);
 
-        _withdrawCashImmediateToSafe(recipient, amount, complexAssetsData);
+        _withdrawCashImmediateToSafe(msg.sender, recipient, amount, complexAssetsData);
     }
 
     function withdrawCashImmediateSafe(
         uint256 amount,
         ComplexAsset[] calldata complexAssetsData
     ) external nonReentrant updateFeesAndRewards(msg.sender) {
-        _withdrawCashImmediateToSafe(msg.sender, amount, complexAssetsData);
+        _withdrawCashImmediateToSafe(msg.sender, msg.sender, amount, complexAssetsData);
     }
 
     function withdrawCashImmediateToSafe(
@@ -694,10 +725,11 @@ contract PoolLogic is
         ComplexAsset[] calldata complexAssetsData
     ) external nonReentrant updateFeesAndRewards(msg.sender) {
         if (recipient == address(0)) revert InvalidRecipient();
-        _withdrawCashImmediateToSafe(recipient, amount, complexAssetsData);
+        _withdrawCashImmediateToSafe(msg.sender, recipient, amount, complexAssetsData);
     }
 
     function _withdrawCashImmediateToSafe(
+        address user,
         address recipient,
         uint256 amount,
         ComplexAsset[] memory complexAssetsData
@@ -706,22 +738,22 @@ contract PoolLogic is
         if (amount == 0) revert ZeroAmount();
         uint256 netFusd;
         uint256 feeFusd;
-        if (msg.sender == _manager()) {
+        if (user == _manager()) {
             netFusd = amount;
         } else {
             // cooldown enforced only on CASH withdraw (not unstake)
-            if (ITokenLogic(fusd).getExitRemainingCooldown(msg.sender) != 0)
+            if (ITokenLogic(fusd).getExitRemainingCooldown(user) != 0)
                 revert CooldownActive();
 
             (netFusd, feeFusd) = _applyWithdrawFeeFusd(amount);
             if (netFusd == 0) revert ZeroAmount();
 
             if (feeFusd > 0) {
-                IERC20(fusd).safeTransferFrom(msg.sender, _manager(), feeFusd);
+                IERC20(fusd).safeTransferFrom(user, _manager(), feeFusd);
             }
         }
         // burn FUSD
-        ITokenLogic(fusd).burnFrom(msg.sender, netFusd);
+        ITokenLogic(fusd).burnFrom(user, netFusd);
 
         (
             address[] memory outAssets,
@@ -736,9 +768,9 @@ contract PoolLogic is
         accountedAssets -= valueBefore - valueAfter;
 
         // Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
-        emit CashWithdrawImmediate(msg.sender, amount, netFusd, feeFusd);
+        emit CashWithdrawImmediate(user, amount, netFusd, feeFusd);
         emit CashWithdrawImmediateProRata(
-            msg.sender,
+            user,
             amount,
             netFusd,
             feeFusd,
