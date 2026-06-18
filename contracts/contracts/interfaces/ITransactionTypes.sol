@@ -29,6 +29,11 @@ interface ITransactionTypes {
         MorphoWithdrawCollateral, // 21
         MorphoLiquidate, // 22
         MorphoFlashLoan, // 23
-        MorphoRewardClaim // 24
+        MorphoRewardClaim, // 24
+        MorphoVaultV2Deposit, // 25
+        MorphoVaultV2Mint, // 26
+        MorphoVaultV2Withdraw, // 27
+        MorphoVaultV2Redeem, // 28
+        MorphoVaultV2ForceDeallocate // 29
     }
 }

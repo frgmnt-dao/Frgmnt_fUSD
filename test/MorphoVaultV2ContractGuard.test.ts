@@ -1,0 +1,333 @@
+import { expect } from 'chai';
+import { ethers } from 'hardhat';
+import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
+
+describe('MorphoVaultV2ContractGuard', () => {
+  // Real ERC-4626 + Morpho Vault V2 selectors, used to build calldata exactly as PoolLogic
+  // would forward it via execTransaction().
+  const vaultIface = new ethers.Interface([
+    'function deposit(uint256 assets, address receiver) returns (uint256)',
+    'function mint(uint256 shares, address receiver) returns (uint256)',
+    'function withdraw(uint256 assets, address receiver, address owner) returns (uint256)',
+    'function redeem(uint256 shares, address receiver, address owner) returns (uint256)',
+    'function forceDeallocate(address adapter, bytes data, uint256 assets, address onBehalf) returns (uint256)',
+  ]);
+
+  async function deploy() {
+    const [deployer, poolLogicSigner, other, adapter] = await ethers.getSigners();
+
+    const ManagerFactory = await ethers.getContractFactory('MorphoVaultV2Manager');
+    const morphoVaultV2Manager = await ManagerFactory.deploy();
+    await morphoVaultV2Manager.waitForDeployment();
+    const managerAddr = await morphoVaultV2Manager.getAddress();
+
+    const GuardFactory = await ethers.getContractFactory('MorphoVaultV2ContractGuard');
+    const guard = await GuardFactory.deploy(managerAddr);
+    await guard.waitForDeployment();
+
+    const PoolManagerFactory = await ethers.getContractFactory('MockMorphoVaultV2PoolManagerLogic');
+    const poolManager = await PoolManagerFactory.deploy();
+    await poolManager.waitForDeployment();
+    const poolManagerAddr = await poolManager.getAddress();
+    const poolLogicAddr = await poolLogicSigner.getAddress();
+    await poolManager.setPoolLogic(poolLogicAddr);
+
+    const Token = await ethers.getContractFactory('MockERC20Custom');
+    const underlying = await Token.deploy('USDC', 'USDC', 6);
+    await underlying.waitForDeployment();
+
+    const VaultFactory = await ethers.getContractFactory('MockMorphoVaultV2');
+    const vault = await VaultFactory.deploy(await underlying.getAddress());
+    await vault.waitForDeployment();
+    const vaultAddr = await vault.getAddress();
+
+    // Happy-path registration: supported asset + whitelisted vault.
+    await poolManager.setSupportedAsset(vaultAddr, true);
+    await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, [vaultAddr]);
+
+    return {
+      deployer,
+      poolLogicSigner,
+      other,
+      adapter,
+      morphoVaultV2Manager,
+      managerAddr,
+      guard,
+      poolManager,
+      poolManagerAddr,
+      poolLogicAddr,
+      underlying,
+      vault,
+      vaultAddr,
+    };
+  }
+
+  async function callGuard(
+    guard: any,
+    poolLogicSigner: any,
+    poolManagerAddr: string,
+    vaultAddr: string,
+    data: string,
+  ) {
+    return guard.connect(poolLogicSigner).txGuard(poolManagerAddr, vaultAddr, data);
+  }
+
+  // -----------------------------------------------------------------------
+  // Constructor
+  // -----------------------------------------------------------------------
+
+  it('constructor reverts on zero manager', async () => {
+    const Guard = await ethers.getContractFactory('MorphoVaultV2ContractGuard');
+    await expect(Guard.deploy(ethers.ZeroAddress)).to.be.revertedWith(
+      'MorphoVaultV2Guard: manager=0',
+    );
+  });
+
+  it('constructor stores the manager address', async () => {
+    const { guard, managerAddr } = await deploy();
+    expect(await guard.morphoVaultV2Manager()).to.equal(managerAddr);
+  });
+
+  // -----------------------------------------------------------------------
+  // Access / registration gating
+  // -----------------------------------------------------------------------
+
+  it('reverts when caller is not poolLogic', async () => {
+    const { guard, other, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
+    const data = vaultIface.encodeFunctionData('deposit', [100n, poolLogicAddr]);
+    await expect(guard.connect(other).txGuard(poolManagerAddr, vaultAddr, data)).to.be.revertedWith(
+      'MorphoVaultV2Guard: not pool logic',
+    );
+  });
+
+  it('reverts when the vault is not a registered supported asset', async () => {
+    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr } =
+      await deploy();
+    await poolManager.setSupportedAsset(vaultAddr, false);
+    const data = vaultIface.encodeFunctionData('deposit', [100n, poolLogicAddr]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: vault not enabled');
+  });
+
+  it('reverts when the vault is supported but not whitelisted', async () => {
+    const {
+      guard,
+      poolLogicSigner,
+      morphoVaultV2Manager,
+      poolManagerAddr,
+      vaultAddr,
+      poolLogicAddr,
+    } = await deploy();
+    // Revoke the whitelist entry set up in deploy().
+    await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, []);
+    const data = vaultIface.encodeFunctionData('deposit', [100n, poolLogicAddr]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: vault not whitelisted');
+  });
+
+  // -----------------------------------------------------------------------
+  // deposit
+  // -----------------------------------------------------------------------
+
+  it('deposit succeeds when receiver == pool and returns the correct txType', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
+    const data = vaultIface.encodeFunctionData('deposit', [1000n, poolLogicAddr]);
+
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+      .to.emit(guard, 'MorphoVaultV2DepositEvt')
+      .withArgs(poolLogicAddr, vaultAddr, 1000n, anyValue);
+
+    const result = await guard
+      .connect(poolLogicSigner)
+      .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+    expect(result[0]).to.equal(25n); // TransactionType.MorphoVaultV2Deposit
+    expect(result[1]).to.equal(false); // isPublic
+  });
+
+  it('deposit reverts when receiver != pool', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, other } = await deploy();
+    const data = vaultIface.encodeFunctionData('deposit', [1000n, other.address]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: receiver != pool');
+  });
+
+  // -----------------------------------------------------------------------
+  // mint
+  // -----------------------------------------------------------------------
+
+  it('mint succeeds when receiver == pool and returns the correct txType', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
+    const data = vaultIface.encodeFunctionData('mint', [500n, poolLogicAddr]);
+
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+      .to.emit(guard, 'MorphoVaultV2MintEvt')
+      .withArgs(poolLogicAddr, vaultAddr, 500n, anyValue);
+
+    const result = await guard
+      .connect(poolLogicSigner)
+      .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+    expect(result[0]).to.equal(26n); // TransactionType.MorphoVaultV2Mint
+  });
+
+  it('mint reverts when receiver != pool', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, other } = await deploy();
+    const data = vaultIface.encodeFunctionData('mint', [500n, other.address]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: receiver != pool');
+  });
+
+  // -----------------------------------------------------------------------
+  // withdraw
+  // -----------------------------------------------------------------------
+
+  it('withdraw succeeds when receiver == owner == pool and returns the correct txType', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
+    const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, poolLogicAddr]);
+
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+      .to.emit(guard, 'MorphoVaultV2WithdrawEvt')
+      .withArgs(poolLogicAddr, vaultAddr, 200n, anyValue);
+
+    const result = await guard
+      .connect(poolLogicSigner)
+      .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+    expect(result[0]).to.equal(27n); // TransactionType.MorphoVaultV2Withdraw
+  });
+
+  it('withdraw reverts when receiver != pool', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, other } =
+      await deploy();
+    const data = vaultIface.encodeFunctionData('withdraw', [200n, other.address, poolLogicAddr]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: receiver != pool');
+  });
+
+  it('withdraw reverts when owner != pool', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, other } =
+      await deploy();
+    const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, other.address]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: owner != pool');
+  });
+
+  // -----------------------------------------------------------------------
+  // redeem
+  // -----------------------------------------------------------------------
+
+  it('redeem succeeds when receiver == owner == pool and returns the correct txType', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
+    const data = vaultIface.encodeFunctionData('redeem', [300n, poolLogicAddr, poolLogicAddr]);
+
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+      .to.emit(guard, 'MorphoVaultV2RedeemEvt')
+      .withArgs(poolLogicAddr, vaultAddr, 300n, anyValue);
+
+    const result = await guard
+      .connect(poolLogicSigner)
+      .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+    expect(result[0]).to.equal(28n); // TransactionType.MorphoVaultV2Redeem
+  });
+
+  it('redeem reverts when receiver != pool', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, other } =
+      await deploy();
+    const data = vaultIface.encodeFunctionData('redeem', [300n, other.address, poolLogicAddr]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: receiver != pool');
+  });
+
+  it('redeem reverts when owner != pool', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, other } =
+      await deploy();
+    const data = vaultIface.encodeFunctionData('redeem', [300n, poolLogicAddr, other.address]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: owner != pool');
+  });
+
+  // -----------------------------------------------------------------------
+  // forceDeallocate
+  // -----------------------------------------------------------------------
+
+  it('forceDeallocate succeeds when onBehalf == pool and the adapter is registered', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter } =
+      await deploy();
+    await vault.setAdapter(adapter.address, true);
+
+    // Non-trivial, non-empty `data` payload deliberately exercises ABI decoding of a dynamic
+    // `bytes` parameter that is NOT the last parameter in the tuple (adapter, data, assets,
+    // onBehalf) — confirms abi.decode correctly follows the offset pointer regardless of
+    // where the dynamic type sits, rather than naively reading fields in sequence.
+    const adapterData = ethers.AbiCoder.defaultAbiCoder().encode(
+      ['uint256', 'uint256', 'address'],
+      [123n, 456n, adapter.address],
+    );
+
+    const data = vaultIface.encodeFunctionData('forceDeallocate', [
+      adapter.address,
+      adapterData,
+      777n,
+      poolLogicAddr,
+    ]);
+
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+      .to.emit(guard, 'MorphoVaultV2ForceDeallocateEvt')
+      .withArgs(poolLogicAddr, vaultAddr, adapter.address, 777n, anyValue);
+
+    const result = await guard
+      .connect(poolLogicSigner)
+      .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+    expect(result[0]).to.equal(29n); // TransactionType.MorphoVaultV2ForceDeallocate
+  });
+
+  it('forceDeallocate reverts when onBehalf != pool', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, vault, adapter, other } =
+      await deploy();
+    await vault.setAdapter(adapter.address, true);
+    const data = vaultIface.encodeFunctionData('forceDeallocate', [
+      adapter.address,
+      '0x',
+      777n,
+      other.address,
+    ]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: onBehalf != pool');
+  });
+
+  it('forceDeallocate reverts when the adapter is not registered on the vault', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, adapter } =
+      await deploy();
+    // Note: setAdapter was never called, so isAdapter(adapter) is false on the mock vault.
+    const data = vaultIface.encodeFunctionData('forceDeallocate', [
+      adapter.address,
+      '0x',
+      777n,
+      poolLogicAddr,
+    ]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: adapter not registered');
+  });
+
+  // -----------------------------------------------------------------------
+  // Unknown selector
+  // -----------------------------------------------------------------------
+
+  it('returns txType=NotUsed (0) and isPublic=false for an unrecognized selector', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr } = await deploy();
+    const data = '0xdeadbeef';
+    const result = await guard
+      .connect(poolLogicSigner)
+      .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+    expect(result[0]).to.equal(0n);
+    expect(result[1]).to.equal(false);
+  });
+});

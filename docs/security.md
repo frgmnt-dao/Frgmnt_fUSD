@@ -135,6 +135,7 @@ Withdrawal guards (AaveLendingPoolAssetGuard, UniswapV3AssetGuard) apply per-ope
 | Chainlink oracles | Price feeds are accurate and liveness-checked |
 | Aave V3 | Protocol is non-malicious; aToken accounting is correct |
 | Morpho Blue | Protocol is non-malicious; position accounting is correct |
+| Morpho Vault V2 | Vault accounting (`convertToAssets`) and the curator's chosen adapters are non-malicious; `forceDeallocate` penalties are bounded on-chain by Morpho's own protocol-level cap, not by Frgmnt; mitigated by `MorphoVaultV2Manager` allowlisting only vetted vault instances per pool |
 | Uniswap V3 | On-chain TWAP data is reliable over the configured window |
 | Manager | Acts in good faith within protocol limits; cannot steal funds directly |
 | Timelock + DAO multisig | Multisig signers are honest and keys are secure |
@@ -155,6 +156,8 @@ Withdrawal guards (AaveLendingPoolAssetGuard, UniswapV3AssetGuard) apply per-ope
 | Health factor breach | `afterTxGuard()` post-transaction health factor validation |
 | Unsupported debt during Aave/Morpho unwind | Guard enforces only supported assets can be borrowed |
 | Collateral removal with open positions | `removeAssetCheck()` enforces zero balance before removal |
+| `forceDeallocate` griefing of a pool's Morpho Vault V2 position | Permissionless on the vault itself — any third party can already call it against any pool's position independent of Frgmnt's guards; penalty is capped on-chain by Morpho's protocol-level maximum; `MorphoVaultV2Manager.getVaultAdapterPenalties()` lets governance review each adapter's configured penalty before whitelisting a vault |
+| Single illiquid/misbehaving asset blocking fund-wide pro-rata withdrawals | `MorphoVaultV2AssetGuard.getBalance()` degrades to 0 instead of reverting on a misbehaving vault, so it can be removed via `changeAssets()` rather than bricking the pool; manager can switch to queued withdrawals (`setImmediateWithdrawEnabled(false)`) to decouple requests from requiring every asset to be liquid simultaneously |
 
 ---
 
