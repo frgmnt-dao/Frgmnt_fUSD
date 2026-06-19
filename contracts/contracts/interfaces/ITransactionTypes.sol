@@ -34,6 +34,13 @@ interface ITransactionTypes {
         MorphoVaultV2Mint, // 26
         MorphoVaultV2Withdraw, // 27
         MorphoVaultV2Redeem, // 28
-        MorphoVaultV2ForceDeallocate // 29
+        MorphoVaultV2ForceDeallocate, // 29
+        AaveV4SpokeSupply, // 30
+        AaveV4SpokeApproveWithdraw, // 31
+        AaveV4SpokeWithdraw, // 32
+        AaveV4TokenizationDeposit, // 33
+        AaveV4TokenizationMint, // 34
+        AaveV4TokenizationWithdraw, // 35
+        AaveV4TokenizationRedeem // 36
     }
 }
