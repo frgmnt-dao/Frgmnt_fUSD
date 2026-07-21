@@ -145,6 +145,13 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 
         (, int256 answer, uint256 startedAt, , ) = sequencerUptimeFeed.latestRoundData();
 
+        // startedAt == 0 can indicate an uninitialized round on some Chainlink L2 sequencer
+        // uptime feeds (e.g. immediately after deployment, before the first status update is
+        // ever pushed). Without this check, block.timestamp - 0 trivially exceeds the grace
+        // period below regardless of whether the sequencer's actual health is known at all,
+        // letting prices be used even though sequencer status has never been confirmed.
+        require(startedAt != 0, "Frgmnt: sequencer round not started");
+
         // Sequencer down → revert
         require(answer == 0, "Frgmnt: sequencer down");
 
