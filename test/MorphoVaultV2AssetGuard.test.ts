@@ -231,6 +231,42 @@ describe('MorphoVaultV2AssetGuard', () => {
       // No setAssetPrice call: price defaults to 0 on the mock poolManagerLogic.
       expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
     });
+
+    it('returns 0 (does not revert) when getAssetPrice() reverts on a held position', async () => {
+      // Simulates AssetHandler.getUSDPrice() reverting on a stale Chainlink feed or L2
+      // sequencer downtime for the underlying — a real, transient operating condition, not a
+      // misbehaving vault. Left unguarded, this would revert totalFundValue() and freeze
+      // stake/unstake/harvest/withdraw for the entire pool, and would also revert
+      // removeAssetCheck() (which itself calls getBalance()), bricking the recovery path.
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      // Sanity: valuation works before the price feed breaks.
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.be.gt(0n);
+
+      await poolManager.setBrokenPrice(usdcAddr, true);
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+    });
+
+    it('returns 0 (does not revert) when assetDecimal() reverts on a held position', async () => {
+      // Simulates the underlying's registered asset guard being revoked/broken after the
+      // vault position was already established.
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.be.gt(0n);
+
+      await poolManager.setAssetGuard(usdcAddr, false, 6n);
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+    });
   });
 
   // -----------------------------------------------------------------------
