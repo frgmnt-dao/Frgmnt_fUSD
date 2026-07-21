@@ -470,4 +470,64 @@ describe('AaveV4SpokeAssetGuard', () => {
       expect(await usdc.balanceOf(takerAddr)).to.equal(0n);
     });
   });
+
+  // -----------------------------------------------------------------------
+  // removeAssetCheck
+  // -----------------------------------------------------------------------
+
+  describe('removeAssetCheck', () => {
+    it('succeeds when the pool holds no supplied assets', async () => {
+      const { guard, poolAddr, spokeAddr } = await deploy();
+      await expect(guard.removeAssetCheck(poolAddr, spokeAddr)).to.not.be.reverted;
+    });
+
+    it('reverts when the pool still holds a non-dust, valued position', async () => {
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await expect(guard.removeAssetCheck(poolAddr, spokeAddr)).to.be.revertedWith(
+        'ClosedAssetGuard: non-empty asset',
+      );
+    });
+
+    it('succeeds when only dust remains after a nominally-full withdrawal (residual at exactly the tolerance)', async () => {
+      // Regression coverage: a full-portion withdrawal computes its amount from a live
+      // suppliedAssets snapshot rather than a max-balance sentinel (see DUST_TOLERANCE_USD18),
+      // so a tiny residual from Aave V4's own internal rounding is a realistic possibility this
+      // guard cannot rule out. Without the tolerance, this exact scenario would permanently
+      // block removeAssetCheck() via ClosedAssetGuard's strict balance == 0 check.
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      // 1000 raw units of 6-decimal USDC at $1 == exactly 1e15 USD-18 == DUST_TOLERANCE_USD18.
+      await spoke.setSuppliedAssets(1n, poolAddr, 1_000n);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, spokeAddr)).to.equal(10n ** 15n);
+      await expect(guard.removeAssetCheck(poolAddr, spokeAddr)).to.not.be.reverted;
+    });
+
+    it('reverts when the residual exceeds the dust tolerance by even a small amount', async () => {
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      // 1 raw unit above the tolerance boundary.
+      await spoke.setSuppliedAssets(1n, poolAddr, 1_001n);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, spokeAddr)).to.be.gt(10n ** 15n);
+      await expect(guard.removeAssetCheck(poolAddr, spokeAddr)).to.be.revertedWith(
+        'ClosedAssetGuard: non-empty asset',
+      );
+    });
+  });
 });

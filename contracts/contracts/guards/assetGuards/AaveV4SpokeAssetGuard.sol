@@ -60,6 +60,27 @@ contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
     error SpokeNotWhitelisted();
 
     /*//////////////////////////////////////////////////////////////
+                              CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev USD-18 dust tolerance for `removeAssetCheck`, matching the tolerance
+    ///      `PoolLogic._withdrawCashImmediateToSafe` already uses for its own value-conservation
+    ///      check. `_appendReserveWithdrawTxs` computes a full withdrawal's `amount` from a
+    ///      live-read `ISpoke.getUserSuppliedAssets` snapshot rather than a `type(uint256).max`
+    ///      sentinel (Aave V4's `withdrawOnBehalfOf` does not document supporting one, unlike
+    ///      `approveWithdraw`'s allowance — see ITakerPositionManager), because this guard
+    ///      forwards a fixed, pre-computed amount via a direct `transfer(to, amount)` rather than
+    ///      a balance-delta measurement (multiple reserves can share one Spoke with *different*
+    ///      underlyings, so PoolLogic's single-`withdrawAsset` delta tracking doesn't apply here
+    ///      — see the contract-level documentation above). If Aave V4's internal share<->asset rounding
+    ///      ever leaves a tiny residual behind after withdrawing that exact snapshotted amount,
+    ///      a strict `balance == 0` check would block removeAssetCheck() indefinitely, since
+    ///      getBalance() re-reads live state and would keep reporting that same tiny nonzero
+    ///      value forever — bricking the only recovery path over an amount with no realistic
+    ///      economic significance.
+    uint256 private constant DUST_TOLERANCE_USD18 = 1e15;
+
+    /*//////////////////////////////////////////////////////////////
                                 STRUCTS
     //////////////////////////////////////////////////////////////*/
 
@@ -187,6 +208,17 @@ contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
     ///      `getBalance()` (price=1e18, decimals=18).
     function getDecimals(address) external pure override returns (uint256) {
         return 18;
+    }
+
+    /// @notice Allows removal once the position is closed to within DUST_TOLERANCE_USD18,
+    ///         rather than requiring an exact zero balance.
+    /// @dev See DUST_TOLERANCE_USD18 for why: a nominally-full withdrawal computes its amount
+    ///      from a live snapshot rather than a max-balance sentinel, so a tiny rounding residual
+    ///      on Aave V4's side is a realistic possibility this guard cannot rule out, and a
+    ///      strict zero-check would have no recovery path if it ever occurred.
+    function removeAssetCheck(address pool, address asset) public view override {
+        uint256 balance = getBalance(pool, asset);
+        require(balance <= DUST_TOLERANCE_USD18, "ClosedAssetGuard: non-empty asset");
     }
 
     /*//////////////////////////////////////////////////////////////
