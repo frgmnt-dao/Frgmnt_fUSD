@@ -140,6 +140,14 @@ contract FrgmntUserActions is ReentrancyGuard {
         emit WithdrawImmediateWithPermit(user, amountFusd);
     }
 
+    /// @dev A raw EIP-2612 signature submitted in calldata is inherently front-runnable: anyone
+    ///      watching the mempool can copy (owner, spender, value, deadline, v, r, s) and call
+    ///      permit() themselves before this transaction lands. That consumes the signature's
+    ///      nonce but still sets the allowance the user intended, so — without this check —
+    ///      the user's own call would revert on the now-stale signature even though the
+    ///      allowance it was meant to create already exists. Checking the current allowance
+    ///      first means a front-run permit only ever *helps* (skips a redundant call) rather
+    ///      than griefing the transaction into failing.
     function _permitIfEnabled(
         address token,
         address owner,
@@ -147,6 +155,7 @@ contract FrgmntUserActions is ReentrancyGuard {
         PermitData calldata permitData
     ) internal {
         if (!permitData.enabled) return;
+        if (IERC20(token).allowance(owner, spender) >= permitData.value) return;
 
         IERC20Permit(token).permit(
             owner,

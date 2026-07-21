@@ -179,6 +179,133 @@ describe('FrgmntUserActions', () => {
     expect(await fusd.allowance(await user.getAddress(), await pool.getAddress())).to.equal(0n);
   });
 
+  it('front-running the fusd permit does not block stakeWithPermit (allowance already set is sufficient)', async () => {
+    // Simulates a third party watching the mempool, copying the exact (v, r, s) from the
+    // user's pending transaction, and submitting fusd.permit() themselves first. That
+    // consumes the signature's nonce but leaves the intended allowance in place — the user's
+    // own call must still succeed rather than reverting on the now-stale signature.
+    const { user, other, userActions, fusd, pool, usdc } = await loadFixture(deployFixture);
+    const amount = 250n * 10n ** 6n;
+    const fusdAmount = 250n * WAD;
+
+    await usdc.connect(user).approve(await fusd.getAddress(), amount);
+    await fusd
+      .connect(user)
+      ['deposit(address,uint256,address,uint256)'](
+        await usdc.getAddress(),
+        amount,
+        await user.getAddress(),
+        fusdAmount,
+      );
+
+    const deadline = BigInt((await ethers.provider.getBlock('latest'))!.timestamp + 3600);
+    const permit = await signFusdPermit(fusd, user, await pool.getAddress(), fusdAmount, deadline);
+
+    // Front-runner submits the exact same signature first.
+    await fusd
+      .connect(other)
+      .permit(
+        await user.getAddress(),
+        await pool.getAddress(),
+        fusdAmount,
+        deadline,
+        permit.v,
+        permit.r,
+        permit.s,
+      );
+    expect(await fusd.allowance(await user.getAddress(), await pool.getAddress())).to.equal(
+      fusdAmount,
+    );
+
+    // The user's transaction reuses the same (now-consumed) signature but must still succeed,
+    // since the allowance it was meant to create already exists.
+    await expect(userActions.connect(user).stakeWithPermit(fusdAmount, fusdAmount, permit)).to.emit(
+      userActions,
+      'StakeWithPermit',
+    );
+
+    expect(await pool.balanceOf(await user.getAddress())).to.equal(fusdAmount);
+  });
+
+  it('front-running the fusd permit does not block withdrawImmediateWithPermit', async () => {
+    const { user, other, userActions, fusd, pool, usdc } = await loadFixture(deployFixture);
+    const amount = 1_000n * 10n ** 6n;
+    const fusdAmount = 1_000n * WAD;
+
+    await usdc.connect(user).approve(await fusd.getAddress(), amount);
+    await fusd
+      .connect(user)
+      ['deposit(address,uint256,address,uint256)'](
+        await usdc.getAddress(),
+        amount,
+        await user.getAddress(),
+        fusdAmount,
+      );
+
+    const deadline = BigInt((await ethers.provider.getBlock('latest'))!.timestamp + 3600);
+    const permit = await signFusdPermit(fusd, user, await pool.getAddress(), fusdAmount, deadline);
+
+    // Front-runner copies the pending calldata and submits the permit directly.
+    await fusd
+      .connect(other)
+      .permit(
+        await user.getAddress(),
+        await pool.getAddress(),
+        fusdAmount,
+        deadline,
+        permit.v,
+        permit.r,
+        permit.s,
+      );
+
+    const usdcBefore = await usdc.balanceOf(await user.getAddress());
+    await expect(
+      userActions.connect(user).withdrawImmediateWithPermit(fusdAmount, permit),
+    )
+      .to.emit(userActions, 'WithdrawImmediateWithPermit')
+      .withArgs(await user.getAddress(), fusdAmount);
+
+    expect(await usdc.balanceOf(await user.getAddress())).to.equal(usdcBefore + amount);
+  });
+
+  it('never calls permit() when the allowance is already sufficient, even with a garbage/reused signature', async () => {
+    // Directly proves the fix's mechanism: with the allowance already in place, an invalid
+    // signature (mismatched v/r/s, would revert if permit() were actually invoked) must not
+    // stop the action from succeeding, because _permitIfEnabled short-circuits before calling
+    // permit() at all.
+    const { user, userActions, fusd, pool, usdc } = await loadFixture(deployFixture);
+    const amount = 100n * 10n ** 6n;
+    const fusdAmount = 100n * WAD;
+
+    await usdc.connect(user).approve(await fusd.getAddress(), amount);
+    await fusd
+      .connect(user)
+      ['deposit(address,uint256,address,uint256)'](
+        await usdc.getAddress(),
+        amount,
+        await user.getAddress(),
+        fusdAmount,
+      );
+
+    // Pre-approve directly (as if a previous permit or a plain approve() already ran).
+    await fusd.connect(user).approve(await pool.getAddress(), fusdAmount);
+
+    const garbagePermit = {
+      enabled: true,
+      value: fusdAmount,
+      deadline: BigInt((await ethers.provider.getBlock('latest'))!.timestamp + 3600),
+      v: 27,
+      r: ethers.ZeroHash,
+      s: ethers.ZeroHash,
+    };
+
+    await expect(
+      userActions.connect(user).stakeWithPermit(fusdAmount, fusdAmount, garbagePermit),
+    ).to.emit(userActions, 'StakeWithPermit');
+
+    expect(await pool.balanceOf(await user.getAddress())).to.equal(fusdAmount);
+  });
+
   it('unstakes shares and withdraws collateral to the same user', async () => {
     const { user, userActions, fusd, pool, usdc } = await loadFixture(deployFixture);
     const amount = 1_000n * 10n ** 6n;
