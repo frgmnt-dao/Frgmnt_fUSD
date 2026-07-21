@@ -41,8 +41,12 @@ describe('MorphoVaultV2ContractGuard', () => {
     await vault.waitForDeployment();
     const vaultAddr = await vault.getAddress();
 
-    // Happy-path registration: supported asset + whitelisted vault.
+    // Happy-path registration: supported asset + whitelisted vault + the vault's own
+    // underlying also registered as a supported asset of this pool (required since
+    // MorphoVaultV2ContractGuard checks isSupportedAsset() on the underlying, independent of
+    // the vault's own supported/whitelisted status).
     await poolManager.setSupportedAsset(vaultAddr, true);
+    await poolManager.setSupportedAsset(await underlying.getAddress(), true);
     await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, [vaultAddr]);
 
     return {
@@ -154,6 +158,19 @@ describe('MorphoVaultV2ContractGuard', () => {
     ).to.be.revertedWith('MorphoVaultV2Guard: receiver != pool');
   });
 
+  it('deposit reverts when the vault is registered but its underlying is not a supported asset of this pool', async () => {
+    // Regression coverage: the vault being supported+whitelisted must not be sufficient on its
+    // own — otherwise converting between vault shares (counted in TVL) and the raw underlying
+    // (uncounted) could be used to manufacture an artificial TVL/share-price swing.
+    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr, underlying } =
+      await deploy();
+    await poolManager.setSupportedAsset(await underlying.getAddress(), false);
+    const data = vaultIface.encodeFunctionData('deposit', [1000n, poolLogicAddr]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: underlying not supported');
+  });
+
   // -----------------------------------------------------------------------
   // mint
   // -----------------------------------------------------------------------
@@ -178,6 +195,16 @@ describe('MorphoVaultV2ContractGuard', () => {
     await expect(
       callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
     ).to.be.revertedWith('MorphoVaultV2Guard: receiver != pool');
+  });
+
+  it('mint reverts when the vault is registered but its underlying is not a supported asset of this pool', async () => {
+    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr, underlying } =
+      await deploy();
+    await poolManager.setSupportedAsset(await underlying.getAddress(), false);
+    const data = vaultIface.encodeFunctionData('mint', [500n, poolLogicAddr]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: underlying not supported');
   });
 
   // -----------------------------------------------------------------------
@@ -216,6 +243,19 @@ describe('MorphoVaultV2ContractGuard', () => {
     ).to.be.revertedWith('MorphoVaultV2Guard: owner != pool');
   });
 
+  it('withdraw reverts when the vault is registered but its underlying is not a supported asset of this pool', async () => {
+    // This is the exact path the TVL-manipulation scenario relies on: withdrawing from a
+    // registered, whitelisted vault whose underlying was never separately added would convert
+    // counted vault shares into an uncounted raw-token balance.
+    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr, underlying } =
+      await deploy();
+    await poolManager.setSupportedAsset(await underlying.getAddress(), false);
+    const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, poolLogicAddr]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: underlying not supported');
+  });
+
   // -----------------------------------------------------------------------
   // redeem
   // -----------------------------------------------------------------------
@@ -250,6 +290,16 @@ describe('MorphoVaultV2ContractGuard', () => {
     await expect(
       callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
     ).to.be.revertedWith('MorphoVaultV2Guard: owner != pool');
+  });
+
+  it('redeem reverts when the vault is registered but its underlying is not a supported asset of this pool', async () => {
+    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr, underlying } =
+      await deploy();
+    await poolManager.setSupportedAsset(await underlying.getAddress(), false);
+    const data = vaultIface.encodeFunctionData('redeem', [300n, poolLogicAddr, poolLogicAddr]);
+    await expect(
+      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+    ).to.be.revertedWith('MorphoVaultV2Guard: underlying not supported');
   });
 
   // -----------------------------------------------------------------------
@@ -315,6 +365,36 @@ describe('MorphoVaultV2ContractGuard', () => {
     await expect(
       callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
     ).to.be.revertedWith('MorphoVaultV2Guard: adapter not registered');
+  });
+
+  it('forceDeallocate is permissionless on the vault itself: an unrelated address can call it directly, bypassing this guard entirely, and burns only the configured, bounded penalty', async () => {
+    // This does not go through callGuard()/txGuard() at all — it calls the mock vault
+    // directly, exactly as a third party would on the real Morpho Vault V2, to confirm the
+    // guard's onBehalf/isAdapter checks (tested above) are the only protection Frgmnt can
+    // offer for manager/trader-initiated calls, and that this permissionless path is a known,
+    // bounded, accepted risk (see docs/security.md's Known Risks & Mitigations table), not a
+    // bypass of anything Frgmnt's guard was ever able to prevent.
+    const { poolLogicAddr, vault, adapter, other } = await deploy();
+    await vault.setAdapter(adapter.address, true);
+
+    const initialShares = 1_000n;
+    await vault.mintShares(poolLogicAddr, initialShares);
+
+    // 5% penalty rate on this adapter, WAD-scaled, matching forceDeallocatePenalty()'s
+    // documented units (capped on Morpho's side by its own protocol-level maximum).
+    const penaltyRate = ethers.parseUnits('0.05', 18);
+    await vault.setForceDeallocatePenalty(adapter.address, penaltyRate);
+
+    const assets = 1_000n;
+    const expectedPenaltyShares = (assets * penaltyRate) / ethers.parseUnits('1', 18);
+
+    // `other` is an arbitrary signer — not the pool, not a manager/trader, never routed
+    // through PoolTxExecutor or this guard — calling the vault directly.
+    await vault.connect(other).forceDeallocate(adapter.address, '0x', assets, poolLogicAddr);
+
+    expect(await vault.balanceOf(poolLogicAddr)).to.equal(initialShares - expectedPenaltyShares);
+    // The caller receives no shares or assets directly — this is griefing, not a theft path.
+    expect(await vault.balanceOf(other.address)).to.equal(0n);
   });
 
   // -----------------------------------------------------------------------
