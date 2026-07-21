@@ -38,6 +38,16 @@ import "../../interfaces/IMorphoVaultV2Manager.sol";
 ///      Timelock), independent of the pool manager, mirroring the two-key model
 ///      `MorphoBlueManager` already provides for Morpho Blue markets.
 ///
+///      deposit/mint/withdraw/redeem additionally require the vault's own underlying asset
+///      (`IERC4626(vault).asset()`) to itself be a supported asset of this pool. The vault
+///      being supported says nothing about its underlying being supported too — those are
+///      registered independently via `changeAssets()`. Without this check, a manager could
+///      register a vault whose underlying was never added to this pool, then convert between
+///      vault shares (counted in totalFundValue()) and the raw underlying (uncounted, if never
+///      separately added) to produce an artificial swing in reported TVL/share price. Every
+///      other guard in this codebase already requires this on both directions (see
+///      AaveLendingPoolGuardV3, MorphoBlueContractGuard) — this mirrors that pattern.
+///
 ///      DEPLOYMENT NOTE — onboarding a new vault instance is a three-step process, all of
 ///      which are required before the manager can actively deposit/withdraw via
 ///      execTransaction:
@@ -160,10 +170,11 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         bytes4 method = getMethod(data);
         bytes memory params = getParams(data);
 
-        if (method == SEL_DEPOSIT) txType = _handleDeposit(poolLogic, to, params);
-        else if (method == SEL_MINT) txType = _handleMint(poolLogic, to, params);
-        else if (method == SEL_WITHDRAW) txType = _handleWithdraw(poolLogic, to, params);
-        else if (method == SEL_REDEEM) txType = _handleRedeem(poolLogic, to, params);
+        if (method == SEL_DEPOSIT) txType = _handleDeposit(poolLogic, to, _poolManagerLogic, params);
+        else if (method == SEL_MINT) txType = _handleMint(poolLogic, to, _poolManagerLogic, params);
+        else if (method == SEL_WITHDRAW)
+            txType = _handleWithdraw(poolLogic, to, _poolManagerLogic, params);
+        else if (method == SEL_REDEEM) txType = _handleRedeem(poolLogic, to, _poolManagerLogic, params);
         else if (method == SEL_FORCE_DEALLOCATE)
             txType = _handleForceDeallocate(poolLogic, to, params);
         else txType = uint16(TransactionType.NotUsed);
@@ -178,15 +189,34 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
                      INTERNAL HANDLERS — PER VAULT V2 OPERATION
     //////////////////////////////////////////////////////////////////////////*/
 
+    /// @dev The vault being a supported+whitelisted asset (checked in txGuard) says nothing
+    ///      about its *underlying* token: a vault can be registered without its underlying
+    ///      ever being added to this pool's own supportedAssets. Since totalFundValue() only
+    ///      sums value over supportedAssets, converting between vault shares (counted) and the
+    ///      raw underlying (uncounted, if never separately added) would let a manager produce
+    ///      an artificial TVL/share-price swing purely by moving value between the two
+    ///      representations. Every sibling guard in this codebase already requires
+    ///      isSupportedAsset() on the underlying token for both directions (see
+    ///      AaveLendingPoolGuardV3._deposit/._withdraw, MorphoBlueContractGuard._handleSupply/
+    ///      ._handleWithdraw) — this check restores that same protection here.
+    function _requireUnderlyingSupported(address poolManagerLogic, address vault) internal view {
+        require(
+            IHasSupportedAsset(poolManagerLogic).isSupportedAsset(IERC4626(vault).asset()),
+            "MorphoVaultV2Guard: underlying not supported"
+        );
+    }
+
     /// @dev deposit(uint256 assets, address receiver) — receiver must be the pool itself so
     ///      the minted shares can never be redirected to an arbitrary address.
     function _handleDeposit(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (uint256 assets, address receiver) = abi.decode(params, (uint256, address));
         require(receiver == poolLogic, "MorphoVaultV2Guard: receiver != pool");
+        _requireUnderlyingSupported(poolManagerLogic, vault);
 
         emit MorphoVaultV2DepositEvt(poolLogic, vault, assets, block.timestamp);
         return uint16(TransactionType.MorphoVaultV2Deposit);
@@ -196,10 +226,12 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     function _handleMint(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (uint256 shares, address receiver) = abi.decode(params, (uint256, address));
         require(receiver == poolLogic, "MorphoVaultV2Guard: receiver != pool");
+        _requireUnderlyingSupported(poolManagerLogic, vault);
 
         emit MorphoVaultV2MintEvt(poolLogic, vault, shares, block.timestamp);
         return uint16(TransactionType.MorphoVaultV2Mint);
@@ -210,6 +242,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     function _handleWithdraw(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (uint256 assets, address receiver, address owner) = abi.decode(
@@ -218,6 +251,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         );
         require(receiver == poolLogic, "MorphoVaultV2Guard: receiver != pool");
         require(owner == poolLogic, "MorphoVaultV2Guard: owner != pool");
+        _requireUnderlyingSupported(poolManagerLogic, vault);
 
         emit MorphoVaultV2WithdrawEvt(poolLogic, vault, assets, block.timestamp);
         return uint16(TransactionType.MorphoVaultV2Withdraw);
@@ -227,6 +261,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     function _handleRedeem(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (uint256 shares, address receiver, address owner) = abi.decode(
@@ -235,6 +270,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         );
         require(receiver == poolLogic, "MorphoVaultV2Guard: receiver != pool");
         require(owner == poolLogic, "MorphoVaultV2Guard: owner != pool");
+        _requireUnderlyingSupported(poolManagerLogic, vault);
 
         emit MorphoVaultV2RedeemEvt(poolLogic, vault, shares, block.timestamp);
         return uint16(TransactionType.MorphoVaultV2Redeem);

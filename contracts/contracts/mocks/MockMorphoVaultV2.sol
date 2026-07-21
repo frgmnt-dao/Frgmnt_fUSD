@@ -114,13 +114,22 @@ contract MockMorphoVaultV2 is ERC20 {
 
     // ----------------- Vault V2 extensions -----------------
 
+    /// @dev Permissionless, exactly like the real Morpho Vault V2 — no access control here,
+    ///      matching the fact that any caller (not just the guard-routed pool) can invoke this
+    ///      directly on the real vault. Burns `penaltyShares` from `onBehalf`'s own balance,
+    ///      using the configured per-adapter penalty rate, so tests can exercise the actual
+    ///      share-accounting impact of a third party calling this against a pool's position.
     function forceDeallocate(
-        address /* adapter */,
+        address adapter,
         bytes memory /* data */,
         uint256 assets,
-        address /* onBehalf */
-    ) external pure returns (uint256 penaltyShares) {
-        // Arbitrary stub penalty; not relied upon by the guards under test.
-        penaltyShares = assets / 100;
+        address onBehalf
+    ) external returns (uint256 penaltyShares) {
+        uint256 penaltyRate = forceDeallocatePenalty[adapter];
+        uint256 sharesForAssets = (assets * 1e18) / assetsPerShare;
+        penaltyShares = (sharesForAssets * penaltyRate) / 1e18;
+        if (penaltyShares > 0) {
+            _burn(onBehalf, penaltyShares);
+        }
     }
 }
