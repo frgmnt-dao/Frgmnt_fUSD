@@ -48,9 +48,9 @@ import "../../interfaces/IMorphoVaultV2Manager.sol";
 ///      other guard in this codebase already requires this on both directions (see
 ///      AaveLendingPoolGuardV3, MorphoBlueContractGuard) — this mirrors that pattern.
 ///
-///      DEPLOYMENT NOTE — onboarding a new vault instance is a three-step process, all of
-///      which are required before the manager can actively deposit/withdraw via
-///      execTransaction:
+///      DEPLOYMENT NOTE — onboarding a new vault instance for active manager/trader use is a
+///      four-step process, all of which are required before deposit/mint/withdraw/redeem can
+///      succeed via execTransaction:
 ///       1) `Governance.setContractGuard(vaultAddress, address(this))` — registered per vault
 ///          address, same as Aave/Morpho Blue's contract guards are registered against their
 ///          singleton pool addresses. Without this step, `PoolTxExecutor` never reaches this
@@ -60,9 +60,17 @@ import "../../interfaces/IMorphoVaultV2Manager.sol";
 ///       2) `MorphoVaultV2Manager.setPoolVaults(pool, [...])` — the protocol-owner whitelist.
 ///       3) `PoolManagerLogic.changeAssets()` — registers the vault as a supported asset,
 ///          running `MorphoVaultV2AssetGuard.addAssetCheck` (which itself re-checks step 2).
+///       4) `PoolManagerLogic.changeAssets()` again (or in the same call, alongside step 3) —
+///          separately registers the vault's own underlying token (`IERC4626(vault).asset()`)
+///          as a supported asset. This is independent of step 3 and easy to miss: registering
+///          the vault does not register its underlying, and vice versa. Skipping this step
+///          does not block deposits into a *different* already-supported asset, but every
+///          deposit/mint/withdraw/redeem call against *this* vault will revert with
+///          "MorphoVaultV2Guard: underlying not supported" until it's done.
 ///      Missing step (1) only blocks manager-initiated active execTransaction calls; it does
 ///      NOT affect valuation (`getBalance`) or the automatic pro-rata withdrawal path
-///      (`withdrawProcessing`), both of which run independently of this contract guard.
+///      (`withdrawProcessing`), both of which run independently of this contract guard. Step 4
+///      only affects this guard's deposit/mint/withdraw/redeem handlers for the same reason.
 contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     /*//////////////////////////////////////////////////////////////////////////
                                 FUNCTION SELECTORS
