@@ -256,6 +256,29 @@ describe('AssetHandler', () => {
       await feed.setData(0n, BigInt(now - 4000), false);
       expect(await handler.getUSDPrice(asset)).to.equal(1n * 10n ** 18n);
     });
+
+    it('reverts when the sequencer feed round is uninitialized (startedAt == 0), even though answer == 0', async () => {
+      // Regression coverage: block.timestamp - 0 trivially exceeds SEQUENCER_GRACE_PERIOD on
+      // any real chain, so without an explicit startedAt != 0 check, an uninitialized round
+      // (a real, documented Chainlink L2 sequencer-feed corner case) would let prices through
+      // even though the sequencer's actual health was never confirmed.
+      const handler = await deployAssetHandler();
+      const mock = await deployMockAggregator();
+      const feed = await deployMockAggregator();
+      const asset = ethers.Wallet.createRandom().address;
+      const now = await time.latest();
+
+      await mock.setData(1n * 10n ** 8n, BigInt(now), false);
+      await handler.initialize([{ asset, assetType: 2n, aggregator: await mock.getAddress() }]);
+      await handler.setChainlinkTimeout(asset, ASSET_TIMEOUT);
+      await handler.setSequencerUptimeFeed(await feed.getAddress());
+
+      // answer == 0 ("up") but startedAt == 0 (uninitialized round).
+      await feed.setData(0n, 0n, false);
+      await expect(handler.getUSDPrice(asset)).to.be.revertedWith(
+        'Frgmnt: sequencer round not started',
+      );
+    });
   });
 
   describe('addAsset', () => {
