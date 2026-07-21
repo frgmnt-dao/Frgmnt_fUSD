@@ -129,9 +129,12 @@ contract MorphoVaultV2AssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
     /// @dev `convertToAssets` on Morpho Vault V2 calls `accrueInterestView()` internally, so
     ///      this always reflects live, up-to-date interest — no staleness handling is needed.
     ///
-    ///      The calls into the vault itself (`asset()`, `convertToAssets()`) are wrapped in
-    ///      try/catch and degrade to a balance of 0 on failure, rather than reverting. This is
-    ///      a deliberate resilience choice: `getBalance` is on the hot path of
+    ///      Every external call this function makes — into the vault itself (`asset()`,
+    ///      `convertToAssets()`) and into the pricing layer (`getAssetPrice()`,
+    ///      `assetDecimal()`, which can revert on Chainlink staleness or L2 sequencer downtime,
+    ///      not just on a misbehaving vault) — is wrapped in try/catch and degrades to a
+    ///      balance of 0 on failure, rather than reverting. This is a deliberate resilience
+    ///      choice: `getBalance` is on the hot path of
     ///      `PoolManagerLogic.totalFundValue()`, which is read by `PoolLogic._accrueYield()` on
     ///      every stake/unstake/harvest call and by `_withdrawableFundValue()` on every
     ///      immediate cash withdrawal. If a single misbehaving or paused vault made this
@@ -168,10 +171,30 @@ contract MorphoVaultV2AssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
         if (underlyingAmount == 0) return 0;
 
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
-        uint256 price = IPoolManagerLogic(poolManagerLogic).getAssetPrice(underlying);
+
+        // getAssetPrice() reaches AssetHandler.getUSDPrice(), which reverts on a stale/missing
+        // Chainlink feed or a down/just-recovered L2 sequencer — all real, transient operating
+        // conditions, not configuration bugs (addAssetCheck already validated the underlying
+        // was priced at registration time). Left unguarded, any one of those conditions would
+        // revert totalFundValue() (no per-asset try/catch in its loop) and freeze stake/unstake/
+        // harvest/withdraw for the *entire* pool, not just this asset — and would also revert
+        // removeAssetCheck() (ClosedAssetGuard, which itself calls getBalance()), bricking the
+        // only recovery path. Same reasoning as the try/catch above; degrade to 0 instead.
+        uint256 price;
+        try IPoolManagerLogic(poolManagerLogic).getAssetPrice(underlying) returns (uint256 p) {
+            price = p;
+        } catch {
+            return 0;
+        }
         if (price == 0) return 0;
 
-        uint256 underlyingDecimals = IPoolManagerLogic(poolManagerLogic).assetDecimal(underlying);
+        uint256 underlyingDecimals;
+        try IPoolManagerLogic(poolManagerLogic).assetDecimal(underlying) returns (uint256 d) {
+            underlyingDecimals = d;
+        } catch {
+            return 0;
+        }
+
         balanceUsd18 = (underlyingAmount * price) / (10 ** underlyingDecimals);
     }
 

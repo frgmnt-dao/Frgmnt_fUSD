@@ -12,6 +12,7 @@ contract MockMorphoVaultV2PoolManagerLogic {
     mapping(address => uint256) public price;
     mapping(address => uint256) public decimalsOf;
     mapping(address => bool) public hasGuard;
+    mapping(address => bool) public brokenPrice;
 
     function setPoolLogic(address pl) external {
         poolLogic = pl;
@@ -30,7 +31,14 @@ contract MockMorphoVaultV2PoolManagerLogic {
     }
 
     function getAssetPrice(address a) external view returns (uint256) {
+        // Simulates AssetHandler.getUSDPrice() reverting on a stale Chainlink feed or a
+        // down/just-recovered L2 sequencer, rather than returning a value.
+        require(!brokenPrice[a], "MockMorphoVaultV2PoolManagerLogic: price broken");
         return price[a];
+    }
+
+    function setBrokenPrice(address a, bool broken) external {
+        brokenPrice[a] = broken;
     }
 
     function setAssetGuard(address a, bool registered, uint256 decimals_) external {
