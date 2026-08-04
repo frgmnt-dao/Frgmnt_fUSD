@@ -761,9 +761,10 @@ contract PoolLogic is
 
         uint256 valueAfter = _withdrawableFundValue();
         if (valueBefore < valueAfter) revert InvalidFundValue();
-        if (valueBefore - valueAfter > netFusd + 1e15) revert InvalidFundValue();
-        if (accountedAssets < valueBefore - valueAfter) revert InvalidFundValue();
-        accountedAssets -= valueBefore - valueAfter;
+        uint256 valueDelta = valueBefore - valueAfter;
+        if (valueDelta > netFusd + 1e15) revert InvalidFundValue();
+        if (accountedAssets < valueDelta) revert InvalidFundValue();
+        accountedAssets -= valueDelta;
 
         // Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
         emit CashWithdrawImmediate(user, amount, netFusd, feeFusd);
@@ -786,10 +787,16 @@ contract PoolLogic is
         internal
         returns (address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore)
     {
-        // compute portion in terms of totalFundValue
+        // compute portion in terms of totalFundValue, floored by outstanding claims so an
+        // underwater pool socializes the shortfall instead of paying early redeemers at par —
+        // see FundCalculationLibrary.computeImmediateWithdrawPortion and FNA-05.
         uint256 fundValue = _withdrawableFundValue();
         if (fundValue == 0) revert EmptyFund();
-        uint256 portion = (netFusd * 1e18) / fundValue;
+        uint256 portion = FundCalculationLibrary.computeImmediateWithdrawPortion(
+            address(this),
+            netFusd,
+            fundValue
+        );
         if (portion == 0) revert WithdrawAmountTooSmall();
 
         // withdraw proportionally from ALL supported assets
@@ -926,24 +933,30 @@ contract PoolLogic is
         uint256 totalFusd = r.fusdAmountTotal;
         if (totalFusd == 0) revert ZeroAmount();
 
-        uint256 feeFusd = totalFusd - r.fusdNetForAsset;
+        address asset = r.asset;
+        uint256 fusdNetForAsset = r.fusdNetForAsset;
+        uint256 feeFusd = totalFusd - fusdNetForAsset;
         if (feeFusd > 0) {
             IERC20(fusd).safeTransfer(_manager(), feeFusd);
         }
 
-        // convert netFusd to assetAmount using price
-        uint256 assetAmount = FundCalculationLibrary.fusdToAssetAmount(
-            poolManagerLogic,
-            r.fusdNetForAsset,
-            r.asset
+        // Floor by outstanding claims so an underwater pool socializes the shortfall instead of
+        // paying finalized-first requests at par, then convert to asset units at today's price —
+        // see FundCalculationLibrary.computeFinalizeAssetAmount and FNA-05. FUSD backing this
+        // request is transferred-not-burned until claimCashWithdraw, so totalSupply() already
+        // reflects outstanding claims as of this finalization.
+        uint256 assetAmount = FundCalculationLibrary.computeFinalizeAssetAmount(
+            address(this),
+            asset,
+            fusdNetForAsset
         );
         if (assetAmount == 0) revert ZeroAmount();
 
         // Finalization does not transfer assets to the user; assets remain on the contract until claim.
         // Therefore we must account for other finalized-but-unclaimed requests to avoid over-allocating
         // the same on-chain balance across multiple requests.
-        uint256 bal = IERC20(r.asset).balanceOf(address(this));
-        uint256 reserved = reservedAssetBalance[r.asset];
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        uint256 reserved = reservedAssetBalance[asset];
 
         // Defensive: reserved should never exceed the actual on-chain balance.
         if (bal < reserved) revert InvalidReservedBalance();
@@ -953,16 +966,16 @@ contract PoolLogic is
         if (available < assetAmount) revert InsufficientAssetBalance();
 
         // Reserve the amount for this request until it is claimed.
-        reservedAssetBalance[r.asset] = reserved + assetAmount;
+        reservedAssetBalance[asset] = reserved + assetAmount;
 
         r.assetAmount = assetAmount;
         r.status = RequestStatus.Finalized;
 
         emit CashWithdrawFinalized(
             requestId,
-            r.fusdAmountTotal,
-            r.fusdNetForAsset,
-            r.asset,
+            totalFusd,
+            fusdNetForAsset,
+            asset,
             assetAmount
         );
     }

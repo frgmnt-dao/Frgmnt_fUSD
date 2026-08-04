@@ -11,6 +11,8 @@ interface IPoolLogic {
 
     function factory() external view returns (address);
 
+    function fusd() external view returns (address);
+
     function poolManagerLogic() external view returns (address);
 
     function mintManagerFee() external;
