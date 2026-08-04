@@ -1673,4 +1673,112 @@ describe('PoolLogic', () => {
       expect(await pool.compoundedRewardIndex()).to.equal(indexAfterCrossing);
     });
   });
+
+  // FNA-07: one under-liquid lending position must not block immediate withdrawals from the
+  // rest of the fund. Reproduces the finding with a real MorphoVaultV2AssetGuard position
+  // alongside a fully-liquid ERC20, where a naive full-portion redeem of the vault position
+  // would revert (insufficient underlying), and confirms the fix delivers a liquidity-capped,
+  // non-reverting withdrawal instead.
+  describe('FNA-07: liquidity-capped immediate withdrawal', () => {
+    async function deployWithVaultPosition() {
+      const fixture = await loadFixture(deployPoolFixture);
+      const { pool, poolManager, user } = fixture;
+      const poolAddr = await pool.getAddress();
+
+      const ManagerFactory = await ethers.getContractFactory('MorphoVaultV2Manager');
+      const morphoVaultV2Manager = await ManagerFactory.deploy();
+
+      const GuardFactory = await ethers.getContractFactory('MorphoVaultV2AssetGuard');
+      const vaultGuard = await GuardFactory.deploy(await morphoVaultV2Manager.getAddress());
+
+      const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
+      const underlying = await TestTokenLogic.deploy('Vault Underlying', 'VU', 18);
+
+      const VaultFactory = await ethers.getContractFactory('MockMorphoVaultV2');
+      const vault = await VaultFactory.deploy(await underlying.getAddress());
+      const vaultAddr = await vault.getAddress();
+
+      // Underlying is priced/decimaled for the guard's internal lookups, but not itself a
+      // directly-redeemable supported asset of the pool (isSupported = false).
+      await poolManager.setSupportedAsset(
+        await underlying.getAddress(),
+        false,
+        ethers.parseUnits('1', 18),
+        18,
+      );
+
+      // Vault registered as a pre-valued supported asset (price = $1, decimals = 18), matching
+      // the guard's IPreValuedAssetGuard convention.
+      await poolManager.setAssetGuard(vaultAddr, await vaultGuard.getAddress());
+      await poolManager.setSupportedAsset(vaultAddr, true, ethers.parseUnits('1', 18), 18);
+
+      return { ...fixture, pool, poolAddr, poolManager, user, vaultGuard, underlying, vault, vaultAddr };
+    }
+
+    it('delivers a non-reverting, liquidity-capped withdrawal when the vault position is under-liquid', async () => {
+      const { pool, poolAddr, poolManager, fusd, asset, user, underlying, vault, vaultAddr } =
+        await deployWithVaultPosition();
+
+      // Liquid side: 800 of the pool's existing plain ERC20 asset (price $1, 18 decimals, set up
+      // by deployPoolFixture already).
+      const liquidAmount = ethers.parseUnits('800', 18);
+      await asset.mint(poolAddr, liquidAmount);
+
+      // Illiquid side: a 1000-share Morpho Vault V2 position (1:1 with underlying), but only 200
+      // shares are actually redeemable right now (maxRedeem-capped), and the vault only holds
+      // enough real underlying to back exactly that capped amount.
+      const fullShares = ethers.parseUnits('1000', 18);
+      const cappedShares = ethers.parseUnits('200', 18);
+      await vault.mintShares(poolAddr, fullShares);
+      await vault.setMaxRedeemCap(true, cappedShares);
+      await underlying.mint(vaultAddr, cappedShares);
+
+      // Sanity: a naive redemption of the FULL position really would revert (proves this
+      // scenario would have bricked the old, uncapped code path).
+      await expect(vault.redeem(fullShares, poolAddr, poolAddr)).to.be.reverted;
+
+      await fusd.triggerIncrementAccountedAssets(
+        poolAddr,
+        ethers.parseUnits('1800', 18), // 800 liquid + 1000 full vault claim
+      );
+
+      // Withdrawable NAV = 800 (liquid) + 200 (liquidity-capped vault) = 1000.
+      const netFusd = ethers.parseUnits('500', 18); // 50% of the withdrawable NAV
+      await mintAndApproveFUSD(fusd, pool, user, netFusd);
+
+      const userAddr = await user.getAddress();
+      const liquidBefore = await asset.balanceOf(userAddr);
+      const underlyingBefore = await underlying.balanceOf(userAddr);
+
+      await expect(pool.connect(user).withdrawCashImmediate(netFusd)).to.not.be.reverted;
+
+      const liquidAfter = await asset.balanceOf(userAddr);
+      const underlyingAfter = await underlying.balanceOf(userAddr);
+
+      // 50% of the liquid asset's full 800.
+      expect(liquidAfter - liquidBefore).to.equal(ethers.parseUnits('400', 18));
+      // 50% of the vault's *capped* 200 (i.e. 100), not 50% of the full 1000 (which would be
+      // 500 and would have reverted).
+      expect(underlyingAfter - underlyingBefore).to.equal(ethers.parseUnits('100', 18));
+
+      // The vault position still holds its unredeemed remainder; nothing was lost or stuck.
+      expect(await vault.balanceOf(poolAddr)).to.equal(fullShares - ethers.parseUnits('100', 18));
+    });
+
+    it('regression: an immediate withdrawal touching only fully-liquid assets is unaffected (no vault position registered)', async () => {
+      const { pool, fusd, asset, user } = await loadFixture(deployPoolFixture);
+      const poolAsset = ethers.parseUnits('10000', 18);
+      await asset.mint(await pool.getAddress(), poolAsset);
+      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
+
+      const amount = ethers.parseUnits('1000', 18);
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+
+      const before = await asset.balanceOf(await user.getAddress());
+      await pool.connect(user).withdrawCashImmediate(amount);
+      const after = await asset.balanceOf(await user.getAddress());
+
+      expect(after - before).to.equal(amount);
+    });
+  });
 });

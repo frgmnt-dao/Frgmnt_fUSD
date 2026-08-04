@@ -1354,24 +1354,13 @@ contract PoolLogic is
     * This function computes the sum of :
     *   withdrawable balance = guardBalance - reservedBalance
     *
+    * FNA-07: guardBalance is further capped by whatever external liquidity a guard reports via
+    * IWithdrawableBalanceGuard (delegated to FundCalculationLibrary — see its docs), so one
+    * under-liquid lending position sizes its own share down instead of the whole withdrawal
+    * reverting.
     */
     function _withdrawableFundValue() internal view returns (uint256 value) {
-        IHasSupportedAsset.Asset[] memory assets = IHasSupportedAsset(poolManagerLogic)
-            .getSupportedAssets();
-
-        for (uint256 i = 0; i < assets.length; ++i) {
-            address asset = assets[i].asset;
-            address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-            // Gross balance as defined by the AssetGuard
-            uint256 withdrawableBalance = IAssetGuard(guard).getBalance(address(this), asset);
-            uint256 reserved = reservedAssetBalance[asset];
-            if (reserved > 0) {
-                if (withdrawableBalance < reserved) revert InvalidReservedBalance();
-                withdrawableBalance -= reserved;
-            }
-
-            value += IPoolManagerLogic(poolManagerLogic).assetValue(asset, withdrawableBalance);
-        }
+        return FundCalculationLibrary.computeWithdrawableFundValue(address(this), poolManagerLogic);
     }
 
     function _checkCallResult(
