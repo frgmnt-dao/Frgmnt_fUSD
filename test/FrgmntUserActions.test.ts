@@ -25,7 +25,9 @@ async function signFusdPermit(
   const nonce = await fusd.nonces(ownerAddress);
 
   const signature = await owner.signTypedData(
-    { name: 'Frgmnt USD', version: '1', chainId, verifyingContract },
+    // EIP-712 domain name must match this branch's deployed TokenLogic — "Frgmnt EURO" here,
+    // since feature/03-euro-pegged-stablecoin deploys a EUR-pegged token, not "Frgmnt USD".
+    { name: 'Frgmnt EURO', version: '1', chainId, verifyingContract },
     {
       Permit: [
         { name: 'owner', type: 'address' },
