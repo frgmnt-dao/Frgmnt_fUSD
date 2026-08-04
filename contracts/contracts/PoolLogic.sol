@@ -1122,6 +1122,12 @@ contract PoolLogic is
             trader: _trader()
         });
 
+        // PoolTxExecutor.exec() verifies, after dispatching the guarded call, that the reserve
+        // invariant (balanceOf(this) >= reservedAssetBalance[asset]) still holds for every
+        // supported asset — see PoolTxExecutor._checkReservedBalancesIntact(). Without this, a
+        // manager/trader deploying a reserved asset elsewhere (e.g. supplying it to Aave for
+        // yield, completely ordinary vault management) could silently leave a finalized withdraw
+        // claim unbacked.
         (bool success, uint16 txType) = PoolTxExecutor.exec(ctx, to, data);
 
         emit TransactionExecuted(address(this), msg.sender, txType, block.timestamp);
