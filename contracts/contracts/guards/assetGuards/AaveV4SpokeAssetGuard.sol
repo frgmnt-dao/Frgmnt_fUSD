@@ -14,6 +14,7 @@ import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
+import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -47,7 +48,7 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    continue, not revert-the-whole-function) — unlike Morpho Vault V2 (a single position per
 ///    guard call), a Spoke aggregates multiple reserves, so one bad reserve must not zero out
 ///    the valuation of the others.
-contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
+contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard, IPreValuedAssetGuard {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -208,6 +209,12 @@ contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
     ///      `getBalance()` (price=1e18, decimals=18).
     function getDecimals(address) external pure override returns (uint256) {
         return 18;
+    }
+
+    /// @notice getBalance() already returns a fully priced base-currency value; see
+    ///         IPreValuedAssetGuard and PoolManagerLogic.assetValue().
+    function isPreValuedAssetGuard() external pure override returns (bool) {
+        return true;
     }
 
     /// @notice Allows removal once the position is closed to within DUST_TOLERANCE_USD18,

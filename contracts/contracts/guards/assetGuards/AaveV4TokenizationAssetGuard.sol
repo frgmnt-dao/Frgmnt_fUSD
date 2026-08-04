@@ -13,6 +13,7 @@ import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
+import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -34,7 +35,7 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    AaveV4TokenizationManager whitelist — a vault must remain valuable and exitable even if
 ///    governance later revokes it from the whitelist; only *new* exposure
 ///    (AaveV4TokenizationContractGuard, and `addAssetCheck` below) is gated by the whitelist.
-contract AaveV4TokenizationAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
+contract AaveV4TokenizationAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard, IPreValuedAssetGuard {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -177,6 +178,12 @@ contract AaveV4TokenizationAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
     ///      `getBalance()` (price=1e18, decimals=18).
     function getDecimals(address) external pure override returns (uint256) {
         return 18;
+    }
+
+    /// @notice getBalance() already returns a fully priced base-currency value; see
+    ///         IPreValuedAssetGuard and PoolManagerLogic.assetValue().
+    function isPreValuedAssetGuard() external pure override returns (bool) {
+        return true;
     }
 
     /*//////////////////////////////////////////////////////////////

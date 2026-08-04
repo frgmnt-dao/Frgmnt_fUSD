@@ -446,9 +446,28 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         return IAssetGuard(guard).getDecimals(_asset);
     }
 
+    /// @dev Pre-valued guards (Aave V3/V4, Morpho Blue, Morpho Vault V2, Uniswap V3 — see
+    ///      IPreValuedAssetGuard) already return a fully priced, base-currency USD/EUR value from
+    ///      getBalance(), computed by pricing each underlying individually. Their registered
+    ///      pseudo-asset price feed exists only so addAssetCheck()-style registration validation
+    ///      has something to check; it must NOT be multiplied in again here, since that would
+    ///      silently double-apply any conversion (e.g. AssetHandler's EUR/USD rate) already baked
+    ///      into the guard's own internal pricing.
     function assetValue(address _asset, uint256 _amount) public view override returns (uint256) {
+        if (_amount == 0) return 0;
+
+        address guard = getAssetGuard(_asset);
+        if (guard != address(0)) {
+            (bool hasFn, bytes memory data) = guard.staticcall(
+                abi.encodeWithSignature("isPreValuedAssetGuard()")
+            );
+            if (hasFn && data.length == 32 && abi.decode(data, (bool))) {
+                return _amount;
+            }
+        }
+
         uint256 price = IAssetHandler(assetHandler).getUSDPrice(_asset);
-        if (price == 0 || _amount == 0) return 0;
+        if (price == 0) return 0;
 
         uint256 decimals = assetDecimal(_asset);
         return (price * _amount) / (10 ** decimals);
