@@ -1232,4 +1232,69 @@ describe('PoolLogic', () => {
       'InvalidReservedBalance',
     );
   });
+
+  it('reverts a guarded execTransaction that would leave a finalized withdrawal reservation unbacked', async () => {
+    const { pool, fusd, poolManager, asset, txGuard, manager, user, other } =
+      await loadFixture(deployPoolFixture);
+
+    await pool.connect(manager).setImmediateWithdrawEnabled(false);
+    const amount = ethers.parseUnits('100', 18);
+    await mintAndApproveFUSD(fusd, pool, user, amount);
+
+    const tx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
+    const receipt = await tx.wait();
+    const event = receipt!.logs
+      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .find((e: any) => e && e.name === 'CashWithdrawRequested');
+    const requestId = event!.args.requestId;
+
+    await asset.mint(await pool.getAddress(), amount);
+    await pool.connect(manager).finalizeCashWithdraw(requestId);
+    expect(await pool.reservedAssetBalance(await asset.getAddress())).to.equal(amount);
+
+    // Reassign the asset's guard to one that permits an arbitrary guarded call, mirroring how a
+    // real AssetGuard would let a manager deploy the asset elsewhere (e.g. supplying it to a
+    // lending protocol for yield) via execTransaction.
+    await poolManager.setAssetGuard(await asset.getAddress(), await txGuard.getAddress());
+    await txGuard.setTxType(1, true);
+
+    const data = asset.interface.encodeFunctionData('transfer', [await other.getAddress(), amount]);
+    await expectRevert(
+      pool.connect(user).execTransaction(await asset.getAddress(), data),
+      'InvalidReservedBalance',
+    );
+
+    // The reservation must still be fully backed: the transfer must not have gone through.
+    expect(await asset.balanceOf(await pool.getAddress())).to.equal(amount);
+  });
+
+  it('allows a guarded execTransaction that leaves a finalized withdrawal reservation intact', async () => {
+    const { pool, fusd, poolManager, asset, txGuard, manager, user, other } =
+      await loadFixture(deployPoolFixture);
+
+    await pool.connect(manager).setImmediateWithdrawEnabled(false);
+    const amount = ethers.parseUnits('100', 18);
+    await mintAndApproveFUSD(fusd, pool, user, amount);
+
+    const tx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
+    const receipt = await tx.wait();
+    const event = receipt!.logs
+      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .find((e: any) => e && e.name === 'CashWithdrawRequested');
+    const requestId = event!.args.requestId;
+
+    const extra = ethers.parseUnits('50', 18);
+    await asset.mint(await pool.getAddress(), amount + extra);
+    await pool.connect(manager).finalizeCashWithdraw(requestId);
+
+    await poolManager.setAssetGuard(await asset.getAddress(), await txGuard.getAddress());
+    await txGuard.setTxType(1, true);
+
+    // Only moves the unreserved surplus above the reservation; the reservation stays fully backed.
+    const data = asset.interface.encodeFunctionData('transfer', [await other.getAddress(), extra]);
+    await pool.connect(user).execTransaction(await asset.getAddress(), data);
+
+    expect(await asset.balanceOf(await pool.getAddress())).to.equal(amount);
+    expect(await asset.balanceOf(await other.getAddress())).to.equal(extra);
+  });
 });
