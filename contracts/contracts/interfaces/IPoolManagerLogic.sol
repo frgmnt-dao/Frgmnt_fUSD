@@ -23,6 +23,15 @@ interface IPoolManagerLogic {
 
     function totalFundValue() external view returns (uint256);
 
+    /// @notice Same total as totalFundValue(), plus whether every position was fully valued.
+    /// @dev `complete` is false if any IIncompleteValuationGuard-marked guard degraded a
+    ///      nonzero-raw-balance position to a lower USD value on a transient external failure
+    ///      (see that interface). Used by PoolLogic._accrueYield() to withhold yield/fee
+    ///      recognition when the reading can't be trusted, without blocking stake/unstake/
+    ///      harvest themselves — see PoolLogic._accrueYield() for why blocking those outright is
+    ///      not the chosen tradeoff.
+    function totalFundValueWithCompleteness() external view returns (uint256 total, bool complete);
+
     function isMemberAllowed(address member) external view returns (bool);
 
     function getFee() external view returns (uint256, uint256, uint256, uint256, uint256);

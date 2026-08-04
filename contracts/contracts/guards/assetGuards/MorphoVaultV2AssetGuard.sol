@@ -13,6 +13,7 @@ import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
+import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -34,7 +35,11 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    MorphoVaultV2Manager whitelist — a vault must remain valuable and exitable even if
 ///    governance later revokes it from the whitelist; only *new* exposure
 ///    (MorphoVaultV2ContractGuard, and `addAssetCheck` below) is gated by the whitelist.
-contract MorphoVaultV2AssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
+contract MorphoVaultV2AssetGuard is
+    ClosedAssetGuard,
+    IAddAssetCheckGuard,
+    IIncompleteValuationGuard
+{
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -151,51 +156,66 @@ contract MorphoVaultV2AssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
         address pool,
         address asset
     ) public view override returns (uint256 balanceUsd18) {
+        (balanceUsd18, ) = _valuePosition(pool, asset);
+    }
+
+    /// @dev Shared by getBalance() and isValuationComplete() below, so the two can never
+    ///      disagree about which failure paths count as "incomplete" — see getBalance()'s
+    ///      previous documentation (now here) for why each of these degrades rather than
+    ///      reverts.
+    ///
+    ///      getAssetPrice() reaches AssetHandler.getUSDPrice(), which reverts on a stale/missing
+    ///      Chainlink feed or a down/just-recovered L2 sequencer — all real, transient operating
+    ///      conditions, not configuration bugs (addAssetCheck already validated the underlying
+    ///      was priced at registration time). Left unguarded, any one of those conditions would
+    ///      revert totalFundValue() (no per-asset try/catch in its loop) and freeze stake/unstake/
+    ///      harvest/withdraw for the *entire* pool, not just this asset — and would also revert
+    ///      removeAssetCheck() (ClosedAssetGuard, which itself calls getBalance()), bricking the
+    ///      only recovery path. Degrading to 0 instead keeps the rest of the pool operational;
+    ///      isValuationComplete() lets callers that need to know the reading was trustworthy
+    ///      (PoolManagerLogic.totalFundValueWithCompleteness(), removeAssetCheck() below) tell the
+    ///      difference between "genuinely empty" and "temporarily unknowable".
+    function _valuePosition(
+        address pool,
+        address asset
+    ) internal view returns (uint256 balanceUsd18, bool complete) {
         uint256 shares = IERC20(asset).balanceOf(pool);
-        if (shares == 0) return 0;
+        if (shares == 0) return (0, true);
 
         address underlying;
         try IERC4626(asset).asset() returns (address u) {
             underlying = u;
         } catch {
-            return 0;
+            return (0, false);
         }
-        if (underlying == address(0)) return 0;
+        if (underlying == address(0)) return (0, false);
 
         uint256 underlyingAmount;
         try IERC4626(asset).convertToAssets(shares) returns (uint256 a) {
             underlyingAmount = a;
         } catch {
-            return 0;
+            return (0, false);
         }
-        if (underlyingAmount == 0) return 0;
+        if (underlyingAmount == 0) return (0, false);
 
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
 
-        // getAssetPrice() reaches AssetHandler.getUSDPrice(), which reverts on a stale/missing
-        // Chainlink feed or a down/just-recovered L2 sequencer — all real, transient operating
-        // conditions, not configuration bugs (addAssetCheck already validated the underlying
-        // was priced at registration time). Left unguarded, any one of those conditions would
-        // revert totalFundValue() (no per-asset try/catch in its loop) and freeze stake/unstake/
-        // harvest/withdraw for the *entire* pool, not just this asset — and would also revert
-        // removeAssetCheck() (ClosedAssetGuard, which itself calls getBalance()), bricking the
-        // only recovery path. Same reasoning as the try/catch above; degrade to 0 instead.
         uint256 price;
         try IPoolManagerLogic(poolManagerLogic).getAssetPrice(underlying) returns (uint256 p) {
             price = p;
         } catch {
-            return 0;
+            return (0, false);
         }
-        if (price == 0) return 0;
+        if (price == 0) return (0, false);
 
         uint256 underlyingDecimals;
         try IPoolManagerLogic(poolManagerLogic).assetDecimal(underlying) returns (uint256 d) {
             underlyingDecimals = d;
         } catch {
-            return 0;
+            return (0, false);
         }
 
-        balanceUsd18 = (underlyingAmount * price) / (10 ** underlyingDecimals);
+        return ((underlyingAmount * price) / (10 ** underlyingDecimals), true);
     }
 
     /// @notice AssetGuard balances are always expressed in USD (18 decimals).
@@ -204,6 +224,28 @@ contract MorphoVaultV2AssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
     ///      `getBalance()` (price=1e18, decimals=18).
     function getDecimals(address) external pure override returns (uint256) {
         return 18;
+    }
+
+    /// @notice See IIncompleteValuationGuard.
+    function isIncompleteValuationGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @notice See IIncompleteValuationGuard.
+    function isValuationComplete(address pool, address asset) external view override returns (bool complete) {
+        (, complete) = _valuePosition(pool, asset);
+    }
+
+    /// @notice Ensures the vault can be removed only when the pool holds no shares.
+    /// @dev Deliberately checks the raw share balance rather than the inherited
+    ///      ClosedAssetGuard.removeAssetCheck()'s getBalance()-based check. getBalance() degrades
+    ///      to 0 on a transient valuation failure (see its documentation above) so that stake/unstake/harvest
+    ///      keep working for the rest of the pool — but that same fail-open behavior would let
+    ///      removeAssetCheck() treat a live, nonzero position as empty and permit removing it
+    ///      from supportedAssets, orphaning the shares (excluded from NAV, unreachable by
+    ///      withdrawals) until manually re-added. balanceOf() has no such failure mode to exploit.
+    function removeAssetCheck(address pool, address asset) public view override {
+        require(IERC20(asset).balanceOf(pool) == 0, "ClosedAssetGuard: non-empty asset");
     }
 
     /*//////////////////////////////////////////////////////////////

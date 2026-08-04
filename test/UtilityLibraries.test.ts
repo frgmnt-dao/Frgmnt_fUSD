@@ -24,6 +24,9 @@ describe('Utility libraries', () => {
       ethers.ZeroAddress,
     );
 
+    const LegacyPoolManager = await ethers.getContractFactory('TestLegacyPoolManagerLogic');
+    const legacyPoolManager = await LegacyPoolManager.deploy();
+
     const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
     const token6 = await TestTokenLogic.deploy('Token 6', 'T6', 6);
     const token18 = await TestTokenLogic.deploy('Token 18', 'T18', 18);
@@ -68,6 +71,7 @@ describe('Utility libraries', () => {
       fund,
       txData,
       poolManager,
+      legacyPoolManager,
       token6,
       token18,
       token20,
@@ -175,6 +179,133 @@ describe('Utility libraries', () => {
       expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), amount, await token6.getAddress())).to.equal(1_000_000n);
       expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), amount, await token18.getAddress())).to.equal(amount);
       expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), amount, await token20.getAddress())).to.equal(10n ** 20n);
+    });
+
+    // FNA-04 regression coverage.
+    describe('totalValueWithCompleteness', () => {
+      it('reads the total and completeness directly when the target implements totalFundValueWithCompleteness()', async () => {
+        const { fund, poolManager } = await loadFixture(deployLibrariesFixture);
+        await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
+
+        let [total, complete] = await fund.totalValueWithCompleteness(await poolManager.getAddress());
+        expect(total).to.equal(ethers.parseUnits('1000', 18));
+        expect(complete).to.equal(true);
+
+        await poolManager.setValuationComplete(false);
+        [total, complete] = await fund.totalValueWithCompleteness(await poolManager.getAddress());
+        expect(total).to.equal(ethers.parseUnits('1000', 18));
+        expect(complete).to.equal(false);
+      });
+
+      it('falls back to totalFundValue() and reports complete=true against a target that does not implement totalFundValueWithCompleteness() (PoolLogic/PoolManagerLogic upgrade-order safety)', async () => {
+        const { fund, legacyPoolManager } = await loadFixture(deployLibrariesFixture);
+        await legacyPoolManager.setTotalFundValue(ethers.parseUnits('777', 18));
+
+        const [total, complete] = await fund.totalValueWithCompleteness(
+          await legacyPoolManager.getAddress(),
+        );
+        expect(total).to.equal(ethers.parseUnits('777', 18));
+        expect(complete).to.equal(true);
+      });
+    });
+
+    describe('computeYieldAccrual', () => {
+      it('is a no-op when navComplete is false, leaving accountedAssets and lastFeeMintTime unchanged', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const now = BigInt(await time.latest());
+        const accountedAssets = ethers.parseUnits('1000', 18);
+
+        const result = await fund.computeYieldAccrual(
+          ethers.parseUnits('2000', 18), // totalValue (understated NAV would otherwise show yield here)
+          false, // navComplete
+          accountedAssets,
+          ethers.parseUnits('1000', 18), // totalFusd
+          now,
+          1_000n, // performanceFeeNumerator
+          1_000n, // managementFeeNumerator
+          10_000n, // feeDenominator
+          true, // applyClamp
+        );
+
+        expect(result.performanceFee).to.equal(0n);
+        expect(result.managementFee).to.equal(0n);
+        expect(result.netYield).to.equal(0n);
+        expect(result.newAccountedAssets).to.equal(accountedAssets);
+        expect(result.newLastFeeMintTime).to.equal(now);
+      });
+
+      it('ratchets accountedAssets up to totalValue and applies the management-fee clamp when navComplete is true and applyClamp is true', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const now = BigInt(await time.latest());
+        const oneYearAgo = now - 365n * 24n * 60n * 60n;
+        const accountedAssets = ethers.parseUnits('1000', 18);
+        const totalValue = ethers.parseUnits('1100', 18); // 100 incremental yield
+
+        const result = await fund.computeYieldAccrual(
+          totalValue,
+          true,
+          accountedAssets,
+          ethers.parseUnits('1000', 18), // totalFusd
+          oneYearAgo,
+          1_000n, // 10% performance fee
+          10_000n, // 100% management fee rate over the elapsed year -> forces the clamp
+          10_000n,
+          true,
+        );
+
+        // incrementalYield = 100, performanceFee = 10, netYield (pre-clamp) = 90.
+        expect(result.performanceFee).to.equal(ethers.parseUnits('10', 18));
+        // managementFee would be ~1000 (100% of totalFusd over ~1 year) but is clamped to netYield (90).
+        expect(result.managementFee).to.equal(ethers.parseUnits('90', 18));
+        expect(result.netYield).to.equal(0n); // 90 - 90 (clamped managementFee)
+        expect(result.newAccountedAssets).to.equal(totalValue);
+      });
+
+      it('does not clamp and does not reduce netYield when applyClamp is false (calculateAvailableManagerFee semantics)', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const now = BigInt(await time.latest());
+        const oneYearAgo = now - 365n * 24n * 60n * 60n;
+        const accountedAssets = ethers.parseUnits('1000', 18);
+        const totalValue = ethers.parseUnits('1100', 18);
+
+        const result = await fund.computeYieldAccrual(
+          totalValue,
+          true,
+          accountedAssets,
+          ethers.parseUnits('1000', 18),
+          oneYearAgo,
+          1_000n,
+          10_000n,
+          10_000n,
+          false,
+        );
+
+        expect(result.performanceFee).to.equal(ethers.parseUnits('10', 18));
+        // Uncapped: 100% of totalFusd over ~1 year, not clamped to netYield.
+        expect(result.managementFee).to.equal(ethers.parseUnits('1000', 18));
+        // netYield left at its pre-clamp value since applyClamp is false.
+        expect(result.netYield).to.equal(ethers.parseUnits('90', 18));
+      });
+
+      it('leaves accountedAssets unchanged when totalValue has not grown past it', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const now = BigInt(await time.latest());
+        const accountedAssets = ethers.parseUnits('1000', 18);
+
+        const result = await fund.computeYieldAccrual(
+          ethers.parseUnits('900', 18), // totalValue < accountedAssets
+          true,
+          accountedAssets,
+          ethers.parseUnits('1000', 18),
+          now,
+          1_000n,
+          1_000n,
+          10_000n,
+          true,
+        );
+
+        expect(result.newAccountedAssets).to.equal(accountedAssets);
+      });
     });
   });
 

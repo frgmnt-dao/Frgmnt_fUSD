@@ -13,6 +13,7 @@ import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
+import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -34,7 +35,11 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    AaveV4TokenizationManager whitelist — a vault must remain valuable and exitable even if
 ///    governance later revokes it from the whitelist; only *new* exposure
 ///    (AaveV4TokenizationContractGuard, and `addAssetCheck` below) is gated by the whitelist.
-contract AaveV4TokenizationAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
+contract AaveV4TokenizationAssetGuard is
+    ClosedAssetGuard,
+    IAddAssetCheckGuard,
+    IIncompleteValuationGuard
+{
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -131,12 +136,7 @@ contract AaveV4TokenizationAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Returns the pool's USD-denominated value of its TokenizationSpoke position.
-    /// @dev The calls into the vault itself (`asset()`, `convertToAssets()`) are wrapped in
-    ///      try/catch and degrade to a balance of 0 on failure, rather than reverting — the same
-    ///      resilience reasoning as MorphoVaultV2AssetGuard: this function sits on the hot path
-    ///      of `PoolManagerLogic.totalFundValue()`, read on every stake/unstake/harvest call and
-    ///      every immediate cash withdrawal. A single misbehaving vault must not freeze those
-    ///      operations for the entire pool.
+    /// @dev See _valuePosition below for which calls are fault-isolated and why.
     /// @param pool Pool holding the vault shares.
     /// @param asset Address of the Aave V4 TokenizationSpoke instance.
     /// @return balanceUsd18 USD value of the pool's share balance, 18 decimals.
@@ -144,31 +144,64 @@ contract AaveV4TokenizationAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
         address pool,
         address asset
     ) public view override returns (uint256 balanceUsd18) {
+        (balanceUsd18, ) = _valuePosition(pool, asset);
+    }
+
+    /// @dev Shared by getBalance() and isValuationComplete() below, so the two can never
+    ///      disagree about which failure paths count as "incomplete". Every external call this
+    ///      function makes — into the vault itself (`asset()`, `convertToAssets()`) and into the
+    ///      pricing layer (`getAssetPrice()`, `assetDecimal()`, which can revert on Chainlink
+    ///      staleness or L2 sequencer downtime, not just on a misbehaving vault) — is wrapped in
+    ///      try/catch and degrades to a balance of 0 on failure, rather than reverting: this
+    ///      function sits on the hot path of `PoolManagerLogic.totalFundValue()`, read on every
+    ///      stake/unstake/harvest call and every immediate cash withdrawal. A single misbehaving
+    ///      or unpriced vault must not freeze those operations for the entire pool (previously
+    ///      only the vault calls were fault-isolated here; the pricing calls were not, so a
+    ///      broken price feed for this one vault could revert totalFundValue() outright).
+    ///      isValuationComplete() lets callers that need to know the reading was trustworthy
+    ///      (PoolManagerLogic.totalFundValueWithCompleteness()) tell the difference between
+    ///      "genuinely empty" and "temporarily unknowable".
+    function _valuePosition(
+        address pool,
+        address asset
+    ) internal view returns (uint256 balanceUsd18, bool complete) {
         uint256 shares = IERC20(asset).balanceOf(pool);
-        if (shares == 0) return 0;
+        if (shares == 0) return (0, true);
 
         address underlying;
         try IERC4626(asset).asset() returns (address u) {
             underlying = u;
         } catch {
-            return 0;
+            return (0, false);
         }
-        if (underlying == address(0)) return 0;
+        if (underlying == address(0)) return (0, false);
 
         uint256 underlyingAmount;
         try IERC4626(asset).convertToAssets(shares) returns (uint256 a) {
             underlyingAmount = a;
         } catch {
-            return 0;
+            return (0, false);
         }
-        if (underlyingAmount == 0) return 0;
+        if (underlyingAmount == 0) return (0, false);
 
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
-        uint256 price = IPoolManagerLogic(poolManagerLogic).getAssetPrice(underlying);
-        if (price == 0) return 0;
 
-        uint256 underlyingDecimals = IPoolManagerLogic(poolManagerLogic).assetDecimal(underlying);
-        balanceUsd18 = (underlyingAmount * price) / (10 ** underlyingDecimals);
+        uint256 price;
+        try IPoolManagerLogic(poolManagerLogic).getAssetPrice(underlying) returns (uint256 p) {
+            price = p;
+        } catch {
+            return (0, false);
+        }
+        if (price == 0) return (0, false);
+
+        uint256 underlyingDecimals;
+        try IPoolManagerLogic(poolManagerLogic).assetDecimal(underlying) returns (uint256 d) {
+            underlyingDecimals = d;
+        } catch {
+            return (0, false);
+        }
+
+        return ((underlyingAmount * price) / (10 ** underlyingDecimals), true);
     }
 
     /// @notice AssetGuard balances are always expressed in USD (18 decimals).
@@ -177,6 +210,28 @@ contract AaveV4TokenizationAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard {
     ///      `getBalance()` (price=1e18, decimals=18).
     function getDecimals(address) external pure override returns (uint256) {
         return 18;
+    }
+
+    /// @notice See IIncompleteValuationGuard.
+    function isIncompleteValuationGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @notice See IIncompleteValuationGuard.
+    function isValuationComplete(address pool, address asset) external view override returns (bool complete) {
+        (, complete) = _valuePosition(pool, asset);
+    }
+
+    /// @notice Ensures the vault can be removed only when the pool holds no shares.
+    /// @dev Deliberately checks the raw share balance rather than the inherited
+    ///      ClosedAssetGuard.removeAssetCheck()'s getBalance()-based check. getBalance() degrades
+    ///      to 0 on a transient valuation failure (see its documentation above) so that stake/unstake/harvest
+    ///      keep working for the rest of the pool — but that same fail-open behavior would let
+    ///      removeAssetCheck() treat a live, nonzero position as empty and permit removing it
+    ///      from supportedAssets, orphaning the shares (excluded from NAV, unreachable by
+    ///      withdrawals) until manually re-added. balanceOf() has no such failure mode to exploit.
+    function removeAssetCheck(address pool, address asset) public view override {
+        require(IERC20(asset).balanceOf(pool) == 0, "ClosedAssetGuard: non-empty asset");
     }
 
     /*//////////////////////////////////////////////////////////////

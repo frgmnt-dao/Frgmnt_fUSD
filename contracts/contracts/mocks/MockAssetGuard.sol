@@ -6,6 +6,9 @@ import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
 contract MockAssetGuard {
     uint256 public dec;
     bool public removeTokenCheckResult = true;
+    uint256 public balance;
+    bool public incompleteValuationGuard;
+    bool public valuationComplete = true;
 
     constructor(uint256 _dec) {
         dec = _dec;
@@ -22,9 +25,35 @@ contract MockAssetGuard {
         IHasSupportedAsset.Asset calldata /*asset*/
     ) external {}
 
+    function setBalance(uint256 _balance) external {
+        balance = _balance;
+    }
+
     // Used by PoolManagerLogic
-    function getBalance(address /*poolLogic*/, address /*asset*/) external pure returns (uint256) {
-        return 0;
+    function getBalance(address /*poolLogic*/, address /*asset*/) external view returns (uint256) {
+        return balance;
+    }
+
+    // PoolManagerLogic.totalFundValueWithCompleteness() checks for this via low-level call,
+    // mirroring isAddAssetCheckGuard() above. Defaults to false so existing tests that don't
+    // call setIncompleteValuationGuard() are always treated as complete.
+    function setIncompleteValuationGuard(bool _incomplete) external {
+        incompleteValuationGuard = _incomplete;
+    }
+
+    function isIncompleteValuationGuard() external view returns (bool) {
+        return incompleteValuationGuard;
+    }
+
+    function setValuationComplete(bool _complete) external {
+        valuationComplete = _complete;
+    }
+
+    function isValuationComplete(
+        address /*poolLogic*/,
+        address /*asset*/
+    ) external view returns (bool) {
+        return valuationComplete;
     }
     function getDecimals(address /*asset*/) external view returns (uint256) {
         return dec;
