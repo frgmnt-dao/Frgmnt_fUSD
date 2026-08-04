@@ -27,6 +27,12 @@ describe('Utility libraries', () => {
     const LegacyPoolManager = await ethers.getContractFactory('TestLegacyPoolManagerLogic');
     const legacyPoolManager = await LegacyPoolManager.deploy();
 
+    const FundCalcPool = await ethers.getContractFactory('TestPoolLogicForFundCalc');
+    const fundCalcPool = await FundCalcPool.deploy();
+
+    const AssetGuard = await ethers.getContractFactory('MockAssetGuard');
+    const assetGuard18 = await AssetGuard.deploy(18);
+
     const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
     const token6 = await TestTokenLogic.deploy('Token 6', 'T6', 6);
     const token18 = await TestTokenLogic.deploy('Token 18', 'T18', 18);
@@ -69,9 +75,12 @@ describe('Utility libraries', () => {
     return {
       cl,
       fund,
+      fundCalculationLibrary,
       txData,
       poolManager,
       legacyPoolManager,
+      fundCalcPool,
+      assetGuard18,
       token6,
       token18,
       token20,
@@ -305,6 +314,175 @@ describe('Utility libraries', () => {
         );
 
         expect(result.newAccountedAssets).to.equal(accountedAssets);
+      });
+    });
+
+    // FNA-05: claims-pro-rata loss-socialized sizing for immediate/queued redemptions.
+    describe('applyClaimsHaircut', () => {
+      it('is a no-op when the pool is solvent (fundValue >= totalClaims)', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        expect(await fund.applyClaimsHaircut(50n, 100n, 80n)).to.equal(50n);
+        expect(await fund.applyClaimsHaircut(50n, 100n, 100n)).to.equal(50n);
+      });
+
+      it('haircuts pro-rata when the pool is undercollateralized (fundValue < totalClaims)', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        // fundValue=80 backing totalClaims=100 -> 80% collateralized, so a 50 claim is worth 40.
+        expect(await fund.applyClaimsHaircut(50n, 80n, 100n)).to.equal(40n);
+      });
+
+      it('returns 0 when both fundValue and totalClaims are 0', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        expect(await fund.applyClaimsHaircut(50n, 0n, 0n)).to.equal(0n);
+      });
+    });
+
+    describe('computeImmediateWithdrawPortion', () => {
+      it('reproduces par redemption when the pool is solvent (fundValue == totalClaims)', async () => {
+        const { fund, fundCalcPool, token18, manager } = await loadFixture(deployLibrariesFixture);
+        await fundCalcPool.setFusd(await token18.getAddress());
+        // Remaining claims (Bob) after Alice's netFusd has already been burned by the caller.
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18));
+
+        const netFusd = ethers.parseUnits('50', 18); // Alice's withdrawal
+        const fundValue = ethers.parseUnits('100', 18); // totalClaims = 50 + 50 = 100 == fundValue
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          fundValue,
+        );
+        // Matches today's par formula exactly (netFusd * 1e18 / fundValue) when solvent.
+        expect(portion).to.equal(ethers.parseUnits('0.5', 18));
+      });
+
+      it('haircuts the extracted portion and preserves the collateralization ratio when underwater', async () => {
+        const { fund, fundCalcPool, token18, manager } = await loadFixture(deployLibrariesFixture);
+        await fundCalcPool.setFusd(await token18.getAddress());
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18)); // Bob's remaining claim
+
+        const netFusd = ethers.parseUnits('50', 18); // Alice's withdrawal
+        const fundValue = ethers.parseUnits('80', 18); // only 80 backing 100 total claims (80% collateralized)
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          fundValue,
+        );
+        // Old vulnerable formula would give netFusd*1e18/fundValue = 0.625e18 (62.5%, par redemption
+        // against live NAV). The haircut instead gives Alice exactly her 80%-collateralized share.
+        expect(portion).to.equal(ethers.parseUnits('0.5', 18));
+
+        // Verify the collateralization ratio is preserved across the withdrawal (loss-socialization
+        // property): remaining assets / remaining claims should still be 80%, same as before.
+        const extractedAssets = (fundValue * portion) / ethers.parseUnits('1', 18);
+        const remainingAssets = fundValue - extractedAssets;
+        const remainingClaims = ethers.parseUnits('50', 18); // Bob's claim, untouched
+        expect((remainingAssets * 10_000n) / remainingClaims).to.equal(8_000n); // 80.00%
+      });
+
+      it('returns 0 when fundValue is 0', async () => {
+        const { fund, fundCalcPool, token18 } = await loadFixture(deployLibrariesFixture);
+        await fundCalcPool.setFusd(await token18.getAddress());
+        expect(
+          await fund.computeImmediateWithdrawPortion(await fundCalcPool.getAddress(), 50n, 0n),
+        ).to.equal(0n);
+      });
+    });
+
+    describe('computeFinalizeAssetAmount', () => {
+      async function setupPool() {
+        const fixture = await loadFixture(deployLibrariesFixture);
+        const { fundCalcPool, poolManager, assetGuard18, token18, manager } = fixture;
+        const assetAddr = await token18.getAddress();
+
+        await fundCalcPool.setFusd(assetAddr);
+        await fundCalcPool.setPoolManagerLogic(await poolManager.getAddress());
+        await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1', 18), 18);
+        await poolManager.setAssetGuard(assetAddr, await assetGuard18.getAddress());
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('100', 18));
+
+        return { ...fixture, assetAddr };
+      }
+
+      it('reproduces par redemption when the pool is solvent', async () => {
+        const { fund, fundCalcPool, assetGuard18, assetAddr } = await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18)); // fundValue == totalClaims (100)
+
+        const assetAmount = await fund.computeFinalizeAssetAmount(
+          await fundCalcPool.getAddress(),
+          assetAddr,
+          ethers.parseUnits('50', 18),
+        );
+        expect(assetAmount).to.equal(ethers.parseUnits('50', 18));
+      });
+
+      it('haircuts the payout when the pool is undercollateralized', async () => {
+        const { fund, fundCalcPool, assetGuard18, assetAddr } = await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('80', 18)); // 80 backing 100 total claims
+
+        const assetAmount = await fund.computeFinalizeAssetAmount(
+          await fundCalcPool.getAddress(),
+          assetAddr,
+          ethers.parseUnits('50', 18),
+        );
+        expect(assetAmount).to.equal(ethers.parseUnits('40', 18)); // 80% of the nominal 50
+      });
+
+      it('nets out already-reserved (finalized-but-unclaimed) balance before applying the haircut', async () => {
+        const { fund, fundCalcPool, assetGuard18, assetAddr } = await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18));
+        await fundCalcPool.setReservedAssetBalance(assetAddr, ethers.parseUnits('20', 18));
+        // Withdrawable fundValue = 100 - 20 = 80, same underwater case as above.
+
+        const assetAmount = await fund.computeFinalizeAssetAmount(
+          await fundCalcPool.getAddress(),
+          assetAddr,
+          ethers.parseUnits('50', 18),
+        );
+        expect(assetAmount).to.equal(ethers.parseUnits('40', 18));
+      });
+
+      it('reverts with InvalidReservedBalance if reserved exceeds the on-chain guard balance', async () => {
+        const { fund, fundCalculationLibrary, fundCalcPool, assetGuard18, assetAddr } =
+          await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('10', 18));
+        await fundCalcPool.setReservedAssetBalance(assetAddr, ethers.parseUnits('20', 18));
+
+        await expect(
+          fund.computeFinalizeAssetAmount(
+            await fundCalcPool.getAddress(),
+            assetAddr,
+            ethers.parseUnits('50', 18),
+          ),
+        ).to.be.revertedWithCustomError(fundCalculationLibrary, 'InvalidReservedBalance');
+      });
+
+      it('returns 0 for an unsupported asset', async () => {
+        const { fund, fundCalcPool, token20 } = await setupPool();
+        const unsupported = await token20.getAddress();
+
+        expect(
+          await fund.computeFinalizeAssetAmount(
+            await fundCalcPool.getAddress(),
+            unsupported,
+            ethers.parseUnits('50', 18),
+          ),
+        ).to.equal(0n);
+      });
+
+      it('returns 0 when the asset price is 0', async () => {
+        const { fund, fundCalcPool, poolManager, assetGuard18, assetAddr } = await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18));
+        await poolManager.setSupportedAsset(assetAddr, true, 0n, 18);
+
+        expect(
+          await fund.computeFinalizeAssetAmount(
+            await fundCalcPool.getAddress(),
+            assetAddr,
+            ethers.parseUnits('50', 18),
+          ),
+        ).to.equal(0n);
       });
     });
   });

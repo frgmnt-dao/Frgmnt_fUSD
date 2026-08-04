@@ -977,7 +977,7 @@ describe('PoolLogic', () => {
   });
 
   it('covers queued finalize and claim failure branches', async () => {
-    const { pool, fusd, poolManager, asset, manager, user } = await loadFixture(deployPoolFixture);
+    const { pool, fusd, poolManager, asset, assetGuard, manager, user } = await loadFixture(deployPoolFixture);
     const amount = ethers.parseUnits('100', 18);
 
     await pool.connect(manager).setImmediateWithdrawEnabled(false);
@@ -1005,6 +1005,18 @@ describe('PoolLogic', () => {
     );
 
     await poolManager.setSupportedAsset(await asset.getAddress(), true, ethers.parseUnits('1', 18), 18);
+
+    // FNA-05: the finalize haircut now floors the payout by the pool's *aggregate* withdrawable
+    // value (across all supported assets), so an insufficient-local-balance revert on `asset`
+    // specifically requires the pool to be solvent in aggregate via a second, well-backed asset —
+    // otherwise the haircut alone would already floor the payout to 0 before this check is reached.
+    const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
+    const asset2 = await TestTokenLogic.deploy('Mock Asset 2', 'MA2', 18);
+    await asset2.waitForDeployment();
+    await poolManager.setAssetGuard(await asset2.getAddress(), await assetGuard.getAddress());
+    await poolManager.setSupportedAsset(await asset2.getAddress(), true, ethers.parseUnits('1', 18), 18);
+    await asset2.mint(await pool.getAddress(), ethers.parseUnits('1000', 18));
+
     const insufficientTx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
     const insufficientReceipt = await insufficientTx.wait();
     const insufficientEvent = insufficientReceipt!.logs
@@ -1336,5 +1348,170 @@ describe('PoolLogic', () => {
 
     expect(await asset.balanceOf(await pool.getAddress())).to.equal(amount);
     expect(await asset.balanceOf(await other.getAddress())).to.equal(extra);
+  });
+
+  // FNA-05: claims-pro-rata loss-socialized sizing — an underwater pool must haircut every
+  // redeemer by the same collateralization ratio instead of paying early redeemers at par.
+  describe('FNA-05: underwater redemption haircut', () => {
+    it('haircuts an immediate withdrawal pro-rata instead of paying par against a deficit', async () => {
+      const { pool, fusd, asset, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+
+      // Alice and Bob each hold a 50 FUSD claim; the pool only holds 80 in backing assets, i.e.
+      // the pool is 80% collateralized (100 total claims vs 80 total assets).
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
+      await fusd.mint(await bob.getAddress(), ethers.parseUnits('50', 18));
+      await asset.mint(await pool.getAddress(), ethers.parseUnits('80', 18));
+      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), ethers.parseUnits('80', 18));
+
+      // Old vulnerable formula (portion = netFusd / fundValue) would let Alice redeem at full par
+      // (50), leaving only 30 in assets for Bob's 50 claim (a 60% ratio — degraded from 80%).
+      const before = await asset.balanceOf(await alice.getAddress());
+      await pool.connect(alice).withdrawCashImmediate(ethers.parseUnits('50', 18));
+      const aliceOut = (await asset.balanceOf(await alice.getAddress())) - before;
+
+      // Alice instead receives exactly her 80%-collateralized share of her claim.
+      expect(aliceOut).to.equal(ethers.parseUnits('40', 18));
+
+      const poolBalanceAfterAlice = await asset.balanceOf(await pool.getAddress());
+      expect(poolBalanceAfterAlice).to.equal(ethers.parseUnits('40', 18));
+
+      // Bob's remaining 50 claim against the remaining 40 in assets is still an 80% ratio —
+      // Alice's exit did not degrade Bob's position, proving the loss was socialized fairly.
+      expect((poolBalanceAfterAlice * 10_000n) / ethers.parseUnits('50', 18)).to.equal(8_000n);
+
+      // Bob then redeems his full claim and receives the entire remaining balance (his fair
+      // 80% share), fully and fairly draining the pool with no leftover dust for anyone.
+      await fusd.connect(bob).approve(await pool.getAddress(), ethers.parseUnits('50', 18));
+      const beforeBob = await asset.balanceOf(await bob.getAddress());
+      await pool.connect(bob).withdrawCashImmediate(ethers.parseUnits('50', 18));
+      const bobOut = (await asset.balanceOf(await bob.getAddress())) - beforeBob;
+
+      expect(bobOut).to.equal(ethers.parseUnits('40', 18));
+      expect(await asset.balanceOf(await pool.getAddress())).to.equal(0n);
+    });
+
+    it('does not haircut immediate withdrawals when the pool is fully collateralized (regression)', async () => {
+      const { pool, fusd, asset, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
+      await fusd.mint(await bob.getAddress(), ethers.parseUnits('50', 18));
+      // Fully backed: 100 in assets for 100 total claims.
+      await asset.mint(await pool.getAddress(), ethers.parseUnits('100', 18));
+      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), ethers.parseUnits('100', 18));
+
+      const before = await asset.balanceOf(await alice.getAddress());
+      await pool.connect(alice).withdrawCashImmediate(ethers.parseUnits('50', 18));
+      const aliceOut = (await asset.balanceOf(await alice.getAddress())) - before;
+
+      // Solvent pool: par redemption is unchanged from pre-fix behavior.
+      expect(aliceOut).to.equal(ethers.parseUnits('50', 18));
+    });
+
+    it('haircuts a queued finalizeCashWithdraw payout pro-rata instead of paying par against a deficit', async () => {
+      const { pool, fusd, asset, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
+      await fusd.mint(await bob.getAddress(), ethers.parseUnits('50', 18));
+      // Same 80%-collateralized deficit, but this time Alice exits via the queued path. FUSD
+      // backing the request is only transferred (not burned) at request time, so Bob's 50 FUSD
+      // and Alice's queued 50 FUSD both still count toward totalClaims at finalization.
+      await asset.mint(await pool.getAddress(), ethers.parseUnits('80', 18));
+
+      const tx = await pool.connect(alice).requestCashWithdraw(
+        ethers.parseUnits('50', 18),
+        await asset.getAddress(),
+      );
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      const requestId = event!.args.requestId;
+
+      await poolManager.setTotalFundValue(ethers.parseUnits('80', 18));
+      await pool.connect(manager).finalizeCashWithdraw(requestId);
+
+      const stored = await pool.cashWithdrawRequests(requestId);
+      // Old vulnerable formula would finalize at full par (50); the haircut instead reserves
+      // exactly Alice's 80%-collateralized share.
+      expect(stored.assetAmount).to.equal(ethers.parseUnits('40', 18));
+      expect(await pool.reservedAssetBalance(await asset.getAddress())).to.equal(
+        ethers.parseUnits('40', 18),
+      );
+
+      const before = await asset.balanceOf(await alice.getAddress());
+      await pool.connect(alice).claimCashWithdraw(requestId);
+      const aliceOut = (await asset.balanceOf(await alice.getAddress())) - before;
+      expect(aliceOut).to.equal(ethers.parseUnits('40', 18));
+
+      // Alice's full 50 FUSD claim is extinguished even though she only received 40 in value —
+      // she (not Bob) absorbs the shortfall on her own exit.
+      expect(await fusd.totalSupply()).to.equal(ethers.parseUnits('50', 18)); // Bob's claim only
+    });
+
+    // Known, accepted limitation (see FundCalculationLibrary.computeFinalizeAssetAmount's
+    // "KNOWN LIMITATION" doc comment): a finalized-but-unclaimed request's un-burned FUSD still
+    // inflates totalClaims for later finalizers, even though its backing assets are already
+    // excluded from fundValue via reservedAssetBalance. This under-pays (never over-pays) later
+    // finalizers while earlier reservations sit unclaimed, so it cannot reintroduce FNA-05's
+    // first-redeemer exploit — it is a fairness/ordering gap, not a fund-safety one. Tracked as a
+    // non-urgent follow-up rather than fixed immediately, since closing it precisely requires a
+    // new PoolLogic storage slot on a contract with only a few bytes of bytecode headroom left.
+    it('[KNOWN LIMITATION] under-pays a later finalize while an earlier finalized-but-unclaimed reservation is outstanding', async () => {
+      const { pool, fusd, asset, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      // Alice and Bob each hold a 100 FUSD claim against a 100-value pool (fully collateralized
+      // in aggregate, so the true fair share for each is their full par amount: 50/50 -> 50 each).
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('100', 18));
+      await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('100', 18));
+      await asset.mint(await pool.getAddress(), ethers.parseUnits('100', 18));
+      await poolManager.setTotalFundValue(ethers.parseUnits('100', 18));
+
+      const aliceTx = await pool.connect(alice).requestCashWithdraw(
+        ethers.parseUnits('100', 18),
+        await asset.getAddress(),
+      );
+      const aliceReceipt = await aliceTx.wait();
+      const aliceEvent = aliceReceipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      await pool.connect(manager).finalizeCashWithdraw(aliceEvent!.args.requestId);
+      const aliceStored = await pool.cashWithdrawRequests(aliceEvent!.args.requestId);
+      // Alice finalizes first, against the pool's true 100/200 = 50% collateralization ratio.
+      expect(aliceStored.assetAmount).to.equal(ethers.parseUnits('50', 18));
+
+      const bobTx = await pool.connect(bob).requestCashWithdraw(
+        ethers.parseUnits('100', 18),
+        await asset.getAddress(),
+      );
+      const bobReceipt = await bobTx.wait();
+      const bobEvent = bobReceipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      // Bob finalizes while Alice's reservation is still outstanding (unclaimed). His true fair
+      // share is also 50, but he is under-paid here — this assertion documents the known gap,
+      // not the desired end-state.
+      await pool.connect(manager).finalizeCashWithdraw(bobEvent!.args.requestId);
+      const bobStored = await pool.cashWithdrawRequests(bobEvent!.args.requestId);
+      expect(bobStored.assetAmount).to.equal(ethers.parseUnits('25', 18));
+
+      // Critically: Bob is never over-paid relative to his true share, and the sum of both
+      // reservations never exceeds the pool's actual balance — the core FNA-05 safety property
+      // (no over-extraction) holds even in this degraded-fairness scenario.
+      expect(bobStored.assetAmount).to.be.lte(ethers.parseUnits('50', 18));
+      const totalReserved = aliceStored.assetAmount + bobStored.assetAmount;
+      expect(totalReserved).to.be.lte(await asset.balanceOf(await pool.getAddress()));
+    });
   });
 });

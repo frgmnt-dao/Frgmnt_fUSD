@@ -52,6 +52,27 @@ contract TestLegacyPoolManagerLogic {
     }
 }
 
+/// @notice Minimal configurable IPoolLogic stand-in for isolated FundCalculationLibrary tests
+///         (computeImmediateWithdrawPortion / computeFinalizeAssetAmount, FNA-05) — exposes just
+///         the fusd()/poolManagerLogic()/reservedAssetBalance() surface those functions read.
+contract TestPoolLogicForFundCalc {
+    address public fusd;
+    address public poolManagerLogic;
+    mapping(address => uint256) public reservedAssetBalance;
+
+    function setFusd(address _fusd) external {
+        fusd = _fusd;
+    }
+
+    function setPoolManagerLogic(address _poolManagerLogic) external {
+        poolManagerLogic = _poolManagerLogic;
+    }
+
+    function setReservedAssetBalance(address asset, uint256 amount) external {
+        reservedAssetBalance[asset] = amount;
+    }
+}
+
 contract TestFundCalculationLibrary {
     function calculatePerformanceFee(
         uint256 totalValue,
@@ -130,6 +151,30 @@ contract TestFundCalculationLibrary {
         address poolManagerLogic
     ) external view returns (uint256 total, bool complete) {
         return FundCalculationLibrary.totalValueWithCompleteness(poolManagerLogic);
+    }
+
+    function applyClaimsHaircut(
+        uint256 grossFusd,
+        uint256 fundValue,
+        uint256 totalClaims
+    ) external pure returns (uint256) {
+        return FundCalculationLibrary.applyClaimsHaircut(grossFusd, fundValue, totalClaims);
+    }
+
+    function computeImmediateWithdrawPortion(
+        address pool,
+        uint256 netFusd,
+        uint256 fundValue
+    ) external view returns (uint256) {
+        return FundCalculationLibrary.computeImmediateWithdrawPortion(pool, netFusd, fundValue);
+    }
+
+    function computeFinalizeAssetAmount(
+        address pool,
+        address asset,
+        uint256 grossFusd
+    ) external view returns (uint256) {
+        return FundCalculationLibrary.computeFinalizeAssetAmount(pool, asset, grossFusd);
     }
 }
 
