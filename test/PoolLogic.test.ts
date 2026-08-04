@@ -1514,4 +1514,163 @@ describe('PoolLogic', () => {
       expect(totalReserved).to.be.lte(await asset.balanceOf(await pool.getAddress()));
     });
   });
+
+  // FNA-06: compoundedRewardIndex must never grow unbounded. An attacker holding the pool's only
+  // (dust) effective sfUSD supply could previously donate directly to the pool (reads as "yield"
+  // since it grows fund value without growing accountedAssets) and harvest repeatedly, compounding
+  // the index without limit until a checkpoint's index exceeded type(uint256).max and every
+  // withdraw/stake/unstake/harvest (all of which accrue yield first) panicked. The fix floors
+  // compounding below 1e18 effective supply and caps growth to a (1 + 1e6)x ceiling per checkpoint
+  // below a 1e30 index ceiling, so the panic can never happen.
+  describe('FNA-06: unbounded compoundedRewardIndex', () => {
+    it('neutralizes the dust-supply donation/harvest attack: no panic, index frozen, value preserved via accountedAssets', async () => {
+      const { pool, fusd, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const attacker = user;
+      const victim = user2;
+
+      // Attacker leaves the pool with 1 wei of effective sfUSD supply.
+      await fusd.mint(await attacker.getAddress(), 1n);
+      await fusd.connect(attacker).approve(await pool.getAddress(), 1n);
+      await pool.connect(attacker).stake(1n);
+
+      expect(await pool.compoundedRewardIndex()).to.equal(ethers.parseUnits('1', 18));
+
+      // Repeated donate/harvest cycles: each "donation" is simulated by growing the reported
+      // totalFundValue without touching accountedAssets, exactly as a direct ERC20 transfer to
+      // PoolLogic would (see the established convention in the yield-accrual tests above).
+      let cumulativeValue = 0n;
+      for (let i = 0; i < 6; i++) {
+        cumulativeValue += ethers.parseUnits('0.000000000001', 18); // 1e-12 FUSD-equivalent
+        await poolManager.setTotalFundValue(cumulativeValue);
+
+        // Pre-fix, one of these cycles would push the next checkpoint's index past
+        // type(uint256).max and panic. Post-fix, compounding is skipped outright below the 1e18
+        // effective-supply floor, so there is never anything to harvest.
+        await expect(pool.connect(attacker).harvest()).to.be.revertedWithCustomError(
+          pool,
+          'NothingToHarvest',
+        );
+      }
+
+      // The index never moved — the attack has zero effect on it, at any cycle count.
+      expect(await pool.compoundedRewardIndex()).to.equal(ethers.parseUnits('1', 18));
+
+      // A real victim can deposit and immediately exit normally — no freeze, no panic. Give the
+      // pool real backing for the withdrawal and stake a meaningful amount.
+      const victimAmount = ethers.parseUnits('1000', 18);
+      await fusd.mint(await victim.getAddress(), victimAmount);
+      await fusd.connect(victim).approve(await pool.getAddress(), victimAmount);
+      await pool.connect(victim).stake(victimAmount);
+
+      // unstake, harvest (still nothing pending, but must not revert with a panic), and a manager
+      // fee mint (called the way PoolManagerLogic.commitFeeIncrease() actually calls it) all
+      // continue to work — the exit machinery is not frozen.
+      await expect(pool.connect(victim).unstake(victimAmount)).to.not.be.reverted;
+      await expect(poolManager.callMintManagerFee(await pool.getAddress())).to.not.be.reverted;
+    });
+
+    it('caps a single checkpoint\'s applied yield to at most effectiveSupply*1e6 once real supply exists', async () => {
+      const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
+
+      // Real, meaningful supply right at the compounding floor.
+      const stakeAmount = ethers.parseUnits('1', 18);
+      await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+      await pool.connect(user).stake(stakeAmount);
+
+      // A single, wildly outsized "yield" report — 2,000,000x the effective supply, comfortably
+      // past the 1e6x cap (a scale no legitimate single-checkpoint yield report could ever reach).
+      const totalValue = stakeAmount * 2_000_000n;
+      await poolManager.setTotalFundValue(totalValue);
+
+      // Trigger accrual via a no-op-sized extra stake.
+      const trigger = ethers.parseUnits('0.000001', 18);
+      await mintAndApproveFUSD(fusd, pool, user, trigger);
+      await pool.connect(user).stake(trigger);
+
+      // Growth factor for this checkpoint must be capped at (1 + 1e6)x (appliedNetYield <=
+      // effectiveSupply * 1e6), never the raw ~2,000,000x the uncapped formula would have produced.
+      const index = await pool.compoundedRewardIndex();
+      const cappedCeiling = ethers.parseUnits('1', 18) * (1n + 1_000_000n);
+      expect(index).to.be.lte(cappedCeiling);
+      expect(index).to.be.gt(ethers.parseUnits('1', 18));
+
+      // accountedAssets still ratchets up to the full reported totalValue — the uncapped portion
+      // of the "yield" is absorbed as backing, not lost and not distributed as reward.
+      expect(await pool.accountedAssets()).to.equal(totalValue);
+    });
+
+    it('never panics even at the index ceiling boundary', async () => {
+      const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      // Self-locate compoundedRewardIndex's storage slot rather than hardcoding a slot number
+      // that could silently drift if the contract's storage layout ever changes. Its post-init
+      // value (1e18) isn't unique among the contract's slots, so candidates are disambiguated by
+      // writing a sentinel and confirming the public getter actually reflects it.
+      const marker = await pool.compoundedRewardIndex();
+      let slot = -1;
+      for (let i = 0; i < 60; i++) {
+        const raw = await ethers.provider.getStorage(poolAddr, i);
+        if (BigInt(raw) !== marker) continue;
+
+        const sentinel = 123456789n;
+        await ethers.provider.send('hardhat_setStorageAt', [
+          poolAddr,
+          ethers.toBeHex(i),
+          ethers.toBeHex(sentinel, 32),
+        ]);
+        const reflects = (await pool.compoundedRewardIndex()) === sentinel;
+        await ethers.provider.send('hardhat_setStorageAt', [
+          poolAddr,
+          ethers.toBeHex(i),
+          ethers.toBeHex(marker, 32),
+        ]);
+        if (reflects) {
+          slot = i;
+          break;
+        }
+      }
+      expect(slot).to.be.gte(0);
+
+      // Push the index to just under the 1e30 ceiling.
+      const nearCeiling = ethers.parseUnits('1', 30) - 1n;
+      await ethers.provider.send('hardhat_setStorageAt', [
+        poolAddr,
+        ethers.toBeHex(slot),
+        ethers.toBeHex(nearCeiling, 32),
+      ]);
+      expect(await pool.compoundedRewardIndex()).to.equal(nearCeiling);
+
+      const stakeAmount = ethers.parseUnits('1000', 18);
+      await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+      await pool.connect(user).stake(stakeAmount);
+
+      // One checkpoint from just under the ceiling is still allowed to compound (index < 1e30
+      // passes); this particular netYield (500) is well under the effectiveSupply*1e6 cap here
+      // (1000 * 1e6), so it applies uncapped for a 1.5x growth factor — this must never panic,
+      // proving the mathematical guarantee holds exactly at the boundary where it matters most.
+      await poolManager.setTotalFundValue(ethers.parseUnits('500', 18));
+      const trigger = ethers.parseUnits('1', 18);
+      await mintAndApproveFUSD(fusd, pool, user, trigger);
+      await expect(pool.connect(user).stake(trigger)).to.not.be.reverted;
+
+      const indexAfterCrossing = await pool.compoundedRewardIndex();
+      expect(indexAfterCrossing).to.be.gt(nearCeiling);
+      expect(indexAfterCrossing).to.be.lte(ethers.parseUnits('1', 30) * 2n);
+      expect(indexAfterCrossing).to.be.approximately(
+        (nearCeiling * 3n) / 2n,
+        ethers.parseUnits('1', 18),
+      );
+      // Now at/above the ceiling: a further checkpoint must be a strict no-op on the index, no
+      // matter how large the reported yield is.
+      expect(indexAfterCrossing).to.be.gte(ethers.parseUnits('1', 30));
+
+      await poolManager.setTotalFundValue(ethers.parseUnits('1000000', 18));
+      const trigger2 = ethers.parseUnits('1', 18);
+      await mintAndApproveFUSD(fusd, pool, user, trigger2);
+      await expect(pool.connect(user).stake(trigger2)).to.not.be.reverted;
+
+      expect(await pool.compoundedRewardIndex()).to.equal(indexAfterCrossing);
+    });
+  });
 });

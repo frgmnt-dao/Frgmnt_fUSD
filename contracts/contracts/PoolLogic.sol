@@ -450,14 +450,38 @@ contract PoolLogic is
         totalPerformanceFee += _performanceFee;
         accountedAssets = _newAccountedAssets;
 
+        // FNA-06: with no floor/ceiling, an attacker holding the pool's only (dust, e.g. 1 wei)
+        // effective sfUSD supply could donate an ordinary ERC20 transfer directly to PoolLogic
+        // (reads as "yield" here since it grows fund value without growing accountedAssets), then
+        // harvest, cheaply repeating this for huge multiplicative index growth per cycle until a
+        // checkpoint's index exceeds type(uint256).max and Math.mulDiv panics — permanently
+        // freezing every withdraw/stake/unstake/harvest, since all of them accrue yield first.
+        // PoolLogic is already deployed and upgradeable on mainnet, so this can't rely on a fresh
+        // initializer (e.g. seeding minimum supply at deploy time); it must hold on already-live
+        // pools purely from this check. Below 1e18 effective supply, compounding is skipped
+        // entirely (closes the attack outright: dust-supply cycles can never move the index; the
+        // skipped yield isn't lost, just absorbed into accountedAssets like the pre-existing
+        // effectiveSupply==0 case already did). Above that floor, netYield is capped to at most
+        // effectiveSupply*1e6 (a ~1e6x growth-factor ceiling per checkpoint — unreachable via any
+        // legitimate yield report, e.g. a lone staker's small unclaimed-rewards balance briefly
+        // outpaced by fresh yield is nowhere close, but it still bounds a pathological/buggy
+        // totalValue reading) and the update stops once index reaches 1e30, so
+        // index * growthFactor < 1e30 * (1 + 1e6) always — comfortably under type(uint256).max.
         uint256 effectiveSupply = totalSupply() + _unclaimedRewards();
-        if (effectiveSupply > 0 && _netYield > 0) {
-            compoundedRewardIndex = Math.mulDiv(
-                index,
-                effectiveSupply + _netYield,
-                effectiveSupply
-            );
-            totalRewardAccrued += _netYield;
+        if (_netYield > 0 && effectiveSupply >= 1e18 && index < 1e30) {
+            uint256 appliedNetYield = effectiveSupply * 1e6;
+            if (_netYield < appliedNetYield) {
+                appliedNetYield = _netYield;
+            }
+            totalRewardAccrued += appliedNetYield;
+            // Reused below to hold (effectiveSupply + appliedNetYield) — the mulDiv numerator —
+            // now that its "capped yield" value has already been consumed above. That sum is
+            // bounded by effectiveSupply * (1 + 1e6), provably far under 2**256 for any realistic
+            // supply, making the checked-arithmetic guard on this addition redundant.
+            unchecked {
+                appliedNetYield += effectiveSupply;
+            }
+            compoundedRewardIndex = Math.mulDiv(index, appliedNetYield, effectiveSupply);
         }
 
         // 2) mint performance and management fee to manager in FUSD
@@ -472,6 +496,17 @@ contract PoolLogic is
         lastFeeMintTime = _lastFeeMintTime;
     }
 
+    /// @dev Shared by _currentPendingReward's un-migrated preview branch and _migrateRewardIndex's
+    ///      actual migration — both need the same "pending accrued under the old rewardPerShare
+    ///      accounting, not yet reflected in `rewardDebt`" delta.
+    function _migratedAccumulatedDelta(
+        uint256 balance,
+        uint256 rewardDebt
+    ) internal view returns (uint256) {
+        uint256 accumulated = Math.mulDiv(balance, autoCompoundStartRewardPerShare, 1e18);
+        return accumulated > rewardDebt ? accumulated - rewardDebt : 0;
+    }
+
     function _currentPendingReward(address user) internal view returns (uint256) {
         uint256 index = _requireAutoCompoundingInitialized();
         UserReward memory ur = userRewards[user];
@@ -480,16 +515,7 @@ contract PoolLogic is
         uint256 snapshot = ur.rewardDebt;
 
         if (!rewardIndexInitialized[user]) {
-            uint256 accumulated = Math.mulDiv(
-                balance,
-                autoCompoundStartRewardPerShare,
-                1e18
-            );
-
-            if (accumulated > ur.rewardDebt) {
-                pending += accumulated - ur.rewardDebt;
-            }
-
+            pending += _migratedAccumulatedDelta(balance, ur.rewardDebt);
             snapshot = 1e18;
         } else if (snapshot == 0) {
             snapshot = 1e18;
@@ -498,27 +524,14 @@ contract PoolLogic is
         uint256 effectiveBalance = balance + pending;
         uint256 currentEffective = Math.mulDiv(effectiveBalance, index, snapshot);
 
-        if (currentEffective <= balance) {
-            return 0;
-        }
-
-        return currentEffective - balance;
+        return currentEffective > balance ? currentEffective - balance : 0;
     }
 
     function _migrateRewardIndex(address user) internal {
         if (user == address(0) || rewardIndexInitialized[user]) return;
 
         UserReward storage ur = userRewards[user];
-        uint256 accumulated = Math.mulDiv(
-            balanceOf(user),
-            autoCompoundStartRewardPerShare,
-            1e18
-        );
-
-        if (accumulated > ur.rewardDebt) {
-            ur.pending += accumulated - ur.rewardDebt;
-        }
-
+        ur.pending += _migratedAccumulatedDelta(balanceOf(user), ur.rewardDebt);
         ur.rewardDebt = 1e18;
         rewardIndexInitialized[user] = true;
     }
@@ -847,9 +860,10 @@ contract PoolLogic is
             );
 
             if (withdrawAsset != address(0) && withdrawAmount > 0) {
-                out.assets[out.count] = withdrawAsset;
-                out.amounts[out.count] = withdrawAmount;
-                out.count++;
+                uint256 count = out.count;
+                out.assets[count] = withdrawAsset;
+                out.amounts[count] = withdrawAmount;
+                out.count = count + 1;
             }
         }
     }
@@ -990,22 +1004,25 @@ contract PoolLogic is
         uint256 amount = r.assetAmount;
         if (amount == 0) revert ZeroAmount();
 
+        address asset = r.asset;
+        uint256 fusdNetForAsset = r.fusdNetForAsset;
+
         // Release the reserved amount for this request.
         // If safeTransfer reverts, the whole tx reverts and the reservation remains intact.
-        reservedAssetBalance[r.asset] -= amount;
+        reservedAssetBalance[asset] -= amount;
 
         r.status = RequestStatus.Claimed;
         r.assetAmount = 0;
 
         // burn the FUSD locked in contract
-        ITokenLogic(fusd).burn(r.fusdNetForAsset);
+        ITokenLogic(fusd).burn(fusdNetForAsset);
 
-        IERC20(r.asset).safeTransfer(msg.sender, amount);
+        IERC20(asset).safeTransfer(msg.sender, amount);
 
-        if (accountedAssets < r.fusdNetForAsset) revert InvalidFundValue();
-        accountedAssets -= r.fusdNetForAsset;
+        if (accountedAssets < fusdNetForAsset) revert InvalidFundValue();
+        accountedAssets -= fusdNetForAsset;
 
-        emit CashWithdrawClaimed(requestId, msg.sender, r.asset, amount);
+        emit CashWithdrawClaimed(requestId, msg.sender, asset, amount);
     }
 
     // ============================================================
