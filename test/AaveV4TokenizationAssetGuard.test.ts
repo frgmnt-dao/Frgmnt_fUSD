@@ -213,6 +213,39 @@ describe('AaveV4TokenizationAssetGuard', () => {
       await vault.mintShares(poolAddr, shares);
       expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
     });
+
+    it('returns 0 (does not revert) when getAssetPrice() reverts on a held position (FNA-04: was previously unguarded and would revert totalFundValue() for the whole pool)', async () => {
+      // Simulates AssetHandler.getUSDPrice() reverting on a stale Chainlink feed or L2
+      // sequencer downtime for the underlying — a real, transient operating condition, not a
+      // misbehaving vault.
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.be.gt(0n);
+
+      await poolManager.setBrokenPrice(usdcAddr, true);
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+    });
+
+    it('returns 0 (does not revert) when assetDecimal() reverts on a held position (FNA-04: was previously unguarded and would revert totalFundValue() for the whole pool)', async () => {
+      // Simulates the underlying's registered asset guard being revoked/broken after the
+      // vault position was already established.
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.be.gt(0n);
+
+      await poolManager.setAssetGuard(usdcAddr, false, 6n);
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -228,6 +261,46 @@ describe('AaveV4TokenizationAssetGuard', () => {
   it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
     const { guard } = await deploy();
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // isValuationComplete (FNA-04: lets PoolManagerLogic.totalFundValueWithCompleteness() tell a
+  // genuinely-empty position apart from one getBalance() couldn't currently value)
+  // -----------------------------------------------------------------------
+
+  describe('isValuationComplete', () => {
+    it('isIncompleteValuationGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isIncompleteValuationGuard()).to.equal(true);
+    });
+
+    it('returns true when the pool holds no shares', async () => {
+      const { guard, poolAddr, vaultAddr } = await deploy();
+      expect(await guard.isValuationComplete(poolAddr, vaultAddr)).to.equal(true);
+    });
+
+    it('returns true for a normal, fully-priced position', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.be.gt(0n);
+      expect(await guard.isValuationComplete(poolAddr, vaultAddr)).to.equal(true);
+    });
+
+    it('returns false exactly when getBalance() fails open to 0 on a held, unpriceable position', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+      await poolManager.setBrokenPrice(usdcAddr, true);
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+      expect(await guard.isValuationComplete(poolAddr, vaultAddr)).to.equal(false);
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -304,7 +377,7 @@ describe('AaveV4TokenizationAssetGuard', () => {
   });
 
   // -----------------------------------------------------------------------
-  // removeAssetCheck (inherited from ClosedAssetGuard)
+  // removeAssetCheck (overridden — checks the raw share balance directly, not getBalance())
   // -----------------------------------------------------------------------
 
   describe('removeAssetCheck', () => {
@@ -319,6 +392,25 @@ describe('AaveV4TokenizationAssetGuard', () => {
       await poolManager.setAssetGuard(usdcAddr, true, 6n);
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
 
+      await expect(guard.removeAssetCheck(poolAddr, vaultAddr)).to.be.revertedWith(
+        'ClosedAssetGuard: non-empty asset',
+      );
+    });
+
+    it('reverts when the pool still holds shares even though getBalance() fails open to 0 (FNA-04: removeAssetCheck must not trust a possibly-failed valuation)', async () => {
+      // getBalance() deliberately degrades to 0 when asset()/convertToAssets() revert or the
+      // underlying is unpriced, so stake/unstake/harvest keep working for the rest of the pool
+      // (see getBalance()'s own documentation). If removeAssetCheck relied on that same
+      // fail-open getBalance() the way the inherited ClosedAssetGuard.removeAssetCheck() does, a
+      // manager could remove a vault the pool still holds real shares in during exactly this kind
+      // of outage, orphaning those shares (excluded from NAV, unreachable by withdrawals) until
+      // someone notices and manually re-adds it.
+      const { guard, poolAddr, vault, vaultAddr } = await deploy();
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+
+      // No price/guard registered for the underlying, so getBalance() fails open to 0.
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
       await expect(guard.removeAssetCheck(poolAddr, vaultAddr)).to.be.revertedWith(
         'ClosedAssetGuard: non-empty asset',
       );

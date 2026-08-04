@@ -657,5 +657,78 @@ describe('PoolManagerLogic', () => {
         expect(value).to.equal(10n ** 18n);
       });
     });
+
+    // Regression coverage for FNA-04: a guard whose getBalance() can silently degrade to a
+    // value lower than the position's true worth (e.g. on a broken price feed) must be able to
+    // flag that reading as incomplete, so PoolLogic._accrueYield() can withhold yield/fee
+    // recognition rather than treat the understated total as the true NAV.
+    describe('totalFundValueWithCompleteness (FNA-04)', () => {
+      it('returns (0, true) with zero balances', async () => {
+        const { contract } = await loadFixture(setupFixture);
+        const [total, complete] = await contract.totalFundValueWithCompleteness();
+        expect(total).to.equal(0n);
+        expect(complete).to.equal(true);
+      });
+
+      it('is complete for a guard that does not implement IIncompleteValuationGuard, even with a nonzero balance', async () => {
+        const { contract, guard, tokenA } = await loadFixture(setupFixture);
+        await guard.setBalance(10n ** 6n); // 1 token, 6 decimals
+
+        expect(await guard.isIncompleteValuationGuard()).to.equal(false);
+        const [total, complete] = await contract.totalFundValueWithCompleteness();
+        expect(total).to.equal(await contract.totalFundValue());
+        expect(complete).to.equal(true);
+      });
+
+      it('is incomplete when a guard opts in and reports its valuation as incomplete, while still including its (possibly degraded) balance in the total', async () => {
+        const { contract, guard, tokenA } = await loadFixture(setupFixture);
+        const degradedBalance = 10n ** 6n; // e.g. getBalance() fell back to a partial reading
+        await guard.setBalance(degradedBalance);
+        await guard.setIncompleteValuationGuard(true);
+        await guard.setValuationComplete(false);
+
+        const expectedTotal = await contract['assetValue(address)'](tokenA);
+        expect(expectedTotal).to.be.gt(0n);
+
+        const [total, complete] = await contract.totalFundValueWithCompleteness();
+        // total is not zeroed out or hidden — only the completeness signal changes.
+        expect(total).to.equal(expectedTotal);
+        expect(complete).to.equal(false);
+      });
+
+      it('is complete when an opted-in guard reports its own valuation as complete', async () => {
+        const { contract, guard, tokenA } = await loadFixture(setupFixture);
+        await guard.setBalance(10n ** 6n);
+        await guard.setIncompleteValuationGuard(true);
+        await guard.setValuationComplete(true);
+
+        const [, complete] = await contract.totalFundValueWithCompleteness();
+        expect(complete).to.equal(true);
+      });
+
+      it('aggregate is incomplete if even one of several assets is incomplete', async () => {
+        const { contract, manager, mockAssetHandler, mockGovernance, guard, tokenA, tokenB } =
+          await loadFixture(setupFixture);
+
+        const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
+        const spokeGuard = await MockAssetGuard.deploy(18);
+        await mockGovernance.setAssetGuard(2, await spokeGuard.getAddress());
+        await mockAssetHandler.addAsset(tokenB, 2, DUMMY_AGGREGATOR);
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+
+        await guard.setBalance(10n ** 6n); // tokenA: complete
+        await spokeGuard.setBalance(ethers.parseUnits('500', 18)); // tokenB: incomplete
+        await spokeGuard.setIncompleteValuationGuard(true);
+        await spokeGuard.setValuationComplete(false);
+
+        const expectedTotal =
+          (await contract['assetValue(address)'](tokenA)) +
+          (await contract['assetValue(address)'](tokenB));
+
+        const [total, complete] = await contract.totalFundValueWithCompleteness();
+        expect(total).to.equal(expectedTotal);
+        expect(complete).to.equal(false);
+      });
+    });
   });
 });

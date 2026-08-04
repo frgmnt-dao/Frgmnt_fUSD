@@ -15,6 +15,7 @@ import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
+import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -48,7 +49,12 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    continue, not revert-the-whole-function) — unlike Morpho Vault V2 (a single position per
 ///    guard call), a Spoke aggregates multiple reserves, so one bad reserve must not zero out
 ///    the valuation of the others.
-contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard, IPreValuedAssetGuard {
+contract AaveV4SpokeAssetGuard is
+    ClosedAssetGuard,
+    IAddAssetCheckGuard,
+    IPreValuedAssetGuard,
+    IIncompleteValuationGuard
+{
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -64,22 +70,29 @@ contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard, IPreVal
                               CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev USD-18 dust tolerance for `removeAssetCheck`, matching the tolerance
-    ///      `PoolLogic._withdrawCashImmediateToSafe` already uses for its own value-conservation
-    ///      check. `_appendReserveWithdrawTxs` computes a full withdrawal's `amount` from a
-    ///      live-read `ISpoke.getUserSuppliedAssets` snapshot rather than a `type(uint256).max`
-    ///      sentinel (Aave V4's `withdrawOnBehalfOf` does not document supporting one, unlike
-    ///      `approveWithdraw`'s allowance — see ITakerPositionManager), because this guard
-    ///      forwards a fixed, pre-computed amount via a direct `transfer(to, amount)` rather than
-    ///      a balance-delta measurement (multiple reserves can share one Spoke with *different*
-    ///      underlyings, so PoolLogic's single-`withdrawAsset` delta tracking doesn't apply here
-    ///      — see the contract-level documentation above). If Aave V4's internal share<->asset rounding
-    ///      ever leaves a tiny residual behind after withdrawing that exact snapshotted amount,
-    ///      a strict `balance == 0` check would block removeAssetCheck() indefinitely, since
-    ///      getBalance() re-reads live state and would keep reporting that same tiny nonzero
-    ///      value forever — bricking the only recovery path over an amount with no realistic
-    ///      economic significance.
-    uint256 private constant DUST_TOLERANCE_USD18 = 1e15;
+    /// @dev Raw-unit dust tolerance for `removeAssetCheck`. `_appendReserveWithdrawTxs` computes
+    ///      a full withdrawal's `amount` from a live-read `ISpoke.getUserSuppliedAssets` snapshot
+    ///      rather than a `type(uint256).max` sentinel (Aave V4's `withdrawOnBehalfOf` does not
+    ///      document supporting one, unlike `approveWithdraw`'s allowance — see
+    ///      ITakerPositionManager), because this guard forwards a fixed, pre-computed amount via
+    ///      a direct `transfer(to, amount)` rather than a balance-delta measurement (multiple
+    ///      reserves can share one Spoke with *different* underlyings, so PoolLogic's single-
+    ///      `withdrawAsset` delta tracking doesn't apply here — see the contract-level
+    ///      documentation above). If Aave V4's internal share<->asset rounding ever leaves a tiny
+    ///      residual behind after withdrawing that exact snapshotted amount, a strict
+    ///      `suppliedAssets == 0` check would block removeAssetCheck() indefinitely, since it
+    ///      re-reads live state and would keep reporting that same tiny nonzero value forever —
+    ///      bricking the only recovery path over an amount with no realistic economic
+    ///      significance. Expressed in raw token units rather than USD-18 (unlike this guard's
+    ///      previous dust tolerance) because removeAssetCheck below deliberately avoids
+    ///      price/decimals lookups, so a per-reserve tolerance can't be priced without
+    ///      reintroducing the exact failure mode being removed. 100 raw units comfortably covers
+    ///      realistic share<->asset rounding (typically a handful of wei) while staying small in
+    ///      USD terms even for a low-decimal, high-value reserve — e.g. 100 units of an
+    ///      8-decimal, $100k-valued reserve is $0.10, versus $0.0001 for a 6-decimal stablecoin
+    ///      at the same raw tolerance. Not perfectly uniform across decimals the way the previous
+    ///      USD-18 tolerance was, but bounded and small regardless.
+    uint256 private constant RAW_DUST_TOLERANCE = 100;
 
     /*//////////////////////////////////////////////////////////////
                                 STRUCTS
@@ -155,52 +168,98 @@ contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard, IPreVal
         address pool,
         address spoke
     ) public view override returns (uint256 balanceUsd18) {
+        (balanceUsd18, ) = _valuePosition(pool, spoke);
+    }
+
+    /// @dev Shared by getBalance() and isValuationComplete() below, so the two can never
+    ///      disagree about which failure paths count as "incomplete". Sums _reserveValueUsd()
+    ///      across every allowlisted reserve; `complete` is true only if every reserve valued
+    ///      successfully (a reserve with suppliedAssets == 0 counts as successfully valued, not
+    ///      incomplete — see _reserveValueUsd()).
+    function _valuePosition(
+        address pool,
+        address spoke
+    ) internal view returns (uint256 balanceUsd18, bool complete) {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
         uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getPoolReserves(
             pool,
             spoke
         );
 
+        complete = true;
         for (uint256 i = 0; i < reserveIds.length; ++i) {
-            balanceUsd18 += _reserveValueUsd(pool, spoke, poolManagerLogic, reserveIds[i]);
+            (uint256 value, bool reserveComplete) = _reserveValueUsd(
+                pool,
+                spoke,
+                poolManagerLogic,
+                reserveIds[i]
+            );
+            balanceUsd18 += value;
+            if (!reserveComplete) complete = false;
         }
     }
 
     /// @dev Fault-isolated valuation of a single reserve. Any failure (Spoke call reverts,
-    ///      underlying unresolved, underlying unpriced or unguarded) contributes 0 rather than
-    ///      reverting the whole getBalance() call — see the contract-level documentation above.
+    ///      underlying unresolved, underlying unpriced or unguarded) contributes 0 and reports
+    ///      `complete = false`, rather than reverting the whole getBalance() call — see the
+    ///      contract-level documentation above.
     function _reserveValueUsd(
         address pool,
         address spoke,
         address poolManagerLogic,
         uint256 reserveId
-    ) internal view returns (uint256) {
+    ) internal view returns (uint256, bool) {
         uint256 suppliedAssets;
         try ISpoke(spoke).getUserSuppliedAssets(reserveId, pool) returns (uint256 a) {
             suppliedAssets = a;
         } catch {
-            return 0;
+            return (0, false);
         }
-        if (suppliedAssets == 0) return 0;
+        if (suppliedAssets == 0) return (0, true);
 
         (address underlying, bool ok) = _getReserveUnderlying(spoke, reserveId);
-        if (!ok || underlying == address(0)) return 0;
+        if (!ok || underlying == address(0)) return (0, false);
 
-        uint256 price;
+        (bool priced, uint256 price, uint256 decimals) = _tryPriceAndDecimals(
+            poolManagerLogic,
+            underlying
+        );
+        if (!priced) return (0, false);
+
+        return ((suppliedAssets * price) / (10 ** decimals), true);
+    }
+
+    /// @dev Shared by _reserveValueUsd (getBalance's per-reserve valuation) and
+    ///      _reservePriceAvailable below (used by _appendReserveWithdrawTxs, which must skip
+    ///      rather than withdraw a reserve it cannot value). Fault-isolated: any failure or a
+    ///      zero price is reported as `!ok` rather than reverting.
+    function _tryPriceAndDecimals(
+        address poolManagerLogic,
+        address underlying
+    ) internal view returns (bool ok, uint256 price, uint256 decimals) {
         try IPoolManagerLogic(poolManagerLogic).getAssetPrice(underlying) returns (uint256 p) {
             price = p;
         } catch {
-            return 0;
+            return (false, 0, 0);
         }
-        if (price == 0) return 0;
+        if (price == 0) return (false, 0, 0);
 
-        uint256 decimals;
         try IPoolManagerLogic(poolManagerLogic).assetDecimal(underlying) returns (uint256 d) {
             decimals = d;
         } catch {
-            return 0;
+            return (false, 0, 0);
         }
-        return (suppliedAssets * price) / (10 ** decimals);
+        ok = true;
+    }
+
+    /// @dev Thin wrapper around _tryPriceAndDecimals for _appendReserveWithdrawTxs, which only
+    ///      needs to know whether this reserve can currently be valued, not the price/decimals
+    ///      themselves — kept as a separate function (rather than inlined) to keep that already
+    ///      variable-heavy function's stack shallow enough to compile.
+    function _reservePriceAvailable(address pool, address underlying) internal view returns (bool) {
+        address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
+        (bool priced, , ) = _tryPriceAndDecimals(poolManagerLogic, underlying);
+        return priced;
     }
 
     /// @notice AssetGuard balances are always expressed in USD (18 decimals).
@@ -217,15 +276,39 @@ contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard, IPreVal
         return true;
     }
 
-    /// @notice Allows removal once the position is closed to within DUST_TOLERANCE_USD18,
-    ///         rather than requiring an exact zero balance.
-    /// @dev See DUST_TOLERANCE_USD18 for why: a nominally-full withdrawal computes its amount
-    ///      from a live snapshot rather than a max-balance sentinel, so a tiny rounding residual
-    ///      on Aave V4's side is a realistic possibility this guard cannot rule out, and a
-    ///      strict zero-check would have no recovery path if it ever occurred.
-    function removeAssetCheck(address pool, address asset) public view override {
-        uint256 balance = getBalance(pool, asset);
-        require(balance <= DUST_TOLERANCE_USD18, "ClosedAssetGuard: non-empty asset");
+    /// @notice See IIncompleteValuationGuard.
+    function isIncompleteValuationGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @notice See IIncompleteValuationGuard.
+    function isValuationComplete(address pool, address spoke) external view override returns (bool complete) {
+        (, complete) = _valuePosition(pool, spoke);
+    }
+
+    /// @notice Allows removal once every allowlisted reserve is closed to within
+    ///         RAW_DUST_TOLERANCE raw units, rather than requiring an exact zero balance.
+    /// @dev Deliberately checks each reserve's raw `getUserSuppliedAssets` directly, without
+    ///      try/catch, rather than the USD-valued getBalance() the inherited
+    ///      ClosedAssetGuard.removeAssetCheck() (and this guard's own previous implementation)
+    ///      used. getBalance() / _reserveValueUsd() degrade a reserve to 0 on a transient Spoke
+    ///      or pricing failure (see their documentation above) so that stake/unstake/harvest keep working for
+    ///      the rest of the pool — but that same fail-open behavior would let removeAssetCheck()
+    ///      treat a live, nonzero reserve as empty and permit removing the Spoke from
+    ///      supportedAssets, orphaning that reserve (excluded from NAV, unreachable by
+    ///      withdrawals) until manually re-added. Reading the raw supplied amount directly has no
+    ///      such failure mode: either it succeeds and is trustworthy, or it reverts and blocks
+    ///      removal — the correct, conservative outcome when emptiness can't be proven. See
+    ///      RAW_DUST_TOLERANCE for why the tolerance itself is in raw units rather than USD.
+    function removeAssetCheck(address pool, address spoke) public view override {
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getPoolReserves(
+            pool,
+            spoke
+        );
+        for (uint256 i = 0; i < reserveIds.length; ++i) {
+            uint256 suppliedAssets = ISpoke(spoke).getUserSuppliedAssets(reserveIds[i], pool);
+            require(suppliedAssets <= RAW_DUST_TOLERANCE, "ClosedAssetGuard: non-empty asset");
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -291,6 +374,16 @@ contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard, IPreVal
     /// @dev Appends the (approveWithdraw, withdrawOnBehalfOf, transfer) trio for one reserve to
     ///      `txs` starting at index `n`, if the pool holds a nonzero withdrawable amount there.
     ///      Returns the updated `n`.
+    ///
+    ///      `withdrawPortion` is sized by the caller against `_withdrawableFundValue()`, which
+    ///      sums `_reserveValueUsd()` across reserves and — by design — contributes 0 for a
+    ///      reserve it cannot price. If this function withdrew such a reserve's full raw supplied
+    ///      amount at that same portion anyway, a caller could redeem a portion sized against a
+    ///      NAV that excluded the reserve while still receiving it, extracting more value than
+    ///      the fUSD burned pays for. So a reserve that _reserveValueUsd() cannot price here is
+    ///      skipped rather than withdrawn, exactly mirroring its 0 contribution to the NAV the
+    ///      portion was computed from — it stays reserved for its pre-failure holders until
+    ///      pricing recovers, rather than being extractable by whoever withdraws next.
     function _appendReserveWithdrawTxs(
         WithdrawCtx memory ctx,
         uint256 reserveId,
@@ -305,6 +398,8 @@ contract AaveV4SpokeAssetGuard is ClosedAssetGuard, IAddAssetCheckGuard, IPreVal
 
         (address underlying, bool ok) = _getReserveUnderlying(ctx.spoke, reserveId);
         if (!ok || underlying == address(0)) revert InvalidUnderlying();
+
+        if (!_reservePriceAvailable(ctx.pool, underlying)) return n;
 
         txs[n++] = MultiTransaction({
             to: takerPositionManager,

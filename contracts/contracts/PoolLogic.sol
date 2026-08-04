@@ -210,6 +210,8 @@ contract PoolLogic is
     error AutoCompoundingNotInitialized();
     /// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
     error ComplexWithdrawFailed(address asset, address guard);
+    error OnlyTokenLogic();
+    error InvalidCallData();
 
     // ============================================================
     // =                         EVENTS                           =
@@ -342,8 +344,8 @@ contract PoolLogic is
         return IPoolManagerLogic(poolManagerLogic).getFee();
     }
 
-    function _totalValue() internal view returns (uint256) {
-        return IPoolManagerLogic(poolManagerLogic).totalFundValue();
+    function _totalValueWithCompleteness() internal view returns (uint256, bool) {
+        return FundCalculationLibrary.totalValueWithCompleteness(poolManagerLogic);
     }
 
     function _unclaimedRewards() internal view returns (uint256) {
@@ -409,7 +411,7 @@ contract PoolLogic is
 
     function _accrueYield() internal {
         uint256 index = _requireAutoCompoundingInitialized();
-        uint256 totalValue = _totalValue();
+        (uint256 totalValue, bool navComplete) = _totalValueWithCompleteness();
         uint256 totalFusd = _managementFeeBase();
 
         (
@@ -420,20 +422,22 @@ contract PoolLogic is
             uint256 _feeDenominator
         ) = _managerFees();
 
-        (uint256 _performanceFee, uint256 _netYield) = FundCalculationLibrary
-            .calculatePerformanceFee(
+        (
+            uint256 _performanceFee,
+            uint256 _managementFee,
+            uint256 _netYield,
+            uint256 _newAccountedAssets,
+            uint256 _lastFeeMintTime
+        ) = FundCalculationLibrary.computeYieldAccrual(
                 totalValue,
+                navComplete,
                 accountedAssets,
-                _performanceFeeNumerator,
-                _feeDenominator
-            );
-
-        (uint256 _managementFee, uint256 _lastFeeMintTime) = FundCalculationLibrary
-            .calculateManagementFee(
                 totalFusd,
                 lastFeeMintTime,
+                _performanceFeeNumerator,
                 _managementFeeNumerator,
-                _feeDenominator
+                _feeDenominator,
+                true
             );
 
         address mgr = _manager();
@@ -442,15 +446,9 @@ contract PoolLogic is
         _updateUserReward(mgr);
 
         // 1) distribute net yield to stakers
-        if (_managementFee > _netYield) {
-            _managementFee = _netYield;
-        }
-        _netYield = _netYield - _managementFee;
         totalManagementFee += _managementFee;
         totalPerformanceFee += _performanceFee;
-        if (totalValue > accountedAssets) {
-            accountedAssets = totalValue;
-        }
+        accountedAssets = _newAccountedAssets;
 
         uint256 effectiveSupply = totalSupply() + _unclaimedRewards();
         if (effectiveSupply > 0 && _netYield > 0) {
@@ -1098,10 +1096,10 @@ contract PoolLogic is
 
     function incrementAccountedAssets(uint256 amount) external {
         // Only the TokenLogic contract can adjust accountedAssets.
-        require(msg.sender == fusd, "PoolLogic: only tokenLogic");
+        if (msg.sender != fusd) revert OnlyTokenLogic();
 
         // Prevent accidental zero-value updates.
-        require(amount > 0, "PoolLogic: zero amount");
+        if (amount == 0) revert ZeroAmount();
 
         // Increase the accounting baseline by the specified amount.
         accountedAssets += amount;
@@ -1166,7 +1164,7 @@ contract PoolLogic is
 
     /// @return fee available manager fee of the pool (in pool tokens)
     function calculateAvailableManagerFee() public view returns (uint256 fee) {
-        uint256 totalValue = _totalValue();
+        (uint256 totalValue, ) = _totalValueWithCompleteness();
         uint256 totalFusd = _managementFeeBase();
 
         (
@@ -1177,19 +1175,18 @@ contract PoolLogic is
             uint256 _feeDenominator
         ) = _managerFees();
 
-        (uint256 _performanceFee, ) = FundCalculationLibrary.calculatePerformanceFee(
-            totalValue,
-            accountedAssets,
-            _performanceFeeNumerator,
-            _feeDenominator
-        );
-
-        (uint256 _managementFee, ) = FundCalculationLibrary.calculateManagementFee(
-            totalFusd,
-            lastFeeMintTime,
-            _managementFeeNumerator,
-            _feeDenominator
-        );
+        (uint256 _performanceFee, uint256 _managementFee, , , ) = FundCalculationLibrary
+            .computeYieldAccrual(
+                totalValue,
+                true,
+                accountedAssets,
+                totalFusd,
+                lastFeeMintTime,
+                _performanceFeeNumerator,
+                _managementFeeNumerator,
+                _feeDenominator,
+                false
+            );
 
         return _performanceFee + _managementFee;
     }
@@ -1202,12 +1199,13 @@ contract PoolLogic is
             uint256 exitFeeNumerator,
             uint256 denominator
         ) = _managerFees();
+        (uint256 totalValue, ) = _totalValueWithCompleteness();
 
         return
             FundSummary({
                 name: name(),
                 totalSupply: IERC20(fusd).totalSupply(),
-                totalFundValue: _totalValue(),
+                totalFundValue: totalValue,
                 manager: _manager(),
                 managerName: IManaged(poolManagerLogic).managerName(),
                 creationTime: creationTime,
@@ -1354,7 +1352,7 @@ contract PoolLogic is
         if (!success) revert TxFailed();
 
         // Only verify return value for ERC20 transfer/approve
-        require(data.length >= 4, "no selector");
+        if (data.length < 4) revert InvalidCallData();
         bytes4 sig;
         assembly {
             sig := mload(add(data, 32))

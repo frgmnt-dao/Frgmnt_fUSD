@@ -484,6 +484,46 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         }
     }
 
+    /// @dev See IPoolManagerLogic.totalFundValueWithCompleteness(). Checks the
+    ///      IIncompleteValuationGuard marker via a low-level staticcall (same pattern as
+    ///      isPreValuedAssetGuard() above); a guard without the marker, or a marker check that
+    ///      itself can't be decoded, is treated as complete — correct for every guard in this
+    ///      codebase that doesn't opt in, since those either revert on failure (making the whole
+    ///      totalFundValue() call revert, not silently understate it) or have no external
+    ///      dependency that can degrade a nonzero position to zero.
+    function totalFundValueWithCompleteness()
+        external
+        view
+        override
+        returns (uint256 total, bool complete)
+    {
+        complete = true;
+        uint256 len = supportedAssets.length;
+        for (uint256 i; i < len; ++i) {
+            address asset = supportedAssets[i].asset;
+            total += assetValue(asset);
+            if (complete && !_isValuationComplete(asset)) {
+                complete = false;
+            }
+        }
+    }
+
+    function _isValuationComplete(address _asset) internal view returns (bool) {
+        address guard = getAssetGuard(_asset);
+        if (guard == address(0)) return true;
+
+        (bool hasMarker, bytes memory markerData) = guard.staticcall(
+            abi.encodeWithSignature("isIncompleteValuationGuard()")
+        );
+        if (!hasMarker || markerData.length != 32 || !abi.decode(markerData, (bool))) return true;
+
+        (bool ok, bytes memory data) = guard.staticcall(
+            abi.encodeWithSignature("isValuationComplete(address,address)", poolLogic, _asset)
+        );
+        if (!ok || data.length != 32) return false;
+        return abi.decode(data, (bool));
+    }
+
     // -----------------------------------------------------------------------
     // Fees
     // -----------------------------------------------------------------------

@@ -35,6 +35,23 @@ contract TestCLPriceLibrary {
     }
 }
 
+/// @notice Simulates a PoolManagerLogic implementation from before the FNA-04 fix — has
+///         totalFundValue() but not totalFundValueWithCompleteness() — so tests can exercise
+///         FundCalculationLibrary.totalValueWithCompleteness()'s low-level-call fallback against
+///         a target that genuinely lacks the new function, not just one that hasn't been asked
+///         for it yet.
+contract TestLegacyPoolManagerLogic {
+    uint256 public totalFundValue_;
+
+    function setTotalFundValue(uint256 v) external {
+        totalFundValue_ = v;
+    }
+
+    function totalFundValue() external view returns (uint256) {
+        return totalFundValue_;
+    }
+}
+
 contract TestFundCalculationLibrary {
     function calculatePerformanceFee(
         uint256 totalValue,
@@ -72,6 +89,47 @@ contract TestFundCalculationLibrary {
         address asset
     ) external view returns (uint256) {
         return FundCalculationLibrary.fusdToAssetAmount(poolManagerLogic, fusdAmount, asset);
+    }
+
+    function computeYieldAccrual(
+        uint256 totalValue,
+        bool navComplete,
+        uint256 accountedAssets,
+        uint256 totalFusd,
+        uint256 lastFeeMintTime,
+        uint256 performanceFeeNumerator,
+        uint256 managementFeeNumerator,
+        uint256 feeDenominator,
+        bool applyClamp
+    )
+        external
+        view
+        returns (
+            uint256 performanceFee,
+            uint256 managementFee,
+            uint256 netYield,
+            uint256 newAccountedAssets,
+            uint256 newLastFeeMintTime
+        )
+    {
+        return
+            FundCalculationLibrary.computeYieldAccrual(
+                totalValue,
+                navComplete,
+                accountedAssets,
+                totalFusd,
+                lastFeeMintTime,
+                performanceFeeNumerator,
+                managementFeeNumerator,
+                feeDenominator,
+                applyClamp
+            );
+    }
+
+    function totalValueWithCompleteness(
+        address poolManagerLogic
+    ) external view returns (uint256 total, bool complete) {
+        return FundCalculationLibrary.totalValueWithCompleteness(poolManagerLogic);
     }
 }
 

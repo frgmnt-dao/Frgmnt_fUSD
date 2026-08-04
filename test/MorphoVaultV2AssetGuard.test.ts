@@ -285,6 +285,46 @@ describe('MorphoVaultV2AssetGuard', () => {
   });
 
   // -----------------------------------------------------------------------
+  // isValuationComplete (FNA-04: lets PoolManagerLogic.totalFundValueWithCompleteness() tell a
+  // genuinely-empty position apart from one getBalance() couldn't currently value)
+  // -----------------------------------------------------------------------
+
+  describe('isValuationComplete', () => {
+    it('isIncompleteValuationGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isIncompleteValuationGuard()).to.equal(true);
+    });
+
+    it('returns true when the pool holds no shares', async () => {
+      const { guard, poolAddr, vaultAddr } = await deploy();
+      expect(await guard.isValuationComplete(poolAddr, vaultAddr)).to.equal(true);
+    });
+
+    it('returns true for a normal, fully-priced position', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.be.gt(0n);
+      expect(await guard.isValuationComplete(poolAddr, vaultAddr)).to.equal(true);
+    });
+
+    it('returns false exactly when getBalance() fails open to 0 on a held, unpriceable position', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+      await poolManager.setBrokenPrice(usdcAddr, true);
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+      expect(await guard.isValuationComplete(poolAddr, vaultAddr)).to.equal(false);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // withdrawProcessing
   // -----------------------------------------------------------------------
 
@@ -362,7 +402,7 @@ describe('MorphoVaultV2AssetGuard', () => {
   });
 
   // -----------------------------------------------------------------------
-  // removeAssetCheck (inherited from ClosedAssetGuard)
+  // removeAssetCheck (overridden — checks the raw share balance directly, not getBalance())
   // -----------------------------------------------------------------------
 
   describe('removeAssetCheck', () => {
@@ -377,6 +417,26 @@ describe('MorphoVaultV2AssetGuard', () => {
       await poolManager.setAssetGuard(usdcAddr, true, 6n);
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
 
+      await expect(guard.removeAssetCheck(poolAddr, vaultAddr)).to.be.revertedWith(
+        'ClosedAssetGuard: non-empty asset',
+      );
+    });
+
+    it('reverts when the pool still holds shares even though getBalance() fails open to 0 (FNA-04: removeAssetCheck must not trust a possibly-failed valuation)', async () => {
+      // getBalance() deliberately degrades to 0 on a broken price feed so stake/unstake/harvest
+      // keep working for the rest of the pool (see getBalance()'s own documentation). If
+      // removeAssetCheck relied on that same fail-open getBalance() the way the inherited
+      // ClosedAssetGuard.removeAssetCheck() does, a manager could remove a vault the pool still
+      // holds real shares in during exactly this kind of outage, orphaning those shares (excluded
+      // from NAV, unreachable by withdrawals) until someone notices and manually re-adds it.
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+      await poolManager.setBrokenPrice(usdcAddr, true);
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
       await expect(guard.removeAssetCheck(poolAddr, vaultAddr)).to.be.revertedWith(
         'ClosedAssetGuard: non-empty asset',
       );

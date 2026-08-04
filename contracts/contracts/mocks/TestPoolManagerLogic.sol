@@ -87,6 +87,21 @@ contract TestPoolManagerLogic {
         return _totalFundValue;
     }
 
+    // FNA-04: PoolLogic._accrueYield() consumes this (via FundCalculationLibrary's low-level-call
+    // fallback, so a mock that doesn't implement it — the state before this setter is called for
+    // the first time — is equally valid for exercising that fallback path). Defaults to true so
+    // existing tests that never call setValuationComplete() keep going through the "normal"
+    // accrual path unchanged.
+    bool public valuationComplete = true;
+
+    function setValuationComplete(bool _complete) external {
+        valuationComplete = _complete;
+    }
+
+    function totalFundValueWithCompleteness() external view returns (uint256, bool) {
+        return (_totalFundValue, valuationComplete);
+    }
+
     function factory() external view returns (address) {
         return address(this);
     }

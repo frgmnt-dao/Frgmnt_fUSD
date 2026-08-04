@@ -238,6 +238,44 @@ describe('PoolLogic', () => {
     expect(pending).to.be.approximately(netYield, ethers.parseUnits('1', 18));
   });
 
+  it('withholds yield/fee recognition and the accountedAssets ratchet while the NAV reading is incomplete, then catches up once it recovers (FNA-04)', async () => {
+    const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
+    await poolManager.setFees(1000n, 0n, 0n, 0n, 10_000n); // 10% perf fee
+
+    const stakeAmount = ethers.parseUnits('1000', 18);
+    await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+    await pool.connect(user).stake(stakeAmount);
+
+    // Simulate 500 FUSD of yield, but mark the NAV reading as incomplete (e.g. one asset
+    // guard's price feed is transiently broken — see FundCalculationLibrary.computeYieldAccrual).
+    const reward = ethers.parseUnits('500', 18);
+    await fusd.mint(await pool.getAddress(), reward);
+    await poolManager.setTotalFundValue(reward);
+    await poolManager.setValuationComplete(false);
+
+    const tiny = ethers.parseUnits('1', 18);
+    await mintAndApproveFUSD(fusd, pool, user, tiny);
+    await pool.connect(user).stake(tiny); // triggers _accrueYield() while incomplete
+
+    // Nothing recognized: accountedAssets stays at 0, no pending reward, no fee accrued.
+    expect(await pool.accountedAssets()).to.equal(0n);
+    expect(await pool.pendingReward(await user.getAddress())).to.equal(0n);
+    expect(await pool.totalPerformanceFee()).to.equal(0n);
+
+    // Once the NAV reading recovers, the same visible total is correctly recognized.
+    await poolManager.setValuationComplete(true);
+    const tiny2 = ethers.parseUnits('1', 18);
+    await mintAndApproveFUSD(fusd, pool, user, tiny2);
+    await pool.connect(user).stake(tiny2);
+
+    expect(await pool.accountedAssets()).to.equal(reward);
+    const netYield2 = (reward * 9000n) / 10_000n;
+    expect(await pool.pendingReward(await user.getAddress())).to.be.approximately(
+      netYield2,
+      ethers.parseUnits('1', 18),
+    );
+  });
+
   // 8) harvest pays pending rewards and resets pending
   it('harvest pays pending rewards and resets pending', async () => {
     const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
@@ -1019,7 +1057,9 @@ describe('PoolLogic', () => {
 
     await fundPool();
     await assetGuard.setTransaction(await target.getAddress(), '0x12');
-    await expect(pool.connect(user).withdrawCashImmediate(amount)).to.be.revertedWith('no selector');
+    await expect(
+      pool.connect(user).withdrawCashImmediate(amount),
+    ).to.be.revertedWithCustomError(pool, 'InvalidCallData');
 
     await fundPool();
     await assetGuard.setTransaction(
@@ -1141,7 +1181,7 @@ describe('PoolLogic', () => {
 
     await expect(
       pool.connect(user).incrementAccountedAssets(1n),
-    ).to.be.revertedWith('PoolLogic: only tokenLogic');
+    ).to.be.revertedWithCustomError(pool, 'OnlyTokenLogic');
     await expect(
       fusd.triggerIncrementAccountedAssets(await pool.getAddress(), 0n),
     ).to.be.revertedWith('incrementAccountedAssets failed');
