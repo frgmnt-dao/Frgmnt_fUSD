@@ -408,6 +408,112 @@ describe('AaveV4SpokeAssetGuard', () => {
   });
 
   // -----------------------------------------------------------------------
+  // FNA-10: delisting a reserve (removing it from AaveV4SpokeManager's active allowlist) must
+  // not drop it out of valuation or withdrawal processing while the pool still holds supply
+  // there — getBalance/getWithdrawableBalance/withdrawProcessing/removeAssetCheck all enumerate
+  // the TRACKED set, which setPoolReserves only ever grows, never shrinks.
+  // -----------------------------------------------------------------------
+
+  describe('FNA-10: a delisted-but-tracked reserve stays valued and withdrawable', () => {
+    it('getBalance still includes a reserve after it is delisted from the active allowlist', async () => {
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, spokeAddr)).to.equal(ethers.parseUnits('1000', 18));
+
+      // Governance delists reserve 1 (e.g. down-ranked or deprecated on Aave's side).
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, []);
+      expect(await aaveV4SpokeManager.isValidPoolReserve(poolAddr, spokeAddr, 1n)).to.equal(false);
+
+      // Value is unaffected — pre-FNA-10 this would have dropped to 0.
+      expect(await guard.getBalance(poolAddr, spokeAddr)).to.equal(ethers.parseUnits('1000', 18));
+    });
+
+    it('getWithdrawableBalance still includes a delisted reserve', async () => {
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, []);
+
+      expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.equal(
+        ethers.parseUnits('1000', 18),
+      );
+    });
+
+    it('withdrawProcessing still generates an unwind for a delisted reserve', async () => {
+      const {
+        guard,
+        aaveV4SpokeManager,
+        poolManager,
+        poolAddr,
+        spoke,
+        spokeAddr,
+        usdcAddr,
+        other,
+      } = await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, []);
+
+      const [, , txs] = await guard.withdrawProcessing(
+        poolAddr,
+        spokeAddr,
+        ethers.parseUnits('1', 18), // 100%
+        other.address,
+      );
+      // Pre-FNA-10 this would have been an empty list (0 * 3), since withdrawProcessing
+      // enumerated the now-empty active allowlist instead of the tracked set.
+      expect(txs.length).to.equal(3);
+    });
+
+    it('removeAssetCheck still reverts (non-empty) for a delisted reserve that still holds supply', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr } = await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, []);
+
+      // Pre-FNA-10 this would have wrongly succeeded (enumerating the now-empty active list),
+      // letting the manager remove the Spoke from supportedAssets while real supply remained.
+      await expect(guard.removeAssetCheck(poolAddr, spokeAddr)).to.be.revertedWith(
+        'ClosedAssetGuard: non-empty asset',
+      );
+    });
+
+    it('removeAssetCheck succeeds once a delisted reserve is pruned after going to zero', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr } = await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, []);
+
+      // Position fully unwound via the still-available withdraw path.
+      await spoke.setSuppliedAssets(1n, poolAddr, 0n);
+      await aaveV4SpokeManager.pruneTrackedReserve(poolAddr, spokeAddr, 1n);
+
+      await expect(guard.removeAssetCheck(poolAddr, spokeAddr)).to.not.be.reverted;
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // getWithdrawableBalance (FNA-07: liquidity-capped counterpart to getBalance(), used by
   // PoolLogic's immediate withdrawal NAV/portion sizing so one under-liquid reserve sizes its
   // own share down instead of the whole withdrawal reverting)

@@ -127,6 +127,79 @@ describe('AaveV4SpokeContractGuard', () => {
   });
 
   // -----------------------------------------------------------------------
+  // FNA-10: a delisted-but-tracked reserve can still be withdrawn (not supplied) through
+  // this manual execTransaction path, so a manager is never stuck waiting on governance to
+  // recover an existing position.
+  // -----------------------------------------------------------------------
+
+  it('supply still reverts for a reserveId that was delisted (tracked, no longer active)', async () => {
+    const { guard, aaveV4SpokeManager, poolLogicSigner, poolManagerAddr, spoke, poolLogicAddr } =
+      await deploy();
+    await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, []); // delist RESERVE_ID
+    expect(await aaveV4SpokeManager.isTrackedPoolReserve(poolLogicAddr, spoke, RESERVE_ID)).to.equal(
+      true,
+    );
+
+    const data = positionManagerIface.encodeFunctionData('supplyOnBehalfOf', [
+      spoke,
+      RESERVE_ID,
+      100n,
+      poolLogicAddr,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data)).to.be.revertedWith(
+      'AaveV4SpokeGuard: reserve not whitelisted',
+    );
+  });
+
+  it('approveWithdraw reverts for a reserveId that was never tracked', async () => {
+    const { guard, poolLogicSigner, poolManagerAddr, spoke, poolLogicAddr } = await deploy();
+    const data = positionManagerIface.encodeFunctionData('approveWithdraw', [
+      spoke,
+      999n, // never whitelisted or tracked
+      poolLogicAddr,
+      ethers.MaxUint256,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data)).to.be.revertedWith(
+      'AaveV4SpokeGuard: reserve not tracked',
+    );
+  });
+
+  it('FNA-10: approveWithdraw still succeeds for a delisted-but-tracked reserveId', async () => {
+    const { guard, aaveV4SpokeManager, poolLogicSigner, poolManagerAddr, spoke, poolLogicAddr } =
+      await deploy();
+    await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, []); // delist RESERVE_ID
+    expect(await aaveV4SpokeManager.isValidPoolReserve(poolLogicAddr, spoke, RESERVE_ID)).to.equal(
+      false,
+    );
+
+    const data = positionManagerIface.encodeFunctionData('approveWithdraw', [
+      spoke,
+      RESERVE_ID,
+      poolLogicAddr,
+      ethers.MaxUint256,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data))
+      .to.emit(guard, 'AaveV4SpokeApproveWithdrawEvt')
+      .withArgs(poolLogicAddr, spoke, RESERVE_ID, ethers.MaxUint256, anyValue);
+  });
+
+  it('FNA-10: withdrawOnBehalfOf still succeeds for a delisted-but-tracked reserveId', async () => {
+    const { guard, aaveV4SpokeManager, poolLogicSigner, poolManagerAddr, spoke, poolLogicAddr } =
+      await deploy();
+    await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, []); // delist RESERVE_ID
+
+    const data = positionManagerIface.encodeFunctionData('withdrawOnBehalfOf', [
+      spoke,
+      RESERVE_ID,
+      500n,
+      poolLogicAddr,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data))
+      .to.emit(guard, 'AaveV4SpokeWithdrawEvt')
+      .withArgs(poolLogicAddr, spoke, RESERVE_ID, 500n, anyValue);
+  });
+
+  // -----------------------------------------------------------------------
   // supplyOnBehalfOf
   // -----------------------------------------------------------------------
 

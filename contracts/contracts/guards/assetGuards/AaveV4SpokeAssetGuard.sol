@@ -255,7 +255,9 @@ contract AaveV4SpokeAssetGuard is
 
     /// @dev Shared by getBalance() and isValuationComplete() below, so the two can never
     ///      disagree about which failure paths count as "incomplete". Sums _reserveValueUsd()
-    ///      across every allowlisted reserve; `complete` is true only if every reserve valued
+    ///      across every TRACKED reserve (FNA-10 — not just the actively-allowed ones, so a
+    ///      reserve the protocol owner has since delisted stays in the pool's reported NAV for
+    ///      as long as it may still hold supply); `complete` is true only if every reserve valued
     ///      successfully (a reserve with suppliedAssets == 0 counts as successfully valued, not
     ///      incomplete — see _reserveValueUsd()).
     function _valuePosition(
@@ -263,7 +265,7 @@ contract AaveV4SpokeAssetGuard is
         address spoke
     ) internal view returns (uint256 balanceUsd18, bool complete) {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getPoolReserves(
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
             pool,
             spoke
         );
@@ -306,11 +308,11 @@ contract AaveV4SpokeAssetGuard is
     }
 
     /// @notice Liquidity-capped counterpart to getBalance() — see IWithdrawableBalanceGuard.
-    /// @dev Sums, per allowlisted reserve, the USD value of min(suppliedAssets,
-    ///      IHubBase.getAssetLiquidity(assetId)) — the amount this reserve could actually deliver
-    ///      right now, not just the pool's full claim (FNA-07). Fault-isolated identically to
-    ///      getBalance()/_reserveValueUsd: any failure at any step degrades this one reserve's
-    ///      contribution to 0 rather than reverting the whole call.
+    /// @dev Sums, per TRACKED reserve (FNA-10 — see _valuePosition), the USD value of
+    ///      min(suppliedAssets, IHubBase.getAssetLiquidity(assetId)) — the amount this reserve
+    ///      could actually deliver right now, not just the pool's full claim (FNA-07).
+    ///      Fault-isolated identically to getBalance()/_reserveValueUsd: any failure at any step
+    ///      degrades this one reserve's contribution to 0 rather than reverting the whole call.
     /// @param pool Pool holding the position.
     /// @param spoke Address of the Aave V4 Spoke.
     /// @return balanceUsd18 USD value of the pool's aggregate *withdrawable* position, 18 decimals.
@@ -319,7 +321,7 @@ contract AaveV4SpokeAssetGuard is
         address spoke
     ) external view override returns (uint256 balanceUsd18) {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getPoolReserves(
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
             pool,
             spoke
         );
@@ -438,8 +440,9 @@ contract AaveV4SpokeAssetGuard is
         (, complete) = _valuePosition(pool, spoke);
     }
 
-    /// @notice Allows removal once every allowlisted reserve is closed to within
-    ///         RAW_DUST_TOLERANCE raw units, rather than requiring an exact zero balance.
+    /// @notice Allows removal once every TRACKED reserve (FNA-10 — see _valuePosition) is closed
+    ///         to within RAW_DUST_TOLERANCE raw units, rather than requiring an exact zero
+    ///         balance.
     /// @dev Deliberately checks each reserve's raw `getUserSuppliedAssets` directly, without
     ///      try/catch, rather than the USD-valued getBalance() the inherited
     ///      ClosedAssetGuard.removeAssetCheck() (and this guard's own previous implementation)
@@ -453,7 +456,7 @@ contract AaveV4SpokeAssetGuard is
     ///      removal — the correct, conservative outcome when emptiness can't be proven. See
     ///      RAW_DUST_TOLERANCE for why the tolerance itself is in raw units rather than USD.
     function removeAssetCheck(address pool, address spoke) public view override {
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getPoolReserves(
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
             pool,
             spoke
         );
@@ -467,7 +470,9 @@ contract AaveV4SpokeAssetGuard is
                       WITHDRAW PROCESSING
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Builds the pro-rata withdrawal transactions across every allowlisted reserveId.
+    /// @notice Builds the pro-rata withdrawal transactions across every TRACKED reserveId
+    ///         (FNA-10 — see _valuePosition; includes reserves the protocol owner has since
+    ///         delisted but that may still hold pool supply, not just the actively-allowed ones).
     /// @dev Per reserve: approve-self-as-withdraw-spender, withdraw (lands at the pool, since
     ///      Aave V4 sends withdrawn funds to msg.sender regardless of `onBehalfOf`), then a
     ///      direct transfer to `to` — see contract-level @dev for why this differs from the
@@ -499,7 +504,7 @@ contract AaveV4SpokeAssetGuard is
         if (withdrawPortion > 1e18) revert BadPortion();
         if (to == address(0)) revert InvalidRecipient();
 
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getPoolReserves(
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
             pool,
             spoke
         );

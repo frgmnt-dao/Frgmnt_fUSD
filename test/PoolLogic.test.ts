@@ -1868,6 +1868,81 @@ describe('PoolLogic', () => {
       );
     });
 
+    // FNA-10: before this fix, delisting a reserve from AaveV4SpokeManager's active allowlist
+    // (setPoolReserves omitting it) immediately dropped it from AaveV4SpokeAssetGuard's
+    // getBalance()/withdrawProcessing(), since both enumerated the same mutable list used for
+    // access control. A pool's real, non-empty Aave position would silently vanish from NAV and
+    // become unreachable by the automatic pro-rata withdrawal path until governance re-added it.
+    it('a delisted Aave V4 Spoke reserve stays in NAV and withdrawable after setPoolReserves omits it', async () => {
+      const { pool, fusd, asset, poolManager, user } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const ManagerFactory = await ethers.getContractFactory('AaveV4SpokeManager');
+      const aaveV4SpokeManager = await ManagerFactory.deploy();
+
+      const TakerFactory = await ethers.getContractFactory('MockAaveV4TakerPositionManager');
+      const taker = await TakerFactory.deploy();
+      const takerAddr = await taker.getAddress();
+
+      const GiverFactory = await ethers.getContractFactory('MockAaveV4GiverPositionManager');
+      const giver = await GiverFactory.deploy();
+      const giverAddr = await giver.getAddress();
+
+      const GuardFactory = await ethers.getContractFactory('AaveV4SpokeAssetGuard');
+      const spokeGuard = await GuardFactory.deploy(
+        await aaveV4SpokeManager.getAddress(),
+        takerAddr,
+        giverAddr,
+      );
+
+      const SpokeFactory = await ethers.getContractFactory('MockAaveV4Spoke');
+      const spoke = await SpokeFactory.deploy();
+      const spokeAddr = await spoke.getAddress();
+
+      const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
+      const underlying = await TestTokenLogic.deploy('Spoke Underlying', 'SU', 18);
+
+      await poolManager.setSupportedAsset(
+        await underlying.getAddress(),
+        false,
+        ethers.parseUnits('1', 18),
+        18,
+      );
+      await poolManager.setAssetGuard(spokeAddr, await spokeGuard.getAddress());
+      await poolManager.setSupportedAsset(spokeAddr, true, ethers.parseUnits('1', 18), 18);
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, await underlying.getAddress());
+
+      const suppliedAmount = ethers.parseUnits('1000', 18);
+      await spoke.setSuppliedAssets(1n, poolAddr, suppliedAmount);
+      await underlying.mint(takerAddr, suppliedAmount);
+
+      // Governance delists reserve 1 — no route to new supply into it, but the position is real
+      // and untouched.
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, []);
+      expect(await aaveV4SpokeManager.isValidPoolReserve(poolAddr, spokeAddr, 1n)).to.equal(false);
+
+      await fusd.triggerIncrementAccountedAssets(poolAddr, suppliedAmount);
+
+      const netFusd = ethers.parseUnits('500', 18); // 50% of the (still-1000) withdrawable NAV
+      await mintAndApproveFUSD(fusd, pool, user, netFusd);
+
+      const userAddr = await user.getAddress();
+      const underlyingBefore = await underlying.balanceOf(userAddr);
+
+      await expect(pool.connect(user).withdrawCashImmediate(netFusd)).to.not.be.reverted;
+
+      const underlyingAfter = await underlying.balanceOf(userAddr);
+      // 50% of the full 1000 — the delisted reserve was never dropped from NAV or from the
+      // pro-rata unwind. Pre-FNA-10 this withdrawal would have reverted entirely (NAV would
+      // have read 0, so netFusd's minted/approved amount would exceed the fund value).
+      expect(underlyingAfter - underlyingBefore).to.equal(ethers.parseUnits('500', 18));
+      expect(await spoke.suppliedAssets(1n, poolAddr)).to.equal(
+        suppliedAmount - ethers.parseUnits('500', 18),
+      );
+    });
+
     // FNA-08: before this fix, PoolLogic had no route to make Aave V4's mandatory
     // setUserPositionManager approval call — execTransaction(spoke, setUserPositionManager(...))
     // fell through to ClosedAssetGuard's always-reject txGuard and reverted with
