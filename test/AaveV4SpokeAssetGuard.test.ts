@@ -478,9 +478,9 @@ describe('AaveV4SpokeAssetGuard', () => {
         ethers.parseUnits('1', 18), // 100%
         other.address,
       );
-      // Pre-FNA-10 this would have been an empty list (0 * 3), since withdrawProcessing
+      // Pre-FNA-10 this would have been an empty list (0 * 2), since withdrawProcessing
       // enumerated the now-empty active allowlist instead of the tracked set.
-      expect(txs.length).to.equal(3);
+      expect(txs.length).to.equal(2);
     });
 
     it('removeAssetCheck still reverts (non-empty) for a delisted reserve that still holds supply', async () => {
@@ -734,12 +734,11 @@ describe('AaveV4SpokeAssetGuard', () => {
       expect(txs.length).to.equal(0);
     });
 
-    it('builds the (approveWithdraw, withdrawOnBehalfOf, transfer) trio for a single reserve', async () => {
+    it('builds the (withdraw, transfer) pair for a single reserve (FNA-15: no PositionManager)', async () => {
       const {
         guard,
         aaveV4SpokeManager,
         poolManager,
-        takerAddr,
         poolAddr,
         spoke,
         spokeAddr,
@@ -764,37 +763,28 @@ describe('AaveV4SpokeAssetGuard', () => {
 
       expect(withdrawAsset).to.equal(ethers.ZeroAddress);
       expect(withdrawAmount).to.equal(0n);
-      expect(txs.length).to.equal(3);
+      expect(txs.length).to.equal(2);
 
       const expectedAmount = (supplied * portion) / ethers.parseUnits('1', 18);
 
-      const takerIface = new ethers.Interface([
-        'function approveWithdraw(address spoke, uint256 reserveId, address spender, uint256 amount)',
-        'function withdrawOnBehalfOf(address spoke, uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)',
+      const spokeIface = new ethers.Interface([
+        'function withdraw(uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)',
       ]);
       const erc20Iface = new ethers.Interface(['function transfer(address to, uint256 amount)']);
 
-      expect(txs[0].to).to.equal(takerAddr);
-      const approveDecoded = takerIface.decodeFunctionData('approveWithdraw', txs[0].txData);
-      expect(approveDecoded[0]).to.equal(spokeAddr);
-      expect(approveDecoded[1]).to.equal(1n);
-      expect(approveDecoded[2]).to.equal(poolAddr);
-      expect(approveDecoded[3]).to.equal(ethers.MaxUint256);
+      expect(txs[0].to).to.equal(spokeAddr);
+      const withdrawDecoded = spokeIface.decodeFunctionData('withdraw', txs[0].txData);
+      expect(withdrawDecoded[0]).to.equal(1n);
+      expect(withdrawDecoded[1]).to.equal(expectedAmount);
+      expect(withdrawDecoded[2]).to.equal(poolAddr);
 
-      expect(txs[1].to).to.equal(takerAddr);
-      const withdrawDecoded = takerIface.decodeFunctionData('withdrawOnBehalfOf', txs[1].txData);
-      expect(withdrawDecoded[0]).to.equal(spokeAddr);
-      expect(withdrawDecoded[1]).to.equal(1n);
-      expect(withdrawDecoded[2]).to.equal(expectedAmount);
-      expect(withdrawDecoded[3]).to.equal(poolAddr);
-
-      expect(txs[2].to).to.equal(usdcAddr);
-      const transferDecoded = erc20Iface.decodeFunctionData('transfer', txs[2].txData);
+      expect(txs[1].to).to.equal(usdcAddr);
+      const transferDecoded = erc20Iface.decodeFunctionData('transfer', txs[1].txData);
       expect(transferDecoded[0]).to.equal(other.address);
       expect(transferDecoded[1]).to.equal(expectedAmount);
     });
 
-    it('builds 3 transactions per reserve across multiple reserves', async () => {
+    it('builds 2 transactions per reserve across multiple reserves', async () => {
       const {
         guard,
         aaveV4SpokeManager,
@@ -824,9 +814,9 @@ describe('AaveV4SpokeAssetGuard', () => {
         other.address,
       );
 
-      expect(txs.length).to.equal(6);
-      expect(txs[2].to).to.equal(usdcAddr);
-      expect(txs[5].to).to.equal(wethAddr);
+      expect(txs.length).to.equal(4);
+      expect(txs[1].to).to.equal(usdcAddr);
+      expect(txs[3].to).to.equal(wethAddr);
     });
 
     it('reverts InvalidUnderlying if a nonzero reserve has no resolvable underlying', async () => {
@@ -842,9 +832,6 @@ describe('AaveV4SpokeAssetGuard', () => {
 
     it('executing the generated transactions actually withdraws and delivers funds to the recipient', async () => {
       const {
-        deployer,
-        taker,
-        takerAddr,
         guard,
         aaveV4SpokeManager,
         poolManager,
@@ -863,9 +850,10 @@ describe('AaveV4SpokeAssetGuard', () => {
       await poolManager.setAssetGuard(usdcAddr, true, 6n);
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
 
-      // Fund the mock TakerPositionManager so it can actually deliver the withdrawn underlying
-      // (simulating Hub/Spoke liquidity).
-      await usdc.mint(takerAddr, supplied);
+      // Fund the mock Spoke itself so it can actually deliver the withdrawn underlying
+      // (simulating Hub/Spoke liquidity) — FNA-15: withdrawal calls the Spoke directly now,
+      // not a PositionManager.
+      await usdc.mint(spokeAddr, supplied);
 
       const [, , txs] = await guard.withdrawProcessing(
         poolAddr,
@@ -873,10 +861,10 @@ describe('AaveV4SpokeAssetGuard', () => {
         ethers.parseUnits('1', 18),
         other.address,
       );
-      expect(txs.length).to.equal(3);
+      expect(txs.length).to.equal(2);
 
       // Simulate PoolLogic executing the guard-generated transactions in order, from the pool's
-      // own context (approveWithdraw's owner is msg.sender, so it must be sent "as" the pool).
+      // own context (Spoke.withdraw's self-shortcut requires msg.sender == onBehalfOf).
       // hardhat_setBalance funds the mock pool's gas directly, since it has no receive/fallback
       // to accept a plain ETH transfer.
       const poolSigner = await ethers.getImpersonatedSigner(poolAddr);
@@ -891,10 +879,10 @@ describe('AaveV4SpokeAssetGuard', () => {
 
       expect(await spoke.suppliedAssets(1n, poolAddr)).to.equal(0n);
       expect(await usdc.balanceOf(other.address)).to.equal(supplied);
-      expect(await usdc.balanceOf(takerAddr)).to.equal(0n);
+      expect(await usdc.balanceOf(spokeAddr)).to.equal(0n);
     });
 
-    // FNA-07: caps the requested withdrawOnBehalfOf amount by the Hub's real available
+    // FNA-07: caps the requested withdraw amount by the Hub's real available
     // liquidity, so this call never asks for more than the Spoke/Hub can currently return.
     it('caps the withdrawn amount by available liquidity when the reserve is not fully liquid', async () => {
       const {
@@ -920,25 +908,22 @@ describe('AaveV4SpokeAssetGuard', () => {
 
       const portion = ethers.parseUnits('1', 18); // 100% of the (liquidity-capped) NAV
       const [, , txs] = await guard.withdrawProcessing(poolAddr, spokeAddr, portion, other.address);
-      expect(txs.length).to.equal(3);
+      expect(txs.length).to.equal(2);
 
-      const takerIface = new ethers.Interface([
-        'function withdrawOnBehalfOf(address spoke, uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)',
+      const spokeIface = new ethers.Interface([
+        'function withdraw(uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)',
       ]);
-      const withdrawDecoded = takerIface.decodeFunctionData('withdrawOnBehalfOf', txs[1].txData);
+      const withdrawDecoded = spokeIface.decodeFunctionData('withdraw', txs[0].txData);
       // Not 1000 USDC (the full supplied amount) — capped to the liquid amount instead.
-      expect(withdrawDecoded[2]).to.equal(cappedAmount);
+      expect(withdrawDecoded[1]).to.equal(cappedAmount);
 
       const erc20Iface = new ethers.Interface(['function transfer(address to, uint256 amount)']);
-      const transferDecoded = erc20Iface.decodeFunctionData('transfer', txs[2].txData);
+      const transferDecoded = erc20Iface.decodeFunctionData('transfer', txs[1].txData);
       expect(transferDecoded[1]).to.equal(cappedAmount);
     });
 
-    it('reproduces and fixes FNA-07: a withdrawOnBehalfOf for the full supplied amount would revert on an under-liquid reserve, but the guard-generated (capped) transaction succeeds', async () => {
+    it('reproduces and fixes FNA-07: a withdraw for the full supplied amount would revert on an under-liquid reserve, but the guard-generated (capped) transaction succeeds', async () => {
       const {
-        deployer,
-        taker,
-        takerAddr,
         guard,
         aaveV4SpokeManager,
         poolManager,
@@ -957,12 +942,12 @@ describe('AaveV4SpokeAssetGuard', () => {
       await poolManager.setAssetGuard(usdcAddr, true, 6n);
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
 
-      // The mock TakerPositionManager (standing in for the real Spoke/Hub liquidity) only holds
-      // enough USDC to honor 20% of the position — a real withdrawOnBehalfOf for the full 1000
-      // would revert with insufficient balance to transfer back.
+      // The mock Spoke (standing in for the real Spoke/Hub liquidity) only holds enough USDC to
+      // honor 20% of the position — a real withdraw for the full 1000 would revert with
+      // insufficient balance to transfer back.
       const cappedAmount = ethers.parseUnits('200', 6);
       await spoke.setAvailableLiquidity(1n, cappedAmount);
-      await usdc.mint(takerAddr, cappedAmount);
+      await usdc.mint(spokeAddr, cappedAmount);
 
       const poolSigner = await ethers.getImpersonatedSigner(poolAddr);
       await ethers.provider.send('hardhat_setBalance', [
@@ -970,23 +955,18 @@ describe('AaveV4SpokeAssetGuard', () => {
         '0x' + ethers.parseEther('1').toString(16),
       ]);
 
-      // Confirm the *naive* full-amount withdrawal really would have failed — with a max
-      // allowance already granted (isolating the failure to insufficient USDC balance in the
-      // mock Taker to transfer back, not an allowance shortfall), demonstrating the
+      // Confirm the *naive* full-amount withdrawal really would have failed — FNA-15: withdraw
+      // needs no prior approval for a self-withdrawal, so the only thing that can fail here is
+      // the Spoke's own USDC balance being insufficient to transfer back, demonstrating the
       // vulnerability this guard now avoids triggering.
-      await taker
-        .connect(poolSigner)
-        .approveWithdraw(spokeAddr, 1n, poolAddr, ethers.MaxUint256);
       await expect(
-        taker
-          .connect(poolSigner)
-          .withdrawOnBehalfOf(spokeAddr, 1n, supplied, poolAddr),
+        spoke.connect(poolSigner).withdraw(1n, supplied, poolAddr),
       ).to.be.reverted;
 
       // The guard's own withdrawProcessing(), even at portion = 100%, must not attempt that.
       const portion = ethers.parseUnits('1', 18);
       const [, , txs] = await guard.withdrawProcessing(poolAddr, spokeAddr, portion, other.address);
-      expect(txs.length).to.equal(3);
+      expect(txs.length).to.equal(2);
 
       for (const tx of txs) {
         await poolSigner.sendTransaction({ to: tx.to, data: tx.txData });
@@ -1125,10 +1105,9 @@ describe('AaveV4SpokeAssetGuard', () => {
         other.address,
       );
 
-      // Only reserve 1's (approveWithdraw, withdrawOnBehalfOf, transfer) trio — reserve 2 is
-      // skipped, not withdrawn.
-      expect(txs.length).to.equal(3);
-      expect(txs[2].to).to.equal(usdcAddr);
+      // Only reserve 1's (withdraw, transfer) pair — reserve 2 is skipped, not withdrawn.
+      expect(txs.length).to.equal(2);
+      expect(txs[1].to).to.equal(usdcAddr);
     });
 
     it('still withdraws a reserve whose underlying has no registered guard skipped, leaving only priceable reserves', async () => {
@@ -1163,8 +1142,8 @@ describe('AaveV4SpokeAssetGuard', () => {
         other.address,
       );
 
-      expect(txs.length).to.equal(3);
-      expect(txs[2].to).to.equal(usdcAddr);
+      expect(txs.length).to.equal(2);
+      expect(txs[1].to).to.equal(usdcAddr);
     });
   });
 });

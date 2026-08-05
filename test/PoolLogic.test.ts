@@ -1868,13 +1868,14 @@ describe('PoolLogic', () => {
       await asset.mint(poolAddr, liquidAmount);
 
       // Illiquid side: a 1000-unit Aave V4 Spoke reserve position, but only 200 units are
-      // actually liquid right now, and the mock TakerPositionManager (standing in for
-      // Spoke/Hub liquidity) only holds enough underlying to back exactly that capped amount.
+      // actually liquid right now, and the mock Spoke (standing in for Spoke/Hub liquidity —
+      // FNA-15: withdrawal calls the Spoke directly now, not a PositionManager) only holds
+      // enough underlying to back exactly that capped amount.
       const fullSupplied = ethers.parseUnits('1000', 18);
       const cappedAmount = ethers.parseUnits('200', 18);
       await spoke.setSuppliedAssets(1n, poolAddr, fullSupplied);
       await spoke.setAvailableLiquidity(1n, cappedAmount);
-      await underlying.mint(takerAddr, cappedAmount);
+      await underlying.mint(spokeAddr, cappedAmount);
 
       await fusd.triggerIncrementAccountedAssets(
         poolAddr,
@@ -1897,7 +1898,7 @@ describe('PoolLogic', () => {
       // 50% of the liquid asset's full 800.
       expect(liquidAfter - liquidBefore).to.equal(ethers.parseUnits('400', 18));
       // 50% of the spoke reserve's *capped* 200 (i.e. 100), not 50% of the full 1000 (which
-      // would have reverted — the mock Taker only ever held 200).
+      // would have reverted — the mock Spoke only ever held 200).
       expect(underlyingAfter - underlyingBefore).to.equal(ethers.parseUnits('100', 18));
 
       // The remaining, unwithdrawn spoke position is still intact.
@@ -1954,7 +1955,8 @@ describe('PoolLogic', () => {
 
       const suppliedAmount = ethers.parseUnits('1000', 18);
       await spoke.setSuppliedAssets(1n, poolAddr, suppliedAmount);
-      await underlying.mint(takerAddr, suppliedAmount);
+      // FNA-15: withdrawal calls the Spoke directly now, not a PositionManager.
+      await underlying.mint(spokeAddr, suppliedAmount);
 
       // Governance delists reserve 1 — no route to new supply into it, but the position is real
       // and untouched.
