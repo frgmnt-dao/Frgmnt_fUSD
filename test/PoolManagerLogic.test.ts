@@ -153,6 +153,28 @@ describe('PoolManagerLogic', () => {
     ).to.be.revertedWith('invalid manager fee');
   });
 
+  it('accepts a zero _poolLogic at initialize (FNA-09: deliberate — deployment-ordering, wired up later via setPoolLogic)', async () => {
+    const [deployer, manager] = await ethers.getSigners();
+    const MockAssetHandler = await ethers.getContractFactory('MockAssetHandler');
+    const mockAssetHandler = await MockAssetHandler.deploy();
+    const MockGovernance = await ethers.getContractFactory('MockGovernance');
+    const mockGovernance = await MockGovernance.deploy();
+    const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic');
+    const contract = await PoolManagerLogic.deploy();
+
+    await contract.initialize(
+      await deployer.getAddress(),
+      await manager.getAddress(),
+      'm',
+      ethers.ZeroAddress,
+      await mockAssetHandler.getAddress(),
+      await mockGovernance.getAddress(),
+      0,
+      0,
+    );
+    expect(await contract.poolLogic()).to.equal(ethers.ZeroAddress);
+  });
+
   // ========================================================================================
   // ASSET MANAGEMENT
   // ========================================================================================
@@ -451,6 +473,13 @@ describe('PoolManagerLogic', () => {
 
       await contract.connect(owner).setPoolLogic(await newPool.getAddress());
       expect(await contract.poolLogic()).to.equal(await newPool.getAddress());
+    });
+
+    it('setPoolLogic reverts on zero address (FNA-09)', async () => {
+      const { contract, owner } = await loadFixture(setupFixture);
+      await expect(
+        contract.connect(owner).setPoolLogic(ethers.ZeroAddress),
+      ).to.be.revertedWithCustomError(contract, 'InvalidPoolLogic');
     });
 
     it('owner can update factory config and asset info/price/guards', async () => {

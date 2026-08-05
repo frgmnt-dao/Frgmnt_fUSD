@@ -159,6 +159,19 @@ describe('TokenLogic (fEURO)', () => {
     ).to.be.revertedWith('TokenLogic: poolManagerLogic=0');
   });
 
+  it('accepts a zero _poolLogic at initialize (FNA-09: deliberate — deployment-ordering, wired up later via setPoolLogic)', async () => {
+    const { adminAddress, emergencyAddress, poolMgrAddress, cooldown } =
+      await loadFixture(deployFixture);
+    const TokenLogic = await ethers.getContractFactory('TokenLogic');
+
+    const fusd = await upgrades.deployProxy(
+      TokenLogic,
+      [adminAddress, emergencyAddress, ethers.ZeroAddress, poolMgrAddress, cooldown],
+      { initializer: 'initialize', kind: 'uups' },
+    );
+    expect(await fusd.poolLogic()).to.equal(ethers.ZeroAddress);
+  });
+
   // ---------------------------------------------------------------------------
   // GOVERNANCE (DEFAULT_ADMIN_ROLE controls setPoolLogic, setCooldown, etc.)
   // ---------------------------------------------------------------------------

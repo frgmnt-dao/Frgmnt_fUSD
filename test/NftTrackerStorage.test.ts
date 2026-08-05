@@ -55,6 +55,14 @@ describe('NftTrackerStorage', function () {
     await expect(nftTracker.initialize(mockGuardInfo.target)).to.be.reverted; // OZ Initializable revert
   });
 
+  it('reverts when initialized with a zero poolFactory (FNA-09)', async function () {
+    const NftTrackerStorage = await ethers.getContractFactory('NftTrackerStorage');
+    const fresh = await NftTrackerStorage.deploy();
+    await expect(fresh.initialize(ethers.ZeroAddress)).to.be.revertedWith(
+      'NftTrackerStorage: poolFactory=0',
+    );
+  });
+
   // ---------------------------------------------------------------------------
   // Access control via checkContractGuard
   // ---------------------------------------------------------------------------

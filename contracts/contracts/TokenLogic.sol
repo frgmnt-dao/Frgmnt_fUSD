@@ -212,7 +212,11 @@ contract TokenLogic is
     ) external initializer {
         require(admin != address(0), "TokenLogic: admin=0");
         require(emergency != address(0), "TokenLogic: emergency=0");
-        //	require(_poolLogic != address(0), "TokenLogic: poolLogic=0");
+        // FNA-09: _poolLogic is deliberately allowed to be address(0) here — PoolLogic.initialize()
+        // requires this contract's (and PoolManagerLogic's) address, so the deployment script
+        // deploys TokenLogic first (with poolLogic unset) and wires it up afterward via
+        // setPoolLogic() once PoolLogic exists — see scripts/deploy_core_contracts.ts.
+        // setPoolLogic below enforces non-zero before that wiring completes.
         require(_poolManagerLogic != address(0), "TokenLogic: poolManagerLogic=0");
 
         __ERC20_init("Frgmnt EURO", "fEURO");

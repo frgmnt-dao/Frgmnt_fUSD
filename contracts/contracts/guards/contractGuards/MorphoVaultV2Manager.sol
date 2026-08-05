@@ -81,6 +81,9 @@ contract MorphoVaultV2Manager is IMorphoVaultV2Manager, Ownable {
 
         // Set new permissions
         for (uint256 i = 0; i < vaults.length; i++) {
+            // FNA-09: reject a zero entry rather than silently recording it as an "allowed vault"
+            // no pool can ever actually match against.
+            require(vaults[i] != address(0), "Invalid vault address");
             isValidPoolVault[pool][vaults[i]] = true;
         }
 
