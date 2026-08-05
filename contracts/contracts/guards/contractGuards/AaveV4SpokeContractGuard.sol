@@ -43,15 +43,22 @@ import "../../interfaces/IAaveV4SpokeManager.sol";
 ///      funds. `_handleApproveWithdraw` below enforces `spender == pool` unconditionally — this
 ///      is the single most important check in this contract.
 ///
-///      Every operation also requires the target Spoke to be:
-///       1) registered as a supported asset on the pool (`isSupportedAsset`), AND
-///       2) have the specific `reserveId` explicitly whitelisted for this pool in
-///          `AaveV4SpokeManager`.
-///      Both checks are required — (1) alone would let the pool manager expose the pool to an
-///      arbitrary, unvetted Spoke address, since `changeAssets()` is callable by the pool
-///      manager (or trader). (2) is owned by the protocol owner (intended to be the Timelock),
-///      independent of the pool manager, mirroring the two-key model already used by
-///      `MorphoBlueManager` and `MorphoVaultV2Manager`.
+///      Every operation also requires the target Spoke to be registered as a supported asset on
+///      the pool (`isSupportedAsset`) — otherwise the pool manager could expose the pool to an
+///      arbitrary, unvetted Spoke address via `changeAssets()`. Beyond that, the reserveId check
+///      differs by direction (FNA-10):
+///       - Supply (`_handleSupply`) requires the reserveId to be in the protocol owner's ACTIVE
+///         allowlist (`isValidPoolReserve`) — new exposure may only go into reserves currently
+///         sanctioned by governance.
+///       - Withdraw-side operations (`_handleApproveWithdraw`, `_handleWithdraw`) require only
+///         that the reserveId be TRACKED (`isTrackedPoolReserve`), a superset that also includes
+///         reserves the protocol owner has since delisted. Gating these on the active allowlist
+///         instead — as a single shared check once did — would mean a delisted reserve could
+///         never be unwound through this manual execTransaction path either, contradicting
+///         AaveV4SpokeAssetGuard's own automatic withdrawProcessing() (which already iterates
+///         the tracked set, not the active one) and leaving the position stuck until governance
+///         re-adds the reserve. See AaveV4SpokeManager's contract-level documentation for why
+///         tracked/active are governed by two separate mappings.
 contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     /*//////////////////////////////////////////////////////////////////////////
                                 FUNCTION SELECTORS
@@ -155,7 +162,7 @@ contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
             (address, uint256, uint256, address)
         );
 
-        _requireAllowedReserve(poolManagerLogic, poolLogic, spoke, reserveId);
+        _requireActiveReserve(poolManagerLogic, poolLogic, spoke, reserveId);
         require(onBehalfOf == poolLogic, "AaveV4SpokeGuard: onBehalfOf != pool");
 
         emit AaveV4SpokeSupplyEvt(poolLogic, spoke, reserveId, amount, block.timestamp);
@@ -175,7 +182,7 @@ contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
             (address, uint256, address, uint256)
         );
 
-        _requireAllowedReserve(poolManagerLogic, poolLogic, spoke, reserveId);
+        _requireTrackedReserve(poolManagerLogic, poolLogic, spoke, reserveId);
         require(spender == poolLogic, "AaveV4SpokeGuard: spender != pool");
 
         emit AaveV4SpokeApproveWithdrawEvt(poolLogic, spoke, reserveId, amount, block.timestamp);
@@ -193,17 +200,17 @@ contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
             (address, uint256, uint256, address)
         );
 
-        _requireAllowedReserve(poolManagerLogic, poolLogic, spoke, reserveId);
+        _requireTrackedReserve(poolManagerLogic, poolLogic, spoke, reserveId);
         require(onBehalfOf == poolLogic, "AaveV4SpokeGuard: onBehalfOf != pool");
 
         emit AaveV4SpokeWithdrawEvt(poolLogic, spoke, reserveId, amount, block.timestamp);
         return uint16(TransactionType.AaveV4SpokeWithdraw);
     }
 
-    /// @dev Shared validation: the Spoke must be a registered supported asset of the pool AND
-    ///      the specific reserveId must be whitelisted by the protocol owner. See the
-    ///      contract-level documentation above for why both checks are required.
-    function _requireAllowedReserve(
+    /// @dev Supply-side validation: the Spoke must be a registered supported asset of the pool
+    ///      AND the specific reserveId must be in the protocol owner's ACTIVE allowlist. See the
+    ///      contract-level documentation above for why supply uses the active (not tracked) set.
+    function _requireActiveReserve(
         address poolManagerLogic,
         address poolLogic,
         address spoke,
@@ -216,6 +223,26 @@ contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         require(
             IAaveV4SpokeManager(aaveV4SpokeManager).isValidPoolReserve(poolLogic, spoke, reserveId),
             "AaveV4SpokeGuard: reserve not whitelisted"
+        );
+    }
+
+    /// @dev Withdraw-side validation (FNA-10): the Spoke must still be a registered supported
+    ///      asset of the pool, but the reserveId only needs to be TRACKED, not actively
+    ///      whitelisted — see the contract-level documentation above for why a delisted reserve
+    ///      must still be withdrawable through this manual path.
+    function _requireTrackedReserve(
+        address poolManagerLogic,
+        address poolLogic,
+        address spoke,
+        uint256 reserveId
+    ) internal view {
+        require(
+            IHasSupportedAsset(poolManagerLogic).isSupportedAsset(spoke),
+            "AaveV4SpokeGuard: spoke not enabled"
+        );
+        require(
+            IAaveV4SpokeManager(aaveV4SpokeManager).isTrackedPoolReserve(poolLogic, spoke, reserveId),
+            "AaveV4SpokeGuard: reserve not tracked"
         );
     }
 }
