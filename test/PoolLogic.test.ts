@@ -1780,5 +1780,87 @@ describe('PoolLogic', () => {
 
       expect(after - before).to.equal(amount);
     });
+
+    // Same finding, second integration: a real AaveV4SpokeAssetGuard position whose reserve is
+    // under-liquid, alongside a fully-liquid ERC20, confirming the withdrawal still succeeds and
+    // correctly skews toward the liquid asset — same fix, different lending guard.
+    it('delivers a non-reverting, liquidity-capped withdrawal when an Aave V4 Spoke reserve is under-liquid', async () => {
+      const { pool, fusd, asset, poolManager, user } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const ManagerFactory = await ethers.getContractFactory('AaveV4SpokeManager');
+      const aaveV4SpokeManager = await ManagerFactory.deploy();
+
+      const TakerFactory = await ethers.getContractFactory('MockAaveV4TakerPositionManager');
+      const taker = await TakerFactory.deploy();
+      const takerAddr = await taker.getAddress();
+
+      const GuardFactory = await ethers.getContractFactory('AaveV4SpokeAssetGuard');
+      const spokeGuard = await GuardFactory.deploy(
+        await aaveV4SpokeManager.getAddress(),
+        takerAddr,
+      );
+
+      const SpokeFactory = await ethers.getContractFactory('MockAaveV4Spoke');
+      const spoke = await SpokeFactory.deploy();
+      const spokeAddr = await spoke.getAddress();
+
+      const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
+      const underlying = await TestTokenLogic.deploy('Spoke Underlying', 'SU', 18);
+
+      await poolManager.setSupportedAsset(
+        await underlying.getAddress(),
+        false,
+        ethers.parseUnits('1', 18),
+        18,
+      );
+      await poolManager.setAssetGuard(spokeAddr, await spokeGuard.getAddress());
+      await poolManager.setSupportedAsset(spokeAddr, true, ethers.parseUnits('1', 18), 18);
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, await underlying.getAddress());
+
+      // Liquid side: 800 of the pool's existing plain ERC20 asset.
+      const liquidAmount = ethers.parseUnits('800', 18);
+      await asset.mint(poolAddr, liquidAmount);
+
+      // Illiquid side: a 1000-unit Aave V4 Spoke reserve position, but only 200 units are
+      // actually liquid right now, and the mock TakerPositionManager (standing in for
+      // Spoke/Hub liquidity) only holds enough underlying to back exactly that capped amount.
+      const fullSupplied = ethers.parseUnits('1000', 18);
+      const cappedAmount = ethers.parseUnits('200', 18);
+      await spoke.setSuppliedAssets(1n, poolAddr, fullSupplied);
+      await spoke.setAvailableLiquidity(1n, cappedAmount);
+      await underlying.mint(takerAddr, cappedAmount);
+
+      await fusd.triggerIncrementAccountedAssets(
+        poolAddr,
+        ethers.parseUnits('1800', 18), // 800 liquid + 1000 full spoke claim
+      );
+
+      // Withdrawable NAV = 800 (liquid) + 200 (liquidity-capped spoke reserve) = 1000.
+      const netFusd = ethers.parseUnits('500', 18); // 50% of the withdrawable NAV
+      await mintAndApproveFUSD(fusd, pool, user, netFusd);
+
+      const userAddr = await user.getAddress();
+      const liquidBefore = await asset.balanceOf(userAddr);
+      const underlyingBefore = await underlying.balanceOf(userAddr);
+
+      await expect(pool.connect(user).withdrawCashImmediate(netFusd)).to.not.be.reverted;
+
+      const liquidAfter = await asset.balanceOf(userAddr);
+      const underlyingAfter = await underlying.balanceOf(userAddr);
+
+      // 50% of the liquid asset's full 800.
+      expect(liquidAfter - liquidBefore).to.equal(ethers.parseUnits('400', 18));
+      // 50% of the spoke reserve's *capped* 200 (i.e. 100), not 50% of the full 1000 (which
+      // would have reverted — the mock Taker only ever held 200).
+      expect(underlyingAfter - underlyingBefore).to.equal(ethers.parseUnits('100', 18));
+
+      // The remaining, unwithdrawn spoke position is still intact.
+      expect(await spoke.suppliedAssets(1n, poolAddr)).to.equal(
+        fullSupplied - ethers.parseUnits('100', 18),
+      );
+    });
   });
 });

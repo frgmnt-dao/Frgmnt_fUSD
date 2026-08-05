@@ -8,6 +8,7 @@ pragma solidity ^0.8.24;
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import { ISpoke } from "../../interfaces/aave/v4/ISpoke.sol";
+import { IHubBase } from "../../interfaces/aave/v4/IHubBase.sol";
 import { ITakerPositionManager } from "../../interfaces/aave/v4/ITakerPositionManager.sol";
 import { IAaveV4SpokeManager } from "../../interfaces/IAaveV4SpokeManager.sol";
 import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
@@ -15,6 +16,7 @@ import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
 import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
+import { IWithdrawableBalanceGuard } from "../../interfaces/guards/IWithdrawableBalanceGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -37,21 +39,24 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    its own direct `transfer(to, amount)`, and the guard returns `withdrawAsset = address(0)`
 ///    to signal that funds have already been delivered and PoolLogic should not track/forward
 ///    anything itself.
-///  - `getBalance` resolves each reserve's underlying token via a raw `staticcall` reading only
-///    the first 32-byte word of `ISpoke.getReserve(uint256)`'s return data, rather than decoding
-///    the full `Reserve` struct. The struct's later fields (in particular a `flags` field of
-///    uncertain encoded shape) could not be confirmed against a live deployed ABI at design
-///    time, and a wrong struct layout would silently return incorrect data rather than revert —
-///    `underlying` is confirmed to be the struct's first field, so reading only that word is
-///    correct regardless of how the rest of the struct is actually laid out.
+///  - `getBalance` resolves each reserve's underlying token (and, for FNA-07 liquidity capping,
+///    its Hub and Hub-side assetId) via a raw `staticcall` reading the first three 32-byte words
+///    of `ISpoke.getReserve(uint256)`'s return data, rather than decoding the full `Reserve`
+///    struct — see ISpoke's own documentation for the confirmed field layout this relies on, and
+///    _getReserveUnderlyingAndHub below.
 ///  - Every external call into the Spoke in `getBalance` is fault-isolated per reserve (skip and
 ///    continue, not revert-the-whole-function) — unlike Morpho Vault V2 (a single position per
 ///    guard call), a Spoke aggregates multiple reserves, so one bad reserve must not zero out
 ///    the valuation of the others.
+///  - FNA-07: `getWithdrawableBalance`/`withdrawProcessing` cap each reserve's withdrawable
+///    amount by `IHubBase.getAssetLiquidity`, so one under-liquid reserve sizes its own share
+///    down instead of `withdrawOnBehalfOf` reverting and taking every other reserve (and every
+///    other asset in the pool) down with it via PoolLogic's single atomic withdrawal transaction.
 contract AaveV4SpokeAssetGuard is
     ClosedAssetGuard,
     IAddAssetCheckGuard,
-    IIncompleteValuationGuard
+    IIncompleteValuationGuard,
+    IWithdrawableBalanceGuard
 {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -215,8 +220,78 @@ contract AaveV4SpokeAssetGuard is
         }
         if (suppliedAssets == 0) return (0, true);
 
-        (address underlying, bool ok) = _getReserveUnderlying(spoke, reserveId);
+        (address underlying, , , bool ok) = _getReserveUnderlyingAndHub(spoke, reserveId);
         if (!ok || underlying == address(0)) return (0, false);
+
+        return _valueAmount(poolManagerLogic, underlying, suppliedAssets);
+    }
+
+    /// @notice Liquidity-capped counterpart to getBalance() — see IWithdrawableBalanceGuard.
+    /// @dev Sums, per allowlisted reserve, the USD value of min(suppliedAssets,
+    ///      IHubBase.getAssetLiquidity(assetId)) — the amount this reserve could actually deliver
+    ///      right now, not just the pool's full claim (FNA-07). Fault-isolated identically to
+    ///      getBalance()/_reserveValueUsd: any failure at any step degrades this one reserve's
+    ///      contribution to 0 rather than reverting the whole call.
+    /// @param pool Pool holding the position.
+    /// @param spoke Address of the Aave V4 Spoke.
+    /// @return balanceUsd18 USD value of the pool's aggregate *withdrawable* position, 18 decimals.
+    function getWithdrawableBalance(
+        address pool,
+        address spoke
+    ) external view override returns (uint256 balanceUsd18) {
+        address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getPoolReserves(
+            pool,
+            spoke
+        );
+
+        for (uint256 i = 0; i < reserveIds.length; ++i) {
+            (uint256 value, ) = _reserveWithdrawableValueUsd(pool, spoke, poolManagerLogic, reserveIds[i]);
+            balanceUsd18 += value;
+        }
+    }
+
+    /// @notice See IWithdrawableBalanceGuard.
+    function isWithdrawableBalanceGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @dev Same fault-isolation contract as _reserveValueUsd, but values
+    ///      min(suppliedAssets, availableLiquidity) instead of the full suppliedAssets claim.
+    function _reserveWithdrawableValueUsd(
+        address pool,
+        address spoke,
+        address poolManagerLogic,
+        uint256 reserveId
+    ) internal view returns (uint256, bool) {
+        uint256 suppliedAssets;
+        try ISpoke(spoke).getUserSuppliedAssets(reserveId, pool) returns (uint256 a) {
+            suppliedAssets = a;
+        } catch {
+            return (0, false);
+        }
+        if (suppliedAssets == 0) return (0, true);
+
+        (address underlying, uint256 withdrawableAssets) = _capByAvailableLiquidity(
+            spoke,
+            reserveId,
+            suppliedAssets
+        );
+        if (underlying == address(0)) return (0, false);
+
+        return _valueAmount(poolManagerLogic, underlying, withdrawableAssets);
+    }
+
+    /// @dev Shared USD-valuation tail for both _reserveValueUsd (full claim) and
+    ///      _reserveWithdrawableValueUsd (liquidity-capped claim), so they can never disagree
+    ///      about which pricing failures count as "incomplete". Fault-isolated: any failure or a
+    ///      zero price is reported as `!ok` (via _tryPriceAndDecimals) rather than reverting.
+    function _valueAmount(
+        address poolManagerLogic,
+        address underlying,
+        uint256 amount
+    ) internal view returns (uint256, bool) {
+        if (amount == 0) return (0, true);
 
         (bool priced, uint256 price, uint256 decimals) = _tryPriceAndDecimals(
             poolManagerLogic,
@@ -224,7 +299,7 @@ contract AaveV4SpokeAssetGuard is
         );
         if (!priced) return (0, false);
 
-        return ((suppliedAssets * price) / (10 ** decimals), true);
+        return ((amount * price) / (10 ** decimals), true);
     }
 
     /// @dev Shared by _reserveValueUsd (getBalance's per-reserve valuation) and
@@ -316,9 +391,11 @@ contract AaveV4SpokeAssetGuard is
     ///      anything itself.
     ///
     ///      This only calls `withdrawOnBehalfOf` — it does not fall back to any alternate
-    ///      liquidity source if a reserve's withdrawal would revert (e.g. the Spoke/Hub being
-    ///      short on liquidity). If that happens, the withdrawal reverts; this is the same risk
-    ///      class as an Aave V3/Morpho Blue market being fully utilized today.
+    ///      liquidity source. FNA-07: it also no longer needs one for an under-liquid reserve —
+    ///      _appendReserveWithdrawTxs below caps each reserve's requested amount by
+    ///      `IHubBase.getAssetLiquidity`, the same cap `getWithdrawableBalance` already applied
+    ///      when the caller sized `withdrawPortion` against the NAV, so this call is never asked
+    ///      for more than the Spoke/Hub can currently return.
     /// @param pool Pool address.
     /// @param spoke Address of the Aave V4 Spoke.
     /// @param withdrawPortion Portion to withdraw, 1e18 = 100%.
@@ -367,15 +444,19 @@ contract AaveV4SpokeAssetGuard is
     ///      `txs` starting at index `n`, if the pool holds a nonzero withdrawable amount there.
     ///      Returns the updated `n`.
     ///
-    ///      `withdrawPortion` is sized by the caller against `_withdrawableFundValue()`, which
-    ///      sums `_reserveValueUsd()` across reserves and — by design — contributes 0 for a
-    ///      reserve it cannot price. If this function withdrew such a reserve's full raw supplied
-    ///      amount at that same portion anyway, a caller could redeem a portion sized against a
-    ///      NAV that excluded the reserve while still receiving it, extracting more value than
-    ///      the fUSD burned pays for. So a reserve that _reserveValueUsd() cannot price here is
-    ///      skipped rather than withdrawn, exactly mirroring its 0 contribution to the NAV the
-    ///      portion was computed from — it stays reserved for its pre-failure holders until
-    ///      pricing recovers, rather than being extractable by whoever withdraws next.
+    ///      `withdrawPortion` is sized by the caller against `_withdrawableFundValue()`, which —
+    ///      via getWithdrawableBalance()/_reserveWithdrawableValueUsd() — already floors each
+    ///      reserve's contribution by both (a) whether it can currently be priced and (b) its
+    ///      real available liquidity (FNA-07). Applying that same portion to the *full* supplied
+    ///      amount here (rather than to the same liquidity-capped amount the NAV was sized from)
+    ///      would reopen exactly the mismatch this guards against: a caller could redeem a
+    ///      portion sized against a smaller NAV while still receiving the larger, uncapped share
+    ///      — extracting more value than the fUSD burned pays for, or asking
+    ///      `withdrawOnBehalfOf` for more than the Spoke/Hub can currently return and reverting
+    ///      the whole withdrawal. A reserve that can't currently be priced or valued is skipped
+    ///      rather than withdrawn, exactly mirroring its 0 contribution to the NAV the portion
+    ///      was computed from — it stays reserved for its pre-failure holders until pricing
+    ///      recovers, rather than being extractable by whoever withdraws next.
     function _appendReserveWithdrawTxs(
         WithdrawCtx memory ctx,
         uint256 reserveId,
@@ -385,11 +466,15 @@ contract AaveV4SpokeAssetGuard is
         uint256 suppliedAssets = ISpoke(ctx.spoke).getUserSuppliedAssets(reserveId, ctx.pool);
         if (suppliedAssets == 0) return n;
 
-        uint256 amount = (suppliedAssets * ctx.withdrawPortion) / 1e18;
-        if (amount == 0) return n;
+        (address underlying, uint256 withdrawableAssets) = _capByAvailableLiquidity(
+            ctx.spoke,
+            reserveId,
+            suppliedAssets
+        );
+        if (underlying == address(0)) revert InvalidUnderlying();
 
-        (address underlying, bool ok) = _getReserveUnderlying(ctx.spoke, reserveId);
-        if (!ok || underlying == address(0)) revert InvalidUnderlying();
+        uint256 amount = (withdrawableAssets * ctx.withdrawPortion) / 1e18;
+        if (amount == 0) return n;
 
         if (!_reservePriceAvailable(ctx.pool, underlying)) return n;
 
@@ -427,21 +512,52 @@ contract AaveV4SpokeAssetGuard is
                             INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Resolves a reserve's underlying token address via a raw staticcall, reading only the
-    ///      first 32-byte word of the returned Reserve struct. See contract-level @dev for why
-    ///      this avoids depending on the full struct's exact encoded layout.
-    function _getReserveUnderlying(
+    /// @dev FNA-07: resolves a reserve's underlying token and caps `suppliedAssets` by the Hub's
+    ///      real available liquidity for it, in one call — keeps _appendReserveWithdrawTxs's own
+    ///      live-local count low enough to compile without `--via-ir`. Returns
+    ///      `underlying = address(0)` if the Reserve struct itself couldn't be resolved (the
+    ///      caller reverts on that, matching the pre-existing behavior of the raw underlying
+    ///      lookup this replaces); a Hub liquidity query that fails degrades to 0 available
+    ///      liquidity (skip this reserve, don't block the rest of the withdrawal) rather than
+    ///      reverting, consistent with this fix's whole purpose.
+    function _capByAvailableLiquidity(
+        address spoke,
+        uint256 reserveId,
+        uint256 suppliedAssets
+    ) internal view returns (address underlying, uint256 withdrawableAssets) {
+        address hub;
+        uint256 assetId;
+        bool ok;
+        (underlying, hub, assetId, ok) = _getReserveUnderlyingAndHub(spoke, reserveId);
+        if (!ok || underlying == address(0)) return (address(0), 0);
+
+        uint256 availableLiquidity;
+        try IHubBase(hub).getAssetLiquidity(assetId) returns (uint256 l) {
+            availableLiquidity = l;
+        } catch {
+            availableLiquidity = 0;
+        }
+        withdrawableAssets = suppliedAssets < availableLiquidity ? suppliedAssets : availableLiquidity;
+    }
+
+    /// @dev Resolves a reserve's underlying token, Hub, and Hub-side assetId via a raw
+    ///      staticcall, reading the first three 32-byte words of the returned Reserve struct
+    ///      (`underlying`, `hub`, `assetId`, in that order) without decoding the full struct —
+    ///      see ISpoke's documentation for the confirmed field layout this relies on.
+    function _getReserveUnderlyingAndHub(
         address spoke,
         uint256 reserveId
-    ) internal view returns (address underlying, bool ok) {
+    ) internal view returns (address underlying, address hub, uint256 assetId, bool ok) {
         (bool success, bytes memory data) = spoke.staticcall(
             abi.encodeWithSignature("getReserve(uint256)", reserveId)
         );
-        if (!success || data.length < 32) {
-            return (address(0), false);
+        if (!success || data.length < 96) {
+            return (address(0), address(0), 0, false);
         }
         assembly {
             underlying := mload(add(data, 32))
+            hub := mload(add(data, 64))
+            assetId := mload(add(data, 96))
         }
         ok = true;
     }

@@ -38,7 +38,7 @@ contract MockAaveV4TakerPositionManager {
 
         MockAaveV4Spoke(spoke).adjustSupplied(reserveId, onBehalfOf, false, amount);
 
-        (address underlying, ) = MockAaveV4Spoke(spoke).getReserve(reserveId);
+        (address underlying, , ) = MockAaveV4Spoke(spoke).getReserve(reserveId);
         IERC20(underlying).transfer(msg.sender, amount);
 
         withdrawnShares = amount;

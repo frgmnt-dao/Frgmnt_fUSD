@@ -2,13 +2,22 @@
 pragma solidity ^0.8.24;
 
 /// @notice Minimal configurable mock of an Aave V4 Spoke for guard unit tests.
-/// @dev `getReserve` deliberately returns more than just the underlying address (a placeholder
-///      second field) to exercise the asset guard's raw-staticcall extraction of only the first
-///      32-byte word, mirroring the real Reserve struct's uncertain full layout.
+/// @dev `getReserve` returns `(underlying, hub, assetId)` — the exact first three fields of the
+///      real Reserve struct (confirmed against Aave V4's published source, see ISpoke), which is
+///      all the guard's raw-staticcall extraction reads. This mock doubles as its own "Hub"
+///      (`hub` is always `address(this)`, `assetId` is always the reserveId) rather than wiring a
+///      separate mock Hub contract, since tests don't need them to differ.
+/// @dev FNA-07: `getAssetLiquidity` defaults to `type(uint256).max` (fully liquid) for any
+///      reserveId that never had `setAvailableLiquidity` called, so every pre-existing test in
+///      this suite that predates the liquidity cap keeps its exact original behavior.
 contract MockAaveV4Spoke {
     mapping(uint256 => address) public reserveUnderlying;
     mapping(uint256 => mapping(address => uint256)) public suppliedAssets;
     mapping(uint256 => bool) public brokenReserve;
+
+    mapping(uint256 => uint256) public availableLiquidity;
+    mapping(uint256 => bool) public liquidityCapSet;
+    mapping(uint256 => bool) public brokenLiquidity;
 
     // ----------------- test helpers -----------------
 
@@ -24,6 +33,20 @@ contract MockAaveV4Spoke {
     ///      per-reserve fault isolation in getBalance().
     function setBrokenReserve(uint256 reserveId, bool broken) external {
         brokenReserve[reserveId] = broken;
+    }
+
+    /// @dev Caps this reserve's (Hub-side) available liquidity below its full supplied amount, to
+    ///      test the asset guard's FNA-07 liquidity-capped sizing. Pass `type(uint256).max` (or
+    ///      never call this) to simulate a fully-liquid reserve.
+    function setAvailableLiquidity(uint256 reserveId, uint256 liquidity) external {
+        availableLiquidity[reserveId] = liquidity;
+        liquidityCapSet[reserveId] = true;
+    }
+
+    /// @dev Makes getAssetLiquidity() revert for this reserveId, to test the asset guard's
+    ///      fault-isolation on a failed Hub liquidity query.
+    function setBrokenLiquidity(uint256 reserveId, bool broken) external {
+        brokenLiquidity[reserveId] = broken;
     }
 
     /// @dev Used by mock Giver/Taker position managers to credit/debit a position.
@@ -55,8 +78,17 @@ contract MockAaveV4Spoke {
     ///      that the raw-staticcall extraction is correct regardless of trailing fields.
     function getReserve(
         uint256 reserveId
-    ) external view returns (address underlying, uint8 placeholderFlags) {
+    ) external view returns (address underlying, address hub, uint256 assetId) {
         underlying = reserveUnderlying[reserveId];
-        placeholderFlags = 0;
+        hub = address(this);
+        assetId = reserveId;
+    }
+
+    // ----------------- IHubBase (subset) -----------------
+
+    function getAssetLiquidity(uint256 assetId) external view returns (uint256) {
+        require(!brokenLiquidity[assetId], "MockAaveV4Spoke: liquidity broken");
+        if (!liquidityCapSet[assetId]) return type(uint256).max;
+        return availableLiquidity[assetId];
     }
 }

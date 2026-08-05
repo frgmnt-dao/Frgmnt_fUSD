@@ -5,14 +5,18 @@ pragma solidity ^0.8.24;
 /// @notice Minimal interface for an Aave V4 Spoke — the user-facing, risk-isolated lending
 ///         module that draws/restores liquidity from a shared Liquidity Hub.
 /// @dev Only the read functions actually consumed by AaveV4SpokeAssetGuard are declared here.
-///      The Spoke's `Reserve` struct has at least one field (`flags`) whose exact encoded shape
-///      could not be confirmed against the live deployed ABI at design time. Rather than declare
-///      and decode the full struct here (which would silently return wrong data — not revert —
-///      if any field's layout were mis-specified), `getReserveUnderlying()` below is implemented
-///      by the guard via a raw staticcall that reads only the first 32-byte word of
-///      `getReserve(uint256)`'s return data. `underlying` is confirmed to be the first field of
-///      the Reserve struct, so this is correct regardless of how later fields are actually laid
-///      out. See AaveV4SpokeAssetGuard for that implementation.
+///      `Reserve`'s field order is confirmed against Aave V4's published source
+///      (github.com/aave/aave-v4, src/spoke/interfaces/ISpoke.sol, as of 2026-08):
+///      `{ address underlying; IHubBase hub; uint16 assetId; uint8 decimals;
+///      uint24 collateralRisk; ReserveFlags flags; uint32 dynamicConfigKey; }`. All fields are
+///      static value types, so `getReserve(uint256)`'s ABI-encoded return is a flat sequence of
+///      32-byte words in that exact declaration order regardless of the struct's internal
+///      storage packing. Rather than declare and decode the full struct here, the guard reads
+///      just the first three words (`underlying`, `hub`, `assetId` — the ones it actually needs)
+///      via a raw staticcall on `getReserve(uint256)`'s return data
+///      (`_getReserveUnderlyingAndHub`), leaving the lower-confidence later fields (in particular
+///      `flags`, whose bit layout isn't needed here) undecoded. See AaveV4SpokeAssetGuard for
+///      that implementation.
 interface ISpoke {
     /// @notice Returns the underlying asset amount currently supplied by `user` in `reserveId`.
     function getUserSuppliedAssets(uint256 reserveId, address user) external view returns (uint256);
