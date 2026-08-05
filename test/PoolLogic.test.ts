@@ -81,6 +81,8 @@ async function deployPoolFixture() {
     await fusd.getAddress(),
     await poolManager.getAddress(),
     await owner.getAddress(),
+    'Staked Frgmnt USD',
+    'sfUSD',
   ]);
 
   const poolProxy = await PoolLogicTestProxy.deploy(await poolImpl.getAddress(), initData);
@@ -900,10 +902,16 @@ describe('PoolLogic', () => {
     const poolImpl = await PoolLogic.deploy();
     const PoolLogicTestProxy = await ethers.getContractFactory('PoolLogicTestProxy');
 
+    const NAME = 'Staked Frgmnt USD';
+    const SYMBOL = 'sfUSD';
+
     for (const args of [
-      [ethers.ZeroAddress, await poolManager.getAddress(), await owner.getAddress()],
-      [await fusd.getAddress(), ethers.ZeroAddress, await owner.getAddress()],
-      [await fusd.getAddress(), await poolManager.getAddress(), ethers.ZeroAddress],
+      [ethers.ZeroAddress, await poolManager.getAddress(), await owner.getAddress(), NAME, SYMBOL],
+      [await fusd.getAddress(), ethers.ZeroAddress, await owner.getAddress(), NAME, SYMBOL],
+      [await fusd.getAddress(), await poolManager.getAddress(), ethers.ZeroAddress, NAME, SYMBOL],
+      // FNA-11: empty name/symbol must also revert.
+      [await fusd.getAddress(), await poolManager.getAddress(), await owner.getAddress(), '', SYMBOL],
+      [await fusd.getAddress(), await poolManager.getAddress(), await owner.getAddress(), NAME, ''],
     ]) {
       const initData = PoolLogic.interface.encodeFunctionData('initialize', args);
       await expect(PoolLogicTestProxy.deploy(await poolImpl.getAddress(), initData)).to.be

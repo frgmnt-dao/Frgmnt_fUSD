@@ -202,13 +202,19 @@ contract TokenLogic is
      * @param _poolLogic Address of the PoolLogic contract that will hold collateral.
      * @param _poolManagerLogic Address of the PoolManagerLogic contract.
      * @param _cooldown Global cooldown in seconds for cash withdrawal.
+     * @param name_ ERC20 name (and EIP-2612 Permit domain name) for this deployment, e.g.
+     *              "Frgmnt EURO". FNA-11: parameterized so one implementation bytecode can back
+     *              multiple xUSD-style products without forking source per denomination.
+     * @param symbol_ ERC20 symbol for this deployment, e.g. "fEURO".
      */
     function initialize(
         address admin,
         address emergency,
         address _poolLogic,
         address _poolManagerLogic,
-        uint256 _cooldown
+        uint256 _cooldown,
+        string memory name_,
+        string memory symbol_
     ) external initializer {
         require(admin != address(0), "TokenLogic: admin=0");
         require(emergency != address(0), "TokenLogic: emergency=0");
@@ -218,10 +224,12 @@ contract TokenLogic is
         // setPoolLogic() once PoolLogic exists — see scripts/deploy_core_contracts.ts.
         // setPoolLogic below enforces non-zero before that wiring completes.
         require(_poolManagerLogic != address(0), "TokenLogic: poolManagerLogic=0");
+        require(bytes(name_).length != 0, "TokenLogic: empty name");
+        require(bytes(symbol_).length != 0, "TokenLogic: empty symbol");
 
-        __ERC20_init("Frgmnt USD", "fUSD");
+        __ERC20_init(name_, symbol_);
         __ERC20Burnable_init();
-        __ERC20Permit_init("Frgmnt USD");
+        __ERC20Permit_init(name_);
         __Pausable_init();
         __AccessControl_init();
         __UUPSUpgradeable_init();

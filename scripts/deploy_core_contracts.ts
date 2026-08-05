@@ -11,6 +11,13 @@ const POOL_MANAGER_ADDRESS = GOVERNANCE_SAFE;
 const POOL_MANAGER_NAME = 'Frgmnt';
 const EMERGENCY_ADDRESS = GOVERNANCE_SAFE;
 
+// FNA-11: ERC20 metadata is parameterized at deploy time so this same implementation
+// bytecode can back other xUSD-style products without a source fork per denomination.
+const TOKEN_NAME = 'Frgmnt USD';
+const TOKEN_SYMBOL = 'fUSD';
+const SHARE_TOKEN_NAME = 'Staked Frgmnt USD';
+const SHARE_TOKEN_SYMBOL = 'sfUSD';
+
 const COOLDOWN_SECONDS = 24n * 60n * 60n;
 const PERFORMANCE_FEE_NUMERATOR = 2000n;
 const MANAGER_FEE_NUMERATOR = 0n;
@@ -184,6 +191,8 @@ async function main() {
       ethers.ZeroAddress,
       poolManagerProxy,
       COOLDOWN_SECONDS.toString(),
+      TOKEN_NAME,
+      TOKEN_SYMBOL,
     ],
     { initializer: 'initialize', kind: 'uups', ...txOpts() },
   );
@@ -207,7 +216,7 @@ async function main() {
 
   const poolLogic = await upgrades.deployProxy(
     PoolLogic,
-    [fusdProxy, poolManagerProxy, GOVERNANCE_SAFE],
+    [fusdProxy, poolManagerProxy, GOVERNANCE_SAFE, SHARE_TOKEN_NAME, SHARE_TOKEN_SYMBOL],
     { initializer: 'initialize', unsafeAllowLinkedLibraries: true, ...txOpts() },
   );
 
