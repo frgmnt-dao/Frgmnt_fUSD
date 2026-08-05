@@ -108,8 +108,22 @@ library PoolTxExecutor {
             (txType, isPublic) = IGuard(guard).txGuard(poolManagerLogic, to, data);
         }
 
-        // 2) Fallback to asset guard
-        if (txType == 0) {
+        // 2) Fallback to asset guard — FNA-14: only when NO contract guard is registered
+        //    for `to` at all. A registered contract guard is authoritative: if it doesn't
+        //    recognize this selector (txType stays 0), the call must be rejected here
+        //    (exec() reverts with InvalidTransaction() once txType==0 propagates back), not
+        //    silently retried against the asset guard's unrelated selector vocabulary.
+        //    Concretely, an address can be registered as BOTH a contract guard target (e.g.
+        //    Uniswap V3's NonfungiblePositionManager, guarded by
+        //    UniswapV3NonfungiblePositionGuard) AND a supported complex asset (valued by
+        //    UniswapV3AssetGuard, which inherits ERC20Guard's approve() handling). ERC-20
+        //    and ERC-721 `approve(address,uint256)` share the same selector — before this
+        //    fix, an approve() call the position-manager guard doesn't handle (it only
+        //    covers mint/increaseLiquidity/decreaseLiquidity/collect/burn/multicall) fell
+        //    through to ERC20Guard's approve handling and was accepted as an ERC-20
+        //    approval, letting an approved spender pull the pool's LP NFT via
+        //    transferFrom() instead of only ever spending an ERC-20 balance.
+        if (contractGuard == address(0)) {
             address assetGuard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(to);
 
             if (assetGuard == address(0)) revert InvalidGuard();

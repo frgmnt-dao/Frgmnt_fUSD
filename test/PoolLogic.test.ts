@@ -613,10 +613,40 @@ describe('PoolLogic', () => {
     await poolManager.setContractGuard(await target.getAddress(), await txGuard.getAddress());
     await txGuard.setTxType(0, true);
     const data = target.interface.encodeFunctionData('doSomething', [1n]);
+    // FNA-14: a registered contract guard is authoritative — rejecting a selector must
+    // revert InvalidTransaction directly, not fall through to (and fail differently via)
+    // an asset guard lookup for the same address.
     await expectRevert(
       pool.connect(user).execTransaction(await target.getAddress(), data),
-      'InvalidGuard',
+      'InvalidTransaction',
     );
+  });
+
+  // FNA-14: a registered contract guard rejecting a call (txType == 0) must not fall
+  // through to the asset guard, even when that asset guard is registered for the same
+  // address and would otherwise have accepted the call — see PoolTxExecutor._resolveGuard.
+  it('FNA-14: a registered contract guard is authoritative — rejection does not fall through to the asset guard', async () => {
+    const { pool, poolManager, target, user } = await loadFixture(deployPoolFixture);
+    const targetAddr = await target.getAddress();
+    const data = target.interface.encodeFunctionData('doSomething', [1n]);
+
+    const TestTxTrackingGuard = await ethers.getContractFactory('TestTxTrackingGuard');
+    const contractGuard = await TestTxTrackingGuard.deploy();
+    await contractGuard.setTxType(0, true); // does not recognize this selector
+
+    const assetGuard = await TestTxTrackingGuard.deploy();
+    await assetGuard.setTxType(2, true); // would have accepted it, if reached
+
+    await poolManager.setContractGuard(targetAddr, await contractGuard.getAddress());
+    await poolManager.setAssetGuard(targetAddr, await assetGuard.getAddress());
+    await poolManager.setSupportedAsset(targetAddr, true, ethers.parseUnits('1', 18), 18);
+
+    // Before the fix this would have silently succeeded via the asset guard fallback.
+    await expectRevert(
+      pool.connect(user).execTransaction(targetAddr, data),
+      'InvalidTransaction',
+    );
+    expect(await target.lastValue()).to.equal(0n);
   });
 
   // 27) reverts when non-manager/trader executes non-public tx
