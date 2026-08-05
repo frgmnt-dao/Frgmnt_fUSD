@@ -49,6 +49,7 @@ contract AaveV4TokenizationAssetGuard is
     error BadPortion();
     error NotTokenizationSpoke();
     error UnderlyingNotPriced();
+    error UnderlyingNotSupported();
     error VaultNotWhitelisted();
 
     /*//////////////////////////////////////////////////////////////
@@ -80,7 +81,7 @@ contract AaveV4TokenizationAssetGuard is
 
     /// @notice Validates a candidate TokenizationSpoke instance before it can be registered as
     ///         a supported asset of the pool.
-    /// @dev Enforces two independent conditions:
+    /// @dev Enforces three independent conditions:
     ///       1) The vault has been explicitly whitelisted for this pool by the protocol owner
     ///          in AaveV4TokenizationManager — this is the actual enforcement point that makes
     ///          the whitelist meaningful; without it, a pool manager could register any
@@ -88,6 +89,12 @@ contract AaveV4TokenizationAssetGuard is
     ///       2) The vault's underlying asset already has a registered price feed and asset
     ///          guard, so that `getBalance` below can value the position and `assetDecimal`
     ///          calls made elsewhere in the protocol do not unexpectedly revert.
+    ///       3) FNA-20: the underlying is also a supported asset of THIS pool specifically.
+    ///          (2) alone only proves the underlying is priced *somewhere* in the protocol's
+    ///          global AssetHandler registry — assetDecimal()/getAssetPrice() do not consult
+    ///          this pool's own supportedAssets list at all, so a vault could otherwise be
+    ///          onboarded whose underlying was never independently vetted for this pool. See
+    ///          removeTokenCheck below for the matching removal-side protection.
     /// @param poolLogic Address of the pool the asset is being added to.
     /// @param asset Candidate asset being registered; `asset.asset` is the TokenizationSpoke address.
     function addAssetCheck(
@@ -121,6 +128,14 @@ contract AaveV4TokenizationAssetGuard is
             revert NotTokenizationSpoke();
         }
         address poolManagerLogic = IPoolLogic(poolLogic).poolManagerLogic();
+
+        // FNA-20: assetDecimal()/getAssetPrice() below only check the protocol-wide
+        // AssetHandler registry, not this pool's own supportedAssets list — enforce that
+        // separately so a vault can't be onboarded wrapping an underlying this specific pool
+        // never independently vetted.
+        if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(underlying)) {
+            revert UnderlyingNotSupported();
+        }
 
         // Reverts on its own ("no guard") if the underlying has no registered asset guard,
         // which is exactly the failure mode we want to catch at registration time rather than
@@ -232,6 +247,30 @@ contract AaveV4TokenizationAssetGuard is
     ///      withdrawals) until manually re-added. balanceOf() has no such failure mode to exploit.
     function removeAssetCheck(address pool, address asset) public view override {
         require(IERC20(asset).balanceOf(pool) == 0, "ClosedAssetGuard: non-empty asset");
+    }
+
+    /// @notice FNA-20: blocks removing `token` from the pool's supportedAssets while `asset` (a
+    ///         TokenizationSpoke vault registered under this guard) still holds shares wrapping
+    ///         that exact token as its underlying.
+    /// @dev ClosedAssetGuard's inherited default always returns true (permissive), which would
+    ///      let `token`'s own removeAssetCheck succeed even while the pool holds real, indirect
+    ///      exposure to it via vault shares — see addAssetCheck above for the matching
+    ///      onboarding-side protection. Fails safe if the vault's own `asset()` call reverts
+    ///      (an already-broken vault, unrelated to whichever token is being checked) by falling
+    ///      through to "not used" rather than permanently blocking removal of every other token
+    ///      in the pool for as long as that one vault stays broken.
+    function removeTokenCheck(
+        address pool,
+        address asset,
+        address token
+    ) public view override returns (bool) {
+        if (IERC20(asset).balanceOf(pool) == 0) return true;
+
+        try IERC4626(asset).asset() returns (address underlying) {
+            return token != underlying;
+        } catch {
+            return true;
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
