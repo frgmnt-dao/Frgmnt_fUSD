@@ -47,6 +47,14 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
     /// @dev TWAP window (seconds) used to mitigate price manipulation during withdrawal construction.
     uint32 public withdrawalTwapWindow = 600; // 10 minutes
 
+    /// @dev FNA-16: minimum acceptable harmonic-mean liquidity (over `withdrawalTwapWindow`) for
+    ///      the specific pool a withdrawal's TWAP sanity-check consults, keyed by pool address —
+    ///      one guard instance services LP positions across many different pools, so a single
+    ///      global floor wouldn't fit every token pair/fee tier. Defaults to 0 (disabled) for any
+    ///      pool the admin hasn't explicitly configured, so this is opt-in and never changes
+    ///      behavior for an already-configured pool without an explicit admin action.
+    mapping(address => uint128) public minimumPoolLiquidity;
+
     uint256 private constant BPS_DENOMINATOR = 10_000;
 
     /// @dev 100% withdraw = 1e18
@@ -55,6 +63,7 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
     event WithdrawalSlippageBpsUpdated(uint256 oldValue, uint256 newValue);
     event WithdrawalTwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event AdminUpdated(address oldAdmin, address newAdmin);
+    event MinimumPoolLiquidityUpdated(address indexed pool, uint128 oldValue, uint128 newValue);
 
     constructor() {
         admin = msg.sender;
@@ -88,6 +97,19 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
         address oldAdmin = admin;
         admin = _admin;
         emit AdminUpdated(oldAdmin, _admin);
+    }
+
+    /// @notice FNA-16: sets the minimum harmonic-mean liquidity a `pool` must have (over
+    ///         `withdrawalTwapWindow`) for its TWAP sanity-check to be trusted during a
+    ///         withdrawal. 0 disables the check for that pool.
+    /// @param pool Uniswap V3 pool address (as resolved by the factory for a position's
+    ///        token0/token1/fee).
+    /// @param minLiquidity New floor for `pool`, or 0 to disable.
+    function setMinimumPoolLiquidity(address pool, uint128 minLiquidity) external onlyAdmin {
+        require(pool != address(0), "UniswapV3AssetGuard: zero pool");
+        uint128 oldValue = minimumPoolLiquidity[pool];
+        minimumPoolLiquidity[pool] = minLiquidity;
+        emit MinimumPoolLiquidityUpdated(pool, oldValue, minLiquidity);
     }
 
     /**
@@ -605,19 +627,16 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
 
         // LP portion to remove
         dec.lpAmount = _calcLiquidityPortion(liquidity, portion);
-        // Current pool sqrtPrice
-        // NOTE: Use TWAP to mitigate spot price manipulation during withdrawal construction.
-        address pool = IUniswapV3Factory(nonfungiblePositionManager.factory()).getPool(
+
+        // Current pool sqrtPrice, validated against a liquidity-floored TWAP — extracted to its
+        // own helper to keep this function's stack shallow enough to compile (FNA-16 added a
+        // local that pushed it over the limit).
+        uint160 spotSqrtPriceX96 = _resolvePoolAndSpotPrice(
+            nonfungiblePositionManager,
             token0,
             token1,
             fee
         );
-        require(pool != address(0), "UniswapV3AssetGuard: pool not found");
-
-        (int24 twapTick, ) = OracleLibrary.consult(pool, withdrawalTwapWindow);
-        uint160 twapSqrtPriceX96 = TickMath.getSqrtRatioAtTick(twapTick);
-        (uint160 spotSqrtPriceX96, , , , , , ) = IUniswapV3Pool(pool).slot0();
-        _checkSpotPriceDeviation(spotSqrtPriceX96, twapSqrtPriceX96);
 
         // Amounts corresponding to the lp portion
         (dec.principal0, dec.principal1) = LiquidityAmounts.getAmountsForLiquidity(
@@ -635,6 +654,38 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
             dec.principal0,
             dec.principal1
         );
+    }
+
+    /// @dev Resolves the pool for (token0, token1, fee), validates its TWAP liquidity floor
+    ///      (FNA-16), checks spot price against that TWAP for manipulation, and returns the spot
+    ///      sqrtPriceX96 _calcDecreaseLiquidity needs to size amounts.
+    function _resolvePoolAndSpotPrice(
+        INonfungiblePositionManager nonfungiblePositionManager,
+        address token0,
+        address token1,
+        uint24 fee
+    ) internal view returns (uint160 spotSqrtPriceX96) {
+        // NOTE: Use TWAP to mitigate spot price manipulation during withdrawal construction.
+        address pool = IUniswapV3Factory(nonfungiblePositionManager.factory()).getPool(
+            token0,
+            token1,
+            fee
+        );
+        require(pool != address(0), "UniswapV3AssetGuard: pool not found");
+
+        // FNA-16: also consume the harmonic-mean liquidity consult() returns and reject the
+        // observation outright if this pool's liquidity over the window is below its configured
+        // floor (0 = disabled) — otherwise a sufficiently thin pool lets an attacker move and
+        // sustain an adverse tick over withdrawalTwapWindow at reduced cost.
+        (int24 twapTick, uint128 twapLiquidity) = OracleLibrary.consult(pool, withdrawalTwapWindow);
+        require(
+            twapLiquidity >= minimumPoolLiquidity[pool],
+            "UniswapV3AssetGuard: TWAP liquidity too low"
+        );
+        uint160 twapSqrtPriceX96 = TickMath.getSqrtRatioAtTick(twapTick);
+
+        (spotSqrtPriceX96, , , , , , ) = IUniswapV3Pool(pool).slot0();
+        _checkSpotPriceDeviation(spotSqrtPriceX96, twapSqrtPriceX96);
     }
 
     function _calcLiquidityPortion(

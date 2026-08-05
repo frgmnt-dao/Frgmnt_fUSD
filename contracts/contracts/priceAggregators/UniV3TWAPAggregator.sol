@@ -44,19 +44,33 @@ contract UniV3TWAPAggregator is IAggregatorV3Interface {
     /// @notice TWAP lookback window in seconds.
     uint32 public immutable updateInterval;
 
+    /// @notice Minimum acceptable Uniswap V3 harmonic-mean liquidity over `updateInterval`
+    ///         (FNA-16). Set to 0 to disable (not recommended).
+    /// @dev `OracleLibrary.consult()` also returns the pool's harmonic-mean liquidity over the
+    ///      lookback window alongside the tick, but it was previously discarded — meaning this
+    ///      aggregator kept accepting observations even after the pool's active liquidity fell
+    ///      far below what was assumed safe at deployment. In a sufficiently thin pool, an
+    ///      attacker can move and sustain an adverse tick over `updateInterval` at reduced cost.
+    ///      Reverting below this pool-specific floor makes that materially more expensive rather
+    ///      than silently pricing off a manipulable observation.
+    uint128 public immutable minimumLiquidity;
+
     /// @param _pool Uniswap V3 pool address
     /// @param _mainToken Token to price in USD
     /// @param _pairTokenUsdAggregator USD feed for the pair token
     /// @param _priceLowerLimit Optional min price bound (8 decimals), or 0 to disable
     /// @param _priceUpperLimit Optional max price bound (8 decimals), or 0 to disable
     /// @param _updateInterval TWAP lookback (seconds). Must be > 0
+    /// @param _minimumLiquidity FNA-16: minimum harmonic-mean liquidity required over
+    ///        `_updateInterval`, or 0 to disable.
     constructor(
         IUniswapV3Pool _pool,
         address _mainToken,
         IAggregatorV3Interface _pairTokenUsdAggregator,
         int256 _priceLowerLimit,
         int256 _priceUpperLimit,
-        uint32 _updateInterval
+        uint32 _updateInterval,
+        uint128 _minimumLiquidity
     ) {
         require(address(_pool) != address(0), "pool=0");
         require(_mainToken != address(0), "mainToken=0");
@@ -76,6 +90,7 @@ contract UniV3TWAPAggregator is IAggregatorV3Interface {
         priceLowerLimit = _priceLowerLimit;
         priceUpperLimit = _priceUpperLimit;
         updateInterval = _updateInterval;
+        minimumLiquidity = _minimumLiquidity;
 
         // ---- Verify mainToken is actually one of the pool tokens ----
         address t0 = _pool.token0();
@@ -123,7 +138,14 @@ contract UniV3TWAPAggregator is IAggregatorV3Interface {
         )
     {
         // 1) Uniswap TWAP tick
-        (int24 tick, ) = OracleLibrary.consult(address(pool), updateInterval);
+        // FNA-16: also consume the harmonic-mean liquidity consult() returns, and reject the
+        // observation outright if the pool's liquidity over the window is below the configured
+        // floor — see `minimumLiquidity`'s own documentation for why.
+        (int24 tick, uint128 harmonicMeanLiquidity) = OracleLibrary.consult(
+            address(pool),
+            updateInterval
+        );
+        require(harmonicMeanLiquidity >= minimumLiquidity, "liquidity too low");
         require(mainTokenUnit <= uint256(type(uint128).max), "mainTokenUnit overflow");
 
         // 2) Quote 1 mainToken into pairToken amount (in smallest units)
