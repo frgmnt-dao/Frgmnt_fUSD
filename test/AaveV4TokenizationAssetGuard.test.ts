@@ -121,10 +121,23 @@ describe('AaveV4TokenizationAssetGuard', () => {
       ).to.be.revertedWithCustomError(guard, 'NotTokenizationSpoke');
     });
 
+    it('reverts UnderlyingNotSupported when the underlying is not a supported asset of this pool (FNA-20)', async () => {
+      const { guard, aaveV4TokenizationManager, poolManager, poolAddr, vaultAddr, usdcAddr } =
+        await deploy();
+      await aaveV4TokenizationManager.setPoolVaults(poolAddr, [vaultAddr]);
+      // Priced and guarded globally, but never added to THIS pool's supportedAssets.
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+      await expect(
+        guard.addAssetCheck(poolAddr, { asset: vaultAddr, isDeposit: true }),
+      ).to.be.revertedWithCustomError(guard, 'UnderlyingNotSupported');
+    });
+
     it('reverts with the underlying "no guard" message when the underlying has no registered asset guard', async () => {
       const { guard, aaveV4TokenizationManager, poolManager, poolAddr, vaultAddr, usdcAddr } =
         await deploy();
       await aaveV4TokenizationManager.setPoolVaults(poolAddr, [vaultAddr]);
+      await poolManager.setSupportedAsset(usdcAddr, true);
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
       await expect(
         guard.addAssetCheck(poolAddr, { asset: vaultAddr, isDeposit: true }),
@@ -135,16 +148,18 @@ describe('AaveV4TokenizationAssetGuard', () => {
       const { guard, aaveV4TokenizationManager, poolManager, poolAddr, vaultAddr, usdcAddr } =
         await deploy();
       await aaveV4TokenizationManager.setPoolVaults(poolAddr, [vaultAddr]);
+      await poolManager.setSupportedAsset(usdcAddr, true);
       await poolManager.setAssetGuard(usdcAddr, true, 6n);
       await expect(
         guard.addAssetCheck(poolAddr, { asset: vaultAddr, isDeposit: true }),
       ).to.be.revertedWithCustomError(guard, 'UnderlyingNotPriced');
     });
 
-    it('succeeds when whitelisted, ERC-4626 shaped, and the underlying is priced and guarded', async () => {
+    it('succeeds when whitelisted, ERC-4626 shaped, and the underlying is supported, priced, and guarded', async () => {
       const { guard, aaveV4TokenizationManager, poolManager, poolAddr, vaultAddr, usdcAddr } =
         await deploy();
       await aaveV4TokenizationManager.setPoolVaults(poolAddr, [vaultAddr]);
+      await poolManager.setSupportedAsset(usdcAddr, true);
       await poolManager.setAssetGuard(usdcAddr, true, 6n);
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
       await expect(guard.addAssetCheck(poolAddr, { asset: vaultAddr, isDeposit: true })).to.not.be
@@ -414,6 +429,54 @@ describe('AaveV4TokenizationAssetGuard', () => {
       await expect(guard.removeAssetCheck(poolAddr, vaultAddr)).to.be.revertedWith(
         'ClosedAssetGuard: non-empty asset',
       );
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // removeTokenCheck (FNA-20 — blocks removing the vault's underlying from the pool's
+  // supportedAssets while the pool still holds vault shares wrapping it)
+  // -----------------------------------------------------------------------
+
+  describe('removeTokenCheck', () => {
+    it('returns true when the pool holds no shares of the vault', async () => {
+      const { guard, poolAddr, vaultAddr, usdcAddr } = await deploy();
+      expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(true);
+    });
+
+    it('returns true for a token that is not the vault\'s underlying, even with shares held', async () => {
+      const { guard, poolAddr, vault, vaultAddr, other } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      expect(await guard.removeTokenCheck(poolAddr, vaultAddr, other.address)).to.equal(true);
+    });
+
+    it('returns false for the vault\'s underlying while the pool still holds shares', async () => {
+      const { guard, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(false);
+    });
+
+    it('returns true again once the pool no longer holds any vault shares', async () => {
+      const { guard, poolAddr, vault, vaultAddr, usdcAddr, other } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(false);
+
+      await ethers.provider.send('hardhat_setBalance', [
+        poolAddr,
+        '0x' + ethers.parseEther('1').toString(16),
+      ]);
+      const poolSigner = await ethers.getImpersonatedSigner(poolAddr);
+      await vault.connect(poolSigner).transfer(other.address, ethers.parseUnits('1000', 18));
+
+      expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(true);
+    });
+
+    it('fails safe (returns true) rather than blocking every token when the vault\'s own asset() reverts', async () => {
+      // A broken vault must not permanently block removal of every OTHER token in the pool for
+      // as long as it stays broken — see the function's own documentation for why.
+      const { guard, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      await vault.setBrokenAsset(true);
+      expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(true);
     });
   });
 });
