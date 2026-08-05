@@ -92,4 +92,32 @@ describe('MorphoBlueManager', () => {
     expect(await manager.isValidPoolMarket(pool, id1)).to.equal(false);
     expect(await manager.getPoolMarketsLength(pool)).to.equal(0n);
   });
+
+  // -----------------------------------------------------------------------
+  // FNA-12: duplicate marketId rejection
+  // -----------------------------------------------------------------------
+
+  it('reverts on a duplicate marketId within the same call (FNA-12)', async () => {
+    const { manager } = await deploy();
+    const pool = ethers.Wallet.createRandom().address;
+    const id1 = mkId(1);
+    const id2 = mkId(2);
+
+    await expect(manager.setPoolMarkets(pool, [id1, id2, id1])).to.be.revertedWith(
+      'Duplicate marketId',
+    );
+  });
+
+  it('allows re-using a marketId across separate setPoolMarkets calls (not a cross-call duplicate)', async () => {
+    const { manager } = await deploy();
+    const pool = ethers.Wallet.createRandom().address;
+    const id1 = mkId(1);
+
+    await manager.setPoolMarkets(pool, [id1]);
+    // Same marketId re-submitted after being cleared by the first call's own replacement
+    // logic — must not be treated as a duplicate of itself across calls.
+    await expect(manager.setPoolMarkets(pool, [id1])).to.not.be.reverted;
+    expect(await manager.isValidPoolMarket(pool, id1)).to.equal(true);
+    expect(await manager.getPoolMarketsLength(pool)).to.equal(1n);
+  });
 });
