@@ -1,5 +1,6 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
+import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 
 describe('AaveV4SpokeAssetGuard', () => {
   async function deploy() {
@@ -15,8 +16,13 @@ describe('AaveV4SpokeAssetGuard', () => {
     await taker.waitForDeployment();
     const takerAddr = await taker.getAddress();
 
+    const GiverFactory = await ethers.getContractFactory('MockAaveV4GiverPositionManager');
+    const giver = await GiverFactory.deploy();
+    await giver.waitForDeployment();
+    const giverAddr = await giver.getAddress();
+
     const GuardFactory = await ethers.getContractFactory('AaveV4SpokeAssetGuard');
-    const guard = await GuardFactory.deploy(managerAddr, takerAddr);
+    const guard = await GuardFactory.deploy(managerAddr, takerAddr, giverAddr);
     await guard.waitForDeployment();
 
     const PoolManagerFactory = await ethers.getContractFactory('MockMorphoVaultV2PoolManagerLogic');
@@ -49,6 +55,8 @@ describe('AaveV4SpokeAssetGuard', () => {
       managerAddr,
       taker,
       takerAddr,
+      giver,
+      giverAddr,
       guard,
       poolManager,
       poolManagerAddr,
@@ -70,7 +78,8 @@ describe('AaveV4SpokeAssetGuard', () => {
   it('constructor reverts on zero manager', async () => {
     const Guard = await ethers.getContractFactory('AaveV4SpokeAssetGuard');
     const taker = ethers.Wallet.createRandom().address;
-    await expect(Guard.deploy(ethers.ZeroAddress, taker)).to.be.revertedWithCustomError(
+    const giver = ethers.Wallet.createRandom().address;
+    await expect(Guard.deploy(ethers.ZeroAddress, taker, giver)).to.be.revertedWithCustomError(
       Guard,
       'ManagerZero',
     );
@@ -79,21 +88,121 @@ describe('AaveV4SpokeAssetGuard', () => {
   it('constructor reverts on zero takerPositionManager', async () => {
     const Guard = await ethers.getContractFactory('AaveV4SpokeAssetGuard');
     const manager = ethers.Wallet.createRandom().address;
-    await expect(Guard.deploy(manager, ethers.ZeroAddress)).to.be.revertedWithCustomError(
+    const giver = ethers.Wallet.createRandom().address;
+    await expect(Guard.deploy(manager, ethers.ZeroAddress, giver)).to.be.revertedWithCustomError(
       Guard,
       'TakerPositionManagerZero',
     );
   });
 
-  it('constructor stores both addresses', async () => {
-    const { guard, managerAddr, takerAddr } = await deploy();
+  it('constructor reverts on zero giverPositionManager', async () => {
+    const Guard = await ethers.getContractFactory('AaveV4SpokeAssetGuard');
+    const manager = ethers.Wallet.createRandom().address;
+    const taker = ethers.Wallet.createRandom().address;
+    await expect(Guard.deploy(manager, taker, ethers.ZeroAddress)).to.be.revertedWithCustomError(
+      Guard,
+      'GiverPositionManagerZero',
+    );
+  });
+
+  it('constructor stores all three addresses', async () => {
+    const { guard, managerAddr, takerAddr, giverAddr } = await deploy();
     expect(await guard.aaveV4SpokeManager()).to.equal(managerAddr);
     expect(await guard.takerPositionManager()).to.equal(takerAddr);
+    expect(await guard.giverPositionManager()).to.equal(giverAddr);
   });
 
   it('isAddAssetCheckGuard returns true', async () => {
     const { guard } = await deploy();
     expect(await guard.isAddAssetCheckGuard()).to.equal(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // txGuard — FNA-08: setUserPositionManager authorization
+  // -----------------------------------------------------------------------
+  describe('txGuard (FNA-08: setUserPositionManager)', () => {
+    // Real Aave V4 Spoke selector, used to build calldata exactly as PoolLogic would forward it
+    // via execTransaction().
+    const spokeIface = new ethers.Interface([
+      'function setUserPositionManager(address positionManager, bool approve)',
+    ]);
+
+    async function setPoolLogic(poolManager: any, poolLogicAddr: string) {
+      await poolManager.setPoolLogic(poolLogicAddr);
+    }
+
+    it('reverts when caller is not poolLogic', async () => {
+      const { guard, poolManager, poolManagerAddr, spokeAddr, giverAddr, other, deployer } =
+        await deploy();
+      await setPoolLogic(poolManager, other.address);
+      const data = spokeIface.encodeFunctionData('setUserPositionManager', [giverAddr, true]);
+      await expect(
+        guard.connect(deployer).txGuard(poolManagerAddr, spokeAddr, data),
+      ).to.be.revertedWithCustomError(guard, 'NotPoolLogic');
+    });
+
+    it('authorizes setUserPositionManager(giver, true) and returns the new transaction type', async () => {
+      const { guard, poolManager, poolManagerAddr, spokeAddr, giverAddr, other } = await deploy();
+      await setPoolLogic(poolManager, other.address);
+      const data = spokeIface.encodeFunctionData('setUserPositionManager', [giverAddr, true]);
+
+      const AAVE_V4_SPOKE_SET_POSITION_MANAGER = 37n;
+      const result = await guard
+        .connect(other)
+        .txGuard.staticCall(poolManagerAddr, spokeAddr, data);
+      expect(result[0]).to.equal(AAVE_V4_SPOKE_SET_POSITION_MANAGER);
+      expect(result[1]).to.equal(false);
+
+      await expect(guard.connect(other).txGuard(poolManagerAddr, spokeAddr, data))
+        .to.emit(guard, 'AaveV4SpokeSetPositionManagerEvt')
+        .withArgs(other.address, spokeAddr, giverAddr, true, anyValue);
+    });
+
+    it('authorizes setUserPositionManager(taker, true)', async () => {
+      const { guard, poolManager, poolManagerAddr, spokeAddr, takerAddr, other } = await deploy();
+      await setPoolLogic(poolManager, other.address);
+      const data = spokeIface.encodeFunctionData('setUserPositionManager', [takerAddr, true]);
+
+      const result = await guard
+        .connect(other)
+        .txGuard.staticCall(poolManagerAddr, spokeAddr, data);
+      expect(result[0]).to.equal(37n);
+    });
+
+    it('authorizes revocation: setUserPositionManager(giver, false)', async () => {
+      const { guard, poolManager, poolManagerAddr, spokeAddr, giverAddr, other } = await deploy();
+      await setPoolLogic(poolManager, other.address);
+      const data = spokeIface.encodeFunctionData('setUserPositionManager', [giverAddr, false]);
+
+      const result = await guard
+        .connect(other)
+        .txGuard.staticCall(poolManagerAddr, spokeAddr, data);
+      expect(result[0]).to.equal(37n);
+    });
+
+    it('reverts for a positionManager that is neither giver nor taker', async () => {
+      const { guard, poolManager, poolManagerAddr, spokeAddr, other } = await deploy();
+      await setPoolLogic(poolManager, other.address);
+      const attacker = ethers.Wallet.createRandom().address;
+      const data = spokeIface.encodeFunctionData('setUserPositionManager', [attacker, true]);
+
+      await expect(
+        guard.connect(other).txGuard(poolManagerAddr, spokeAddr, data),
+      ).to.be.revertedWithCustomError(guard, 'InvalidPositionManager');
+    });
+
+    it('returns txType = 0 (rejects) for any other selector, unchanged from ClosedAssetGuard', async () => {
+      const { guard, poolManager, poolManagerAddr, spokeAddr, other } = await deploy();
+      await setPoolLogic(poolManager, other.address);
+      const erc20Iface = new ethers.Interface(['function transfer(address to, uint256 amount)']);
+      const data = erc20Iface.encodeFunctionData('transfer', [other.address, 1n]);
+
+      const result = await guard
+        .connect(other)
+        .txGuard.staticCall(poolManagerAddr, spokeAddr, data);
+      expect(result[0]).to.equal(0n);
+      expect(result[1]).to.equal(false);
+    });
   });
 
   // -----------------------------------------------------------------------

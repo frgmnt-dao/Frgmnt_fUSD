@@ -19,6 +19,9 @@ contract MockAaveV4Spoke {
     mapping(uint256 => bool) public liquidityCapSet;
     mapping(uint256 => bool) public brokenLiquidity;
 
+    /// @dev FNA-08: owner (msg.sender) => positionManager => approved.
+    mapping(address => mapping(address => bool)) public isPositionManagerFor;
+
     // ----------------- test helpers -----------------
 
     function setReserveUnderlying(uint256 reserveId, address underlying) external {
@@ -90,5 +93,15 @@ contract MockAaveV4Spoke {
         require(!brokenLiquidity[assetId], "MockAaveV4Spoke: liquidity broken");
         if (!liquidityCapSet[assetId]) return type(uint256).max;
         return availableLiquidity[assetId];
+    }
+
+    /// @dev FNA-08: mirrors real Aave V4's setUserPositionManager(address,bool) — the owner
+    ///      (msg.sender) grants/revokes approval for `positionManager` to act on their own
+    ///      position. Records only; nothing in this mock currently enforces it against
+    ///      supplyOnBehalfOf/withdrawOnBehalfOf, since those checks live in real Aave V4, not in
+    ///      this repository's contracts — see AaveV4SpokeAssetGuard.txGuard for the fix this
+    ///      supports (authorizing the pool to make this call in the first place).
+    function setUserPositionManager(address positionManager, bool approve) external {
+        isPositionManagerFor[msg.sender][positionManager] = approve;
     }
 }

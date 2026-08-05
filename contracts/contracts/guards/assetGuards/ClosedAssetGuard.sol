@@ -17,7 +17,11 @@ import "../../interfaces/guards/IGuard.sol";
 abstract contract ClosedAssetGuard is TxDataUtils, IGuard, IAssetGuard {
     /**
      * @notice Closed guard: does not authorize any transaction itself.
-     * @dev Children typically pair with a separate ContractGuard for allowed calls.
+     * @dev Children typically pair with a separate ContractGuard for allowed calls. Deliberately
+     *      not `pure` (Solidity only allows overrides to become more restrictive along the
+     *      override chain, never less) so that a child guard can override this with a stateful
+     *      implementation for one narrow, explicitly-authorized selector while leaving every
+     *      other call rejected exactly as before — see AaveV4SpokeAssetGuard.txGuard (FNA-08).
      * @return txType Always 0 (no specific tx classification).
      * @return isPublic Always false.
      */
@@ -25,7 +29,7 @@ abstract contract ClosedAssetGuard is TxDataUtils, IGuard, IAssetGuard {
         address,
         address,
         bytes calldata
-    ) external pure virtual override returns (uint16 txType, bool isPublic) {
+    ) external virtual override returns (uint16 txType, bool isPublic) {
         return (txType, false);
     }
 

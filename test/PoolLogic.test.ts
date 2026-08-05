@@ -1795,10 +1795,15 @@ describe('PoolLogic', () => {
       const taker = await TakerFactory.deploy();
       const takerAddr = await taker.getAddress();
 
+      const GiverFactory = await ethers.getContractFactory('MockAaveV4GiverPositionManager');
+      const giver = await GiverFactory.deploy();
+      const giverAddr = await giver.getAddress();
+
       const GuardFactory = await ethers.getContractFactory('AaveV4SpokeAssetGuard');
       const spokeGuard = await GuardFactory.deploy(
         await aaveV4SpokeManager.getAddress(),
         takerAddr,
+        giverAddr,
       );
 
       const SpokeFactory = await ethers.getContractFactory('MockAaveV4Spoke');
@@ -1861,6 +1866,83 @@ describe('PoolLogic', () => {
       expect(await spoke.suppliedAssets(1n, poolAddr)).to.equal(
         fullSupplied - ethers.parseUnits('100', 18),
       );
+    });
+
+    // FNA-08: before this fix, PoolLogic had no route to make Aave V4's mandatory
+    // setUserPositionManager approval call — execTransaction(spoke, setUserPositionManager(...))
+    // fell through to ClosedAssetGuard's always-reject txGuard and reverted with
+    // InvalidTransaction, meaning the very first supply into a fresh pool could never succeed.
+    describe('authorizes the mandatory Aave V4 Spoke position-manager approval (FNA-08)', () => {
+      const spokeIface = new ethers.Interface([
+        'function setUserPositionManager(address positionManager, bool approve)',
+      ]);
+
+      async function deployAaveV4SpokeFixture() {
+        const { pool, poolManager, manager } = await loadFixture(deployPoolFixture);
+        const poolAddr = await pool.getAddress();
+        // AaveV4SpokeAssetGuard.txGuard resolves the pool address FROM poolManagerLogic (unlike
+        // the rest of this suite, which only ever goes pool -> poolManagerLogic) — see
+        // TestPoolManagerLogic.poolLogic().
+        await poolManager.setPool(poolAddr);
+
+        const ManagerFactory = await ethers.getContractFactory('AaveV4SpokeManager');
+        const aaveV4SpokeManager = await ManagerFactory.deploy();
+
+        const TakerFactory = await ethers.getContractFactory('MockAaveV4TakerPositionManager');
+        const taker = await TakerFactory.deploy();
+        const takerAddr = await taker.getAddress();
+
+        const GiverFactory = await ethers.getContractFactory('MockAaveV4GiverPositionManager');
+        const giver = await GiverFactory.deploy();
+        const giverAddr = await giver.getAddress();
+
+        const GuardFactory = await ethers.getContractFactory('AaveV4SpokeAssetGuard');
+        const spokeGuard = await GuardFactory.deploy(
+          await aaveV4SpokeManager.getAddress(),
+          takerAddr,
+          giverAddr,
+        );
+
+        const SpokeFactory = await ethers.getContractFactory('MockAaveV4Spoke');
+        const spoke = await SpokeFactory.deploy();
+        const spokeAddr = await spoke.getAddress();
+
+        await poolManager.setAssetGuard(spokeAddr, await spokeGuard.getAddress());
+        await poolManager.setSupportedAsset(spokeAddr, true, ethers.parseUnits('1', 18), 18);
+
+        return { pool, poolAddr, poolManager, manager, spoke, spokeAddr, spokeGuard, giverAddr, takerAddr };
+      }
+
+      it('allows the pool to approve the Giver PositionManager, unblocking its very first supply', async () => {
+        const { pool, poolAddr, manager, spoke, spokeAddr, giverAddr } =
+          await deployAaveV4SpokeFixture();
+
+        const data = spokeIface.encodeFunctionData('setUserPositionManager', [giverAddr, true]);
+        await expect(pool.connect(manager).execTransaction(spokeAddr, data)).to.not.be.reverted;
+
+        expect(await spoke.isPositionManagerFor(poolAddr, giverAddr)).to.equal(true);
+      });
+
+      it('allows the pool to approve the Taker PositionManager', async () => {
+        const { pool, poolAddr, manager, spoke, spokeAddr, takerAddr } =
+          await deployAaveV4SpokeFixture();
+
+        const data = spokeIface.encodeFunctionData('setUserPositionManager', [takerAddr, true]);
+        await expect(pool.connect(manager).execTransaction(spokeAddr, data)).to.not.be.reverted;
+
+        expect(await spoke.isPositionManagerFor(poolAddr, takerAddr)).to.equal(true);
+      });
+
+      it('rejects approving a position manager that is neither the Giver nor the Taker', async () => {
+        const { pool, manager, spokeAddr, spokeGuard } = await deployAaveV4SpokeFixture();
+
+        const attacker = ethers.Wallet.createRandom().address;
+        const data = spokeIface.encodeFunctionData('setUserPositionManager', [attacker, true]);
+
+        await expect(
+          pool.connect(manager).execTransaction(spokeAddr, data),
+        ).to.be.revertedWithCustomError(spokeGuard, 'InvalidPositionManager');
+      });
     });
   });
 });

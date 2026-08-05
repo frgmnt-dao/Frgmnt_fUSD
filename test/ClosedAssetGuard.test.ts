@@ -18,7 +18,10 @@ describe('ClosedAssetGuard', () => {
 
   it('txGuard returns (0, false) for any calldata', async () => {
     const { guard, pool } = await deploy();
-    const [txType, isPublic] = await guard.txGuard(
+    // No longer `pure` (see ClosedAssetGuard.sol — required so FNA-08's AaveV4SpokeAssetGuard
+    // override can be stateful), so a direct call sends a transaction rather than statically
+    // returning decoded values; staticCall reproduces the old read-only call semantics.
+    const [txType, isPublic] = await guard.txGuard.staticCall(
       pool.address,
       pool.address,
       '0x12345678',
