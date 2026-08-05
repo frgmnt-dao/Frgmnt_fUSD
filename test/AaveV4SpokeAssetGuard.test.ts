@@ -293,6 +293,110 @@ describe('AaveV4SpokeAssetGuard', () => {
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
 
+  it('isWithdrawableBalanceGuard returns true (FNA-07)', async () => {
+    const { guard } = await deploy();
+    expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // getWithdrawableBalance (FNA-07: liquidity-capped counterpart to getBalance(), used by
+  // PoolLogic's immediate withdrawal NAV/portion sizing so one under-liquid reserve sizes its
+  // own share down instead of the whole withdrawal reverting)
+  // -----------------------------------------------------------------------
+
+  describe('getWithdrawableBalance', () => {
+    it('returns 0 when no reserveIds are allowlisted', async () => {
+      const { guard, poolAddr, spokeAddr } = await deploy();
+      expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.equal(0n);
+    });
+
+    it('matches getBalance() when every reserve is fully liquid (no cap set)', async () => {
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      const full = await guard.getBalance(poolAddr, spokeAddr);
+      expect(full).to.equal(ethers.parseUnits('1000', 18));
+      expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.equal(full);
+    });
+
+    it('is capped below getBalance() when a reserve\'s available liquidity is below its supplied amount', async () => {
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      // Only 20% of the reserve is actually liquid right now.
+      await spoke.setAvailableLiquidity(1n, ethers.parseUnits('200', 6));
+
+      expect(await guard.getBalance(poolAddr, spokeAddr)).to.equal(ethers.parseUnits('1000', 18));
+      expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.equal(
+        ethers.parseUnits('200', 18),
+      );
+    });
+
+    it('caps only the constrained reserve, aggregating correctly across multiple reserves', async () => {
+      const {
+        guard,
+        aaveV4SpokeManager,
+        poolManager,
+        poolAddr,
+        spoke,
+        spokeAddr,
+        usdcAddr,
+        wethAddr,
+      } = await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n, 2n]);
+
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6)); // fully liquid
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await spoke.setReserveUnderlying(2n, wethAddr);
+      await spoke.setSuppliedAssets(2n, poolAddr, ethers.parseUnits('2', 18)); // 2 WETH = $4000
+      await poolManager.setAssetGuard(wethAddr, true, 18n);
+      await poolManager.setAssetPrice(wethAddr, ethers.parseUnits('2000', 18));
+      await spoke.setAvailableLiquidity(2n, ethers.parseUnits('1', 18)); // only 1 WETH liquid
+
+      // Full NAV: $1000 + $4000 = $5000.
+      expect(await guard.getBalance(poolAddr, spokeAddr)).to.equal(ethers.parseUnits('5000', 18));
+      // Withdrawable NAV: $1000 (uncapped) + $2000 (1 WETH capped) = $3000.
+      expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.equal(
+        ethers.parseUnits('3000', 18),
+      );
+    });
+
+    it('degrades a reserve to 0 (does not revert) when its Hub liquidity query itself fails', async () => {
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      // Sanity: works before the liquidity query starts reverting.
+      expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.be.gt(0n);
+
+      await spoke.setBrokenLiquidity(1n, true);
+      expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.equal(0n);
+      // getBalance() (the full claim) is unaffected — only the withdrawable variant degrades.
+      expect(await guard.getBalance(poolAddr, spokeAddr)).to.equal(ethers.parseUnits('1000', 18));
+    });
+  });
+
   // -----------------------------------------------------------------------
   // isValuationComplete (FNA-04: lets PoolManagerLogic.totalFundValueWithCompleteness() tell a
   // genuinely-empty aggregate apart from one where at least one reserve couldn't be priced)
@@ -573,6 +677,108 @@ describe('AaveV4SpokeAssetGuard', () => {
       expect(await spoke.suppliedAssets(1n, poolAddr)).to.equal(0n);
       expect(await usdc.balanceOf(other.address)).to.equal(supplied);
       expect(await usdc.balanceOf(takerAddr)).to.equal(0n);
+    });
+
+    // FNA-07: caps the requested withdrawOnBehalfOf amount by the Hub's real available
+    // liquidity, so this call never asks for more than the Spoke/Hub can currently return.
+    it('caps the withdrawn amount by available liquidity when the reserve is not fully liquid', async () => {
+      const {
+        guard,
+        aaveV4SpokeManager,
+        poolManager,
+        poolAddr,
+        spoke,
+        spokeAddr,
+        usdcAddr,
+        other,
+      } = await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      // Only 20% of the reserve is actually liquid right now.
+      const cappedAmount = ethers.parseUnits('200', 6);
+      await spoke.setAvailableLiquidity(1n, cappedAmount);
+
+      const portion = ethers.parseUnits('1', 18); // 100% of the (liquidity-capped) NAV
+      const [, , txs] = await guard.withdrawProcessing(poolAddr, spokeAddr, portion, other.address);
+      expect(txs.length).to.equal(3);
+
+      const takerIface = new ethers.Interface([
+        'function withdrawOnBehalfOf(address spoke, uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)',
+      ]);
+      const withdrawDecoded = takerIface.decodeFunctionData('withdrawOnBehalfOf', txs[1].txData);
+      // Not 1000 USDC (the full supplied amount) — capped to the liquid amount instead.
+      expect(withdrawDecoded[2]).to.equal(cappedAmount);
+
+      const erc20Iface = new ethers.Interface(['function transfer(address to, uint256 amount)']);
+      const transferDecoded = erc20Iface.decodeFunctionData('transfer', txs[2].txData);
+      expect(transferDecoded[1]).to.equal(cappedAmount);
+    });
+
+    it('reproduces and fixes FNA-07: a withdrawOnBehalfOf for the full supplied amount would revert on an under-liquid reserve, but the guard-generated (capped) transaction succeeds', async () => {
+      const {
+        deployer,
+        taker,
+        takerAddr,
+        guard,
+        aaveV4SpokeManager,
+        poolManager,
+        poolAddr,
+        spoke,
+        spokeAddr,
+        usdc,
+        usdcAddr,
+        other,
+      } = await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      const supplied = ethers.parseUnits('1000', 6);
+      await spoke.setSuppliedAssets(1n, poolAddr, supplied);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      // The mock TakerPositionManager (standing in for the real Spoke/Hub liquidity) only holds
+      // enough USDC to honor 20% of the position — a real withdrawOnBehalfOf for the full 1000
+      // would revert with insufficient balance to transfer back.
+      const cappedAmount = ethers.parseUnits('200', 6);
+      await spoke.setAvailableLiquidity(1n, cappedAmount);
+      await usdc.mint(takerAddr, cappedAmount);
+
+      const poolSigner = await ethers.getImpersonatedSigner(poolAddr);
+      await ethers.provider.send('hardhat_setBalance', [
+        poolAddr,
+        '0x' + ethers.parseEther('1').toString(16),
+      ]);
+
+      // Confirm the *naive* full-amount withdrawal really would have failed — with a max
+      // allowance already granted (isolating the failure to insufficient USDC balance in the
+      // mock Taker to transfer back, not an allowance shortfall), demonstrating the
+      // vulnerability this guard now avoids triggering.
+      await taker
+        .connect(poolSigner)
+        .approveWithdraw(spokeAddr, 1n, poolAddr, ethers.MaxUint256);
+      await expect(
+        taker
+          .connect(poolSigner)
+          .withdrawOnBehalfOf(spokeAddr, 1n, supplied, poolAddr),
+      ).to.be.reverted;
+
+      // The guard's own withdrawProcessing(), even at portion = 100%, must not attempt that.
+      const portion = ethers.parseUnits('1', 18);
+      const [, , txs] = await guard.withdrawProcessing(poolAddr, spokeAddr, portion, other.address);
+      expect(txs.length).to.equal(3);
+
+      for (const tx of txs) {
+        await poolSigner.sendTransaction({ to: tx.to, data: tx.txData });
+      }
+
+      expect(await spoke.suppliedAssets(1n, poolAddr)).to.equal(supplied - cappedAmount);
+      expect(await usdc.balanceOf(other.address)).to.equal(cappedAmount);
     });
   });
 

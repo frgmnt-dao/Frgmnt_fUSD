@@ -14,7 +14,7 @@ contract MockAaveV4GiverPositionManager {
         uint256 amount,
         address onBehalfOf
     ) external returns (uint256 suppliedShares, uint256 suppliedAmount) {
-        (address underlying, ) = MockAaveV4Spoke(spoke).getReserve(reserveId);
+        (address underlying, , ) = MockAaveV4Spoke(spoke).getReserve(reserveId);
         IERC20(underlying).transferFrom(msg.sender, address(this), amount);
         MockAaveV4Spoke(spoke).adjustSupplied(reserveId, onBehalfOf, true, amount);
         suppliedShares = amount;
