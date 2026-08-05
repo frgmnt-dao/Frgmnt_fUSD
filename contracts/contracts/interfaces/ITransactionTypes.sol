@@ -41,6 +41,7 @@ interface ITransactionTypes {
         AaveV4TokenizationDeposit, // 33
         AaveV4TokenizationMint, // 34
         AaveV4TokenizationWithdraw, // 35
-        AaveV4TokenizationRedeem // 36
+        AaveV4TokenizationRedeem, // 36
+        AaveV4SpokeSetPositionManager // 37
     }
 }

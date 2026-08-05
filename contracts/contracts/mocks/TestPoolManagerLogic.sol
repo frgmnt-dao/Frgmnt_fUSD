@@ -212,6 +212,14 @@ contract TestPoolManagerLogic {
         pool = _pool;
     }
 
+    /// @notice IPoolManagerLogic.poolLogic() — required by guards (e.g. AaveV4SpokeContractGuard,
+    ///         AaveV4SpokeAssetGuard's FNA-08 txGuard) that resolve the pool address FROM the
+    ///         poolManagerLogic side, not just the reverse. Returns whatever setPool() was last
+    ///         called with (address(0) if never set).
+    function poolLogic() external view returns (address) {
+        return pool;
+    }
+
     function callMintManagerFee(address poolLogic_) external {
         IMintManagerFeePool(poolLogic_).mintManagerFee();
     }

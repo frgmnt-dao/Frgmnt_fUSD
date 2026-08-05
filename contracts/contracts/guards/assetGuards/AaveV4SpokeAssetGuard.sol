@@ -18,6 +18,7 @@ import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
 import { IWithdrawableBalanceGuard } from "../../interfaces/guards/IWithdrawableBalanceGuard.sol";
+import { ITransactionTypes } from "../../interfaces/ITransactionTypes.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -58,7 +59,8 @@ contract AaveV4SpokeAssetGuard is
     IAddAssetCheckGuard,
     IPreValuedAssetGuard,
     IIncompleteValuationGuard,
-    IWithdrawableBalanceGuard
+    IWithdrawableBalanceGuard,
+    ITransactionTypes
 {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -66,10 +68,13 @@ contract AaveV4SpokeAssetGuard is
 
     error ManagerZero();
     error TakerPositionManagerZero();
+    error GiverPositionManagerZero();
     error BadPortion();
     error InvalidRecipient();
     error InvalidUnderlying();
     error SpokeNotWhitelisted();
+    error NotPoolLogic();
+    error InvalidPositionManager();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTANTS
@@ -122,15 +127,87 @@ contract AaveV4SpokeAssetGuard is
     /// @notice Aave V4's singleton TakerPositionManager, used to encode withdrawal transactions.
     address public immutable takerPositionManager;
 
+    /// @notice Aave V4's singleton GiverPositionManager.
+    /// @dev FNA-08: the only other address (besides takerPositionManager) a pool is ever
+    ///      authorized to approve via setUserPositionManager — see txGuard below.
+    address public immutable giverPositionManager;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address aaveV4SpokeManager_, address takerPositionManager_) {
+    constructor(
+        address aaveV4SpokeManager_,
+        address takerPositionManager_,
+        address giverPositionManager_
+    ) {
         if (aaveV4SpokeManager_ == address(0)) revert ManagerZero();
         if (takerPositionManager_ == address(0)) revert TakerPositionManagerZero();
+        if (giverPositionManager_ == address(0)) revert GiverPositionManagerZero();
         aaveV4SpokeManager = aaveV4SpokeManager_;
         takerPositionManager = takerPositionManager_;
+        giverPositionManager = giverPositionManager_;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                FNA-08: SPOKE POSITION-MANAGER AUTHORIZATION
+    //////////////////////////////////////////////////////////////*/
+
+    bytes4 private constant SEL_SET_USER_POSITION_MANAGER = ISpoke.setUserPositionManager.selector;
+
+    event AaveV4SpokeSetPositionManagerEvt(
+        address indexed pool,
+        address indexed spoke,
+        address indexed positionManager,
+        bool approved,
+        uint256 time
+    );
+
+    /// @notice Authorizes PoolLogic.execTransaction(spoke, setUserPositionManager(...)).
+    /// @dev FNA-08: Aave V4 requires the position owner (the pool) to call
+    ///      `ISpoke.setUserPositionManager(positionManager, approve)` before Giver/Taker
+    ///      PositionManagers may act on its behalf — including the pool's very first supply, per
+    ///      the (corrected) documentation on IGiverPositionManager. Before this override, no path
+    ///      existed to make that call: `to` here is the Spoke, which has no dedicated
+    ///      ContractGuard registered against it (only GiverPositionManager/TakerPositionManager
+    ///      are — see AaveV4SpokeContractGuard), so PoolTxExecutor's guard-resolution falls back
+    ///      to this asset guard, whose inherited ClosedAssetGuard.txGuard unconditionally
+    ///      rejected everything. This override recognizes exactly one additional selector,
+    ///      leaving every other call to the Spoke rejected exactly as before.
+    ///
+    ///      CRITICAL SECURITY PROPERTY (mirrors AaveV4SpokeContractGuard's own reasoning about
+    ///      approveWithdraw's `spender` restriction): `positionManager` must be restricted to
+    ///      exactly {giverPositionManager, takerPositionManager}. Aave V4's withdraw sends funds
+    ///      to msg.sender, not onBehalfOf — approving an arbitrary address as position manager
+    ///      would let that address call withdraw directly (bypassing every guard in this
+    ///      repository) and receive the pool's entire supplied position.
+    function txGuard(
+        address poolManagerLogic,
+        address spoke,
+        bytes calldata data
+    ) external override returns (uint16 txType, bool isPublic) {
+        address poolLogic = IPoolManagerLogic(poolManagerLogic).poolLogic();
+        if (msg.sender != poolLogic) revert NotPoolLogic();
+
+        if (getMethod(data) != SEL_SET_USER_POSITION_MANAGER) {
+            return (0, false);
+        }
+
+        bytes memory params = getParams(data);
+        (address positionManager, bool approved) = abi.decode(params, (address, bool));
+
+        if (positionManager != giverPositionManager && positionManager != takerPositionManager) {
+            revert InvalidPositionManager();
+        }
+
+        emit AaveV4SpokeSetPositionManagerEvt(
+            poolLogic,
+            spoke,
+            positionManager,
+            approved,
+            block.timestamp
+        );
+        return (uint16(TransactionType.AaveV4SpokeSetPositionManager), false);
     }
 
     /*//////////////////////////////////////////////////////////////

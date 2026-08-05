@@ -20,4 +20,12 @@ pragma solidity ^0.8.24;
 interface ISpoke {
     /// @notice Returns the underlying asset amount currently supplied by `user` in `reserveId`.
     function getUserSuppliedAssets(uint256 reserveId, address user) external view returns (uint256);
+
+    /// @notice Grants or revokes `positionManager`'s ability to act on `msg.sender`'s own
+    ///         position (supply/withdraw/borrow/repay on `msg.sender`'s behalf).
+    /// @dev FNA-08: every Spoke entry point (including Giver's supply/repay) is gated by
+    ///      `onlyPositionManager(onBehalfOf)`, which — for any positionManager other than the
+    ///      position owner itself — requires a prior call to this function made BY the position
+    ///      owner (msg.sender here must be the pool). See AaveV4SpokeAssetGuard.txGuard.
+    function setUserPositionManager(address positionManager, bool approve) external;
 }
