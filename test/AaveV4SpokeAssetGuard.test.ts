@@ -1056,6 +1056,99 @@ describe('AaveV4SpokeAssetGuard', () => {
   });
 
   // -----------------------------------------------------------------------
+  // removeTokenCheck (FNA-21 — blocks removing a reserve's underlying ERC-20 from the pool's
+  // supportedAssets while the pool still holds a live supplied position in that reserve)
+  // -----------------------------------------------------------------------
+
+  describe('removeTokenCheck', () => {
+    it('returns true when the pool holds no supplied assets in any tracked reserve', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(true);
+    });
+
+    it('returns true for a token that is not any tracked reserve\'s underlying, even with a non-dust position held', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr, wethAddr } =
+        await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, wethAddr)).to.equal(true);
+    });
+
+    it('returns false for a reserve\'s underlying while the pool still holds a non-dust position there', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(false);
+    });
+
+    it('returns true when only dust remains (residual at exactly RAW_DUST_TOLERANCE)', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, 100n); // == RAW_DUST_TOLERANCE
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(true);
+    });
+
+    it('returns false when the residual exceeds the dust tolerance by even a small amount', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, 101n);
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(false);
+    });
+
+    it('still blocks removal of an underlying held via a delisted-but-tracked reserve (FNA-10 interaction)', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+
+      // Governance delists reserve 1 from the active allowlist, but it still holds real supply.
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, []);
+
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(false);
+    });
+
+    it('distinguishes between two reserves with different underlyings under the same Spoke', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr, wethAddr } =
+        await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n, 2n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setReserveUnderlying(2n, wethAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      // Reserve 2 (WETH) never received any supply.
+
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(false);
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, wethAddr)).to.equal(true);
+    });
+
+    it('returns true again once the position has been fully unwound', async () => {
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(false);
+
+      await spoke.setSuppliedAssets(1n, poolAddr, 0n);
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(true);
+    });
+
+    it('fails safe (returns true) rather than blocking every other token when a reserve\'s supplied-assets query reverts', async () => {
+      // Deliberately the opposite of removeAssetCheck's fail-closed behavior on the same failure
+      // mode — see this function's own documentation for why the blast radius differs.
+      const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setBrokenReserve(1n, true);
+      expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(true);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // withdrawProcessing / over-withdrawal (FNA-04)
   // -----------------------------------------------------------------------
 
