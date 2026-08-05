@@ -180,6 +180,7 @@ contract PoolLogic is
 
     error ZeroAmount();
     error ZeroAddress();
+    error EmptyMetadata();
     error OnlyManager();
     error OnlyManagerLogic();
     error CooldownActive();
@@ -288,16 +289,23 @@ contract PoolLogic is
         _disableInitializers();
     }
 
+    /// @param name_ ERC20 name for the share token of this deployment, e.g. "Staked Frgmnt EURO".
+    ///        FNA-11: parameterized so one implementation bytecode can back multiple xUSD-style
+    ///        products without forking source per denomination.
+    /// @param symbol_ ERC20 symbol for the share token of this deployment, e.g. "sfEURO".
     function initialize(
         address _fusd,
         address _poolManagerLogic,
-        address _owner
+        address _owner,
+        string memory name_,
+        string memory symbol_
     ) external initializer {
         if (_fusd == address(0)) revert ZeroAddress();
         if (_poolManagerLogic == address(0)) revert ZeroAddress();
         if (_owner == address(0)) revert ZeroAddress();
+        if (bytes(name_).length == 0 || bytes(symbol_).length == 0) revert EmptyMetadata();
 
-        __ERC20_init("Staked Frgmnt EURO", "sfEURO");
+        __ERC20_init(name_, symbol_);
         __Ownable_init(_owner);
         __ReentrancyGuard_init();
 

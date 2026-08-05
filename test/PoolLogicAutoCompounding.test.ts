@@ -48,6 +48,8 @@ async function deployAutoCompoundingFixture() {
     await fusd.getAddress(),
     await poolManager.getAddress(),
     await owner.getAddress(),
+    'Staked Frgmnt EURO',
+    'sfEURO',
   ]);
   const poolProxy = await PoolLogicTestProxy.deploy(await poolImpl.getAddress(), initData);
   await poolProxy.waitForDeployment();

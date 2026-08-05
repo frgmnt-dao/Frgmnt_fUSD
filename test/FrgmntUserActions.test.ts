@@ -78,6 +78,8 @@ async function deployFixture() {
       ethers.ZeroAddress,
       await poolManager.getAddress(),
       0,
+      'Frgmnt EURO',
+      'fEURO',
     ],
     { initializer: 'initialize', kind: 'uups' },
   );
@@ -112,6 +114,8 @@ async function deployFixture() {
     await fusd.getAddress(),
     await poolManager.getAddress(),
     await admin.getAddress(),
+    'Staked Frgmnt EURO',
+    'sfEURO',
   ]);
   const poolProxy = await PoolLogicTestProxy.deploy(await poolImpl.getAddress(), initData);
   await poolProxy.waitForDeployment();

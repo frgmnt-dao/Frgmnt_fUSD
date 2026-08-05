@@ -59,7 +59,7 @@ describe('TokenLogic (fEURO)', () => {
 
     const fusd = await upgrades.deployProxy(
       TokenLogic,
-      [adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown],
+      [adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown, 'Frgmnt EURO', 'fEURO'],
       { initializer: 'initialize', kind: 'uups' },
     );
     await fusd.waitForDeployment();
@@ -125,7 +125,15 @@ describe('TokenLogic (fEURO)', () => {
       await loadFixture(deployFixture);
 
     await expect(
-      fusd.initialize(adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown),
+      fusd.initialize(
+        adminAddress,
+        emergencyAddress,
+        poolLogicAddress,
+        poolMgrAddress,
+        cooldown,
+        'Frgmnt EURO',
+        'fEURO',
+      ),
     ).to.be.reverted;
   });
 
@@ -137,7 +145,7 @@ describe('TokenLogic (fEURO)', () => {
     await expect(
       upgrades.deployProxy(
         TokenLogic,
-        [ethers.ZeroAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown],
+        [ethers.ZeroAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown, 'Frgmnt EURO', 'fEURO'],
         { initializer: 'initialize', kind: 'uups' },
       ),
     ).to.be.revertedWith('TokenLogic: admin=0');
@@ -145,7 +153,7 @@ describe('TokenLogic (fEURO)', () => {
     await expect(
       upgrades.deployProxy(
         TokenLogic,
-        [adminAddress, ethers.ZeroAddress, poolLogicAddress, poolMgrAddress, cooldown],
+        [adminAddress, ethers.ZeroAddress, poolLogicAddress, poolMgrAddress, cooldown, 'Frgmnt EURO', 'fEURO'],
         { initializer: 'initialize', kind: 'uups' },
       ),
     ).to.be.revertedWith('TokenLogic: emergency=0');
@@ -153,10 +161,27 @@ describe('TokenLogic (fEURO)', () => {
     await expect(
       upgrades.deployProxy(
         TokenLogic,
-        [adminAddress, emergencyAddress, poolLogicAddress, ethers.ZeroAddress, cooldown],
+        [adminAddress, emergencyAddress, poolLogicAddress, ethers.ZeroAddress, cooldown, 'Frgmnt EURO', 'fEURO'],
         { initializer: 'initialize', kind: 'uups' },
       ),
     ).to.be.revertedWith('TokenLogic: poolManagerLogic=0');
+
+    // FNA-11: empty name/symbol must also revert.
+    await expect(
+      upgrades.deployProxy(
+        TokenLogic,
+        [adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown, '', 'fEURO'],
+        { initializer: 'initialize', kind: 'uups' },
+      ),
+    ).to.be.revertedWith('TokenLogic: empty name');
+
+    await expect(
+      upgrades.deployProxy(
+        TokenLogic,
+        [adminAddress, emergencyAddress, poolLogicAddress, poolMgrAddress, cooldown, 'Frgmnt EURO', ''],
+        { initializer: 'initialize', kind: 'uups' },
+      ),
+    ).to.be.revertedWith('TokenLogic: empty symbol');
   });
 
   it('accepts a zero _poolLogic at initialize (FNA-09: deliberate — deployment-ordering, wired up later via setPoolLogic)', async () => {
@@ -166,7 +191,7 @@ describe('TokenLogic (fEURO)', () => {
 
     const fusd = await upgrades.deployProxy(
       TokenLogic,
-      [adminAddress, emergencyAddress, ethers.ZeroAddress, poolMgrAddress, cooldown],
+      [adminAddress, emergencyAddress, ethers.ZeroAddress, poolMgrAddress, cooldown, 'Frgmnt EURO', 'fEURO'],
       { initializer: 'initialize', kind: 'uups' },
     );
     expect(await fusd.poolLogic()).to.equal(ethers.ZeroAddress);
