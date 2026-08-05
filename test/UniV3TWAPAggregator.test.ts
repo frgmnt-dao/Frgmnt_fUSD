@@ -22,6 +22,7 @@ describe('UniV3TWAPAggregator', () => {
     lower?: bigint;
     upper?: bigint;
     interval?: number;
+    minimumLiquidity?: bigint;
   }) {
     const main = await deployToken('MAIN', options?.mainDecimals ?? 18);
     const pair = await deployToken('PAIR', options?.pairDecimals ?? 18);
@@ -52,6 +53,7 @@ describe('UniV3TWAPAggregator', () => {
       options?.lower ?? 0,
       options?.upper ?? 0,
       options?.interval ?? 600,
+      options?.minimumLiquidity ?? 0,
     );
     await aggregator.waitForDeployment();
 
@@ -63,27 +65,27 @@ describe('UniV3TWAPAggregator', () => {
     const Aggregator = await ethers.getContractFactory('UniV3TWAPAggregator');
 
     await expect(
-      Aggregator.deploy(ethers.ZeroAddress, mainAddress, await feed.getAddress(), 0, 0, 600),
+      Aggregator.deploy(ethers.ZeroAddress, mainAddress, await feed.getAddress(), 0, 0, 600, 0),
     ).to.be.revertedWith('pool=0');
     await expect(
-      Aggregator.deploy(await pool.getAddress(), ethers.ZeroAddress, await feed.getAddress(), 0, 0, 600),
+      Aggregator.deploy(await pool.getAddress(), ethers.ZeroAddress, await feed.getAddress(), 0, 0, 600, 0),
     ).to.be.revertedWith('mainToken=0');
     await expect(
-      Aggregator.deploy(await pool.getAddress(), mainAddress, ethers.ZeroAddress, 0, 0, 600),
+      Aggregator.deploy(await pool.getAddress(), mainAddress, ethers.ZeroAddress, 0, 0, 600, 0),
     ).to.be.revertedWith('agg=0');
     await expect(
-      Aggregator.deploy(await pool.getAddress(), mainAddress, await feed.getAddress(), 0, 0, 0),
+      Aggregator.deploy(await pool.getAddress(), mainAddress, await feed.getAddress(), 0, 0, 0, 0),
     ).to.be.revertedWith('interval=0');
     await expect(
-      Aggregator.deploy(await pool.getAddress(), mainAddress, await feed.getAddress(), 2, 1, 600),
+      Aggregator.deploy(await pool.getAddress(), mainAddress, await feed.getAddress(), 2, 1, 600, 0),
     ).to.be.revertedWith('invalid price limit');
     await expect(
-      Aggregator.deploy(await pool.getAddress(), pairAddress, await feed.getAddress(), 1, 0, 600),
+      Aggregator.deploy(await pool.getAddress(), pairAddress, await feed.getAddress(), 1, 0, 600, 0),
     ).to.be.revertedWith('invalid price limit');
 
     const other = await deployToken('OTHER', 18);
     await expect(
-      Aggregator.deploy(await pool.getAddress(), await other.getAddress(), await feed.getAddress(), 0, 0, 600),
+      Aggregator.deploy(await pool.getAddress(), await other.getAddress(), await feed.getAddress(), 0, 0, 600, 0),
     ).to.be.revertedWith('mainToken not in pool');
   });
 
@@ -111,6 +113,7 @@ describe('UniV3TWAPAggregator', () => {
     expect(await aggregator.mainTokenUnit()).to.equal(ethers.parseEther('1'));
     expect(await aggregator.pairTokenUnit()).to.equal(ethers.parseEther('1'));
     expect(await aggregator.updateInterval()).to.equal(600n);
+    expect(await aggregator.minimumLiquidity()).to.equal(0n);
 
     const [roundId, answer, startedAt, updatedAt, answeredInRound] =
       await aggregator.latestRoundData();
@@ -170,5 +173,53 @@ describe('UniV3TWAPAggregator', () => {
     await expect(pairOverflow.aggregator.latestRoundData()).to.be.revertedWith(
       'pairTokenUnit overflow',
     );
+  });
+
+  // -----------------------------------------------------------------------
+  // FNA-16: minimum liquidity floor
+  // -----------------------------------------------------------------------
+  describe('FNA-16: minimum liquidity floor', () => {
+    const MAX_160 = (1n << 160n) - 1n;
+
+    // Inverts OracleLibrary.consult()'s harmonicMeanLiquidity formula to find the
+    // secondsPerLiquidityCumulativeX128 delta that makes the mock report a given liquidity for
+    // a given TWAP window (secondsAgo).
+    function deltaForLiquidity(targetLiquidity: bigint, secondsAgo: bigint): bigint {
+      return (secondsAgo * MAX_160) / (targetLiquidity << 32n);
+    }
+
+    it('reverts with "liquidity too low" when the pool liquidity is below the configured floor', async () => {
+      const { aggregator, pool } = await deployFixture({ minimumLiquidity: 601n, interval: 600 });
+      // Default mock delta reports liquidity of exactly 600 for a 600s window — below 601.
+      await expect(aggregator.latestRoundData()).to.be.revertedWith('liquidity too low');
+      // Sanity: the pool itself wasn't reconfigured — this is purely the aggregator's floor.
+      expect(await pool.getAddress()).to.be.properAddress;
+    });
+
+    it('succeeds when the pool liquidity is at least the configured floor', async () => {
+      const { aggregator } = await deployFixture({ minimumLiquidity: 600n, interval: 600 });
+      await expect(aggregator.latestRoundData()).to.not.be.reverted;
+    });
+
+    it('reverts once a previously-adequate pool becomes thin (liquidity drops below the floor)', async () => {
+      const { aggregator, pool } = await deployFixture({ minimumLiquidity: 100n, interval: 600 });
+      await expect(aggregator.latestRoundData()).to.not.be.reverted;
+
+      // Simulate the pool's active liquidity collapsing: a larger delta yields a smaller
+      // harmonic-mean liquidity. Target 50, comfortably below the 100 floor.
+      const thinDelta = deltaForLiquidity(50n, 600n);
+      await pool.setSecondsPerLiquidityCumulativeX128Delta(thinDelta);
+
+      await expect(aggregator.latestRoundData()).to.be.revertedWith('liquidity too low');
+    });
+
+    it('never reverts on low liquidity when the floor is disabled (minimumLiquidity = 0)', async () => {
+      const { aggregator, pool } = await deployFixture({ minimumLiquidity: 0n, interval: 600 });
+
+      const thinDelta = deltaForLiquidity(1n, 600n);
+      await pool.setSecondsPerLiquidityCumulativeX128Delta(thinDelta);
+
+      await expect(aggregator.latestRoundData()).to.not.be.reverted;
+    });
   });
 });

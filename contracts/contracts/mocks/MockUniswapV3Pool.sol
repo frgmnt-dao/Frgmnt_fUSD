@@ -17,6 +17,13 @@ contract MockUniswapV3Pool {
 
     mapping(int24 => TickData) private _ticks;
 
+    /// @dev FNA-16: drives observe()'s secondsPerLiquidityCumulativeX128 delta, and therefore the
+    ///      harmonic-mean liquidity OracleLibrary.consult() computes from it. Defaults to the
+    ///      same fixed value this mock always used, so existing tests are unaffected; a LARGER
+    ///      delta yields a SMALLER computed liquidity (inverse relationship), simulating a
+    ///      thinner pool.
+    uint160 private _secondsPerLiquidityCumulativeX128Delta = type(uint160).max >> 32;
+
     constructor(address token0_, address token1_, uint160 sqrtPriceX96_) {
         _token0 = token0_;
         _token1 = token1_;
@@ -108,18 +115,24 @@ contract MockUniswapV3Pool {
         );
     }
 
+    /// @dev FNA-16: exposed so tests can drive OracleLibrary.consult()'s harmonic-mean liquidity
+    ///      output to a specific value (see `_secondsPerLiquidityCumulativeX128Delta`).
+    function setSecondsPerLiquidityCumulativeX128Delta(uint160 delta) external {
+        _secondsPerLiquidityCumulativeX128Delta = delta;
+    }
+
     function observe(
         uint32[] calldata secondsAgos
     )
         external
-        pure
+        view
         returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s)
     {
         tickCumulatives = new int56[](secondsAgos.length);
         secondsPerLiquidityCumulativeX128s = new uint160[](secondsAgos.length);
         for (uint256 i; i < secondsAgos.length; ++i) {
             secondsPerLiquidityCumulativeX128s[i] = secondsAgos[i] == 0
-                ? type(uint160).max >> 32
+                ? _secondsPerLiquidityCumulativeX128Delta
                 : 0;
         }
     }

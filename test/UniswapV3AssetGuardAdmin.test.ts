@@ -278,6 +278,66 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
     expect(txs.length).to.equal(0);
   });
 
+  // -----------------------------------------------------------------------
+  // FNA-16: per-pool minimum TWAP liquidity floor
+  // -----------------------------------------------------------------------
+  describe('FNA-16: minimumPoolLiquidity', () => {
+    it('defaults to 0 (disabled) and withdrawProcessing is unaffected', async () => {
+      const { guard, uniPool } = await deployPositionFixture();
+      expect(await guard.minimumPoolLiquidity(await uniPool.getAddress())).to.equal(0n);
+    });
+
+    it('setMinimumPoolLiquidity: only admin, rejects zero pool, emits event', async () => {
+      const [deployer, other] = await ethers.getSigners();
+      const { guard, uniPool } = await deployPositionFixture();
+      const uniPoolAddr = await uniPool.getAddress();
+
+      await expect(
+        guard.connect(other).setMinimumPoolLiquidity(uniPoolAddr, 1n),
+      ).to.be.revertedWith('UniswapV3AssetGuard: not admin');
+
+      await expect(
+        guard.connect(deployer).setMinimumPoolLiquidity(ethers.ZeroAddress, 1n),
+      ).to.be.revertedWith('UniswapV3AssetGuard: zero pool');
+
+      await expect(guard.connect(deployer).setMinimumPoolLiquidity(uniPoolAddr, 500n))
+        .to.emit(guard, 'MinimumPoolLiquidityUpdated')
+        .withArgs(uniPoolAddr, 0n, 500n);
+      expect(await guard.minimumPoolLiquidity(uniPoolAddr)).to.equal(500n);
+    });
+
+    it('withdrawProcessing reverts once the pool TWAP liquidity drops below the configured floor', async () => {
+      const [deployer] = await ethers.getSigners();
+      const { guard, poolAndFactory, nfpm, uniPool } = await deployPositionFixture();
+      const [, recipient] = await ethers.getSigners();
+
+      // The mock pool's default observe() delta implies a harmonic-mean liquidity of exactly
+      // `withdrawalTwapWindow` (600 by default) — see UniV3TWAPAggregator.test.ts for the same
+      // derivation. Set the floor just above that.
+      await guard.connect(deployer).setMinimumPoolLiquidity(await uniPool.getAddress(), 601n);
+
+      await expect(
+        guard.withdrawProcessing.staticCall(
+          await poolAndFactory.getAddress(),
+          await nfpm.getAddress(),
+          ethers.parseUnits('0.5', 18),
+          recipient.address,
+        ),
+      ).to.be.revertedWith('UniswapV3AssetGuard: TWAP liquidity too low');
+
+      // Disabling the floor again restores the original behavior.
+      await guard.connect(deployer).setMinimumPoolLiquidity(await uniPool.getAddress(), 0n);
+      await expect(
+        guard.withdrawProcessing.staticCall(
+          await poolAndFactory.getAddress(),
+          await nfpm.getAddress(),
+          ethers.parseUnits('0.5', 18),
+          recipient.address,
+        ),
+      ).to.not.be.reverted;
+    });
+  });
+
   it('harness covers valuation, pool lookup, liquidity, fee, and price deviation helpers', async () => {
     const { guard, token0, invalidToken, poolAndFactory, uniFactory, uniPool, nfpm } =
       await deployPositionFixture(true);
