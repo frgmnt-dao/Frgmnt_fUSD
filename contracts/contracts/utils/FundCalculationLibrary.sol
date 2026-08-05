@@ -260,7 +260,7 @@ library FundCalculationLibrary {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
         uint256 effectiveFusd = _applyClaimsHaircut(
             grossFusd,
-            _withdrawableFundValue(pool, poolManagerLogic),
+            _withdrawableFundValue(pool, poolManagerLogic, false),
             IERC20(IPoolLogic(pool).fusd()).totalSupply()
         );
         if (effectiveFusd == 0) return 0;
@@ -282,9 +282,26 @@ library FundCalculationLibrary {
         }
     }
 
-    function _withdrawableFundValue(
+    /// @dev FNA-07: NAV for PoolLogic's *immediate* withdrawal path, capped per-asset by whatever
+    ///      external liquidity a guard reports via IWithdrawableBalanceGuard (see that interface)
+    ///      instead of its full claim — so one under-liquid lending position sizes its own share
+    ///      down to what it can actually deliver, rather than the whole withdrawal reverting when
+    ///      that position's guard call is later asked to redeem more than is available. Guards
+    ///      that don't implement the marker are assumed fully liquid, identical to
+    ///      computeFinalizeAssetAmount's NAV above (which intentionally does NOT apply this cap —
+    ///      the queued finalize path doesn't redeem anything at finalize time, so there is no
+    ///      liquidity constraint to reflect there; see IWithdrawableBalanceGuard).
+    function computeWithdrawableFundValue(
         address pool,
         address poolManagerLogic
+    ) external view returns (uint256) {
+        return _withdrawableFundValue(pool, poolManagerLogic, true);
+    }
+
+    function _withdrawableFundValue(
+        address pool,
+        address poolManagerLogic,
+        bool capByLiquidity
     ) private view returns (uint256 value) {
         IHasSupportedAsset.Asset[] memory assets = IHasSupportedAsset(poolManagerLogic)
             .getSupportedAssets();
@@ -292,7 +309,9 @@ library FundCalculationLibrary {
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i].asset;
             address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-            uint256 withdrawableBalance = IAssetGuard(guard).getBalance(pool, asset);
+            uint256 withdrawableBalance = capByLiquidity
+                ? _guardWithdrawableBalance(pool, asset, guard)
+                : IAssetGuard(guard).getBalance(pool, asset);
             uint256 reserved = IPoolLogic(pool).reservedAssetBalance(asset);
             if (reserved > 0) {
                 if (withdrawableBalance < reserved) revert InvalidReservedBalance();
@@ -300,6 +319,32 @@ library FundCalculationLibrary {
             }
             value += IPoolManagerLogic(poolManagerLogic).assetValue(asset, withdrawableBalance);
         }
+    }
+
+    /// @dev Checks the IWithdrawableBalanceGuard marker via the same low-level-call-with-fallback
+    ///      pattern already used elsewhere in this codebase (isPreValuedAssetGuard(),
+    ///      isIncompleteValuationGuard()) — a guard without the marker, or whose marked call
+    ///      itself unexpectedly fails, falls back to getBalance() and 0 respectively; see
+    ///      IWithdrawableBalanceGuard for why a failed marked call degrades to 0 (conservative)
+    ///      rather than the full getBalance() value.
+    function _guardWithdrawableBalance(
+        address pool,
+        address asset,
+        address guard
+    ) private view returns (uint256) {
+        (bool hasMarker, bytes memory markerData) = guard.staticcall(
+            abi.encodeWithSignature("isWithdrawableBalanceGuard()")
+        );
+        if (hasMarker && markerData.length == 32 && abi.decode(markerData, (bool))) {
+            (bool ok, bytes memory data) = guard.staticcall(
+                abi.encodeWithSignature("getWithdrawableBalance(address,address)", pool, asset)
+            );
+            if (ok && data.length == 32) {
+                return abi.decode(data, (uint256));
+            }
+            return 0;
+        }
+        return IAssetGuard(guard).getBalance(pool, asset);
     }
 
     // ============================================================

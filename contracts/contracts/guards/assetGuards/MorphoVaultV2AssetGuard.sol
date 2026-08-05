@@ -14,6 +14,7 @@ import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
 import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
+import { IWithdrawableBalanceGuard } from "../../interfaces/guards/IWithdrawableBalanceGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -38,7 +39,8 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 contract MorphoVaultV2AssetGuard is
     ClosedAssetGuard,
     IAddAssetCheckGuard,
-    IIncompleteValuationGuard
+    IIncompleteValuationGuard,
+    IWithdrawableBalanceGuard
 {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -159,10 +161,50 @@ contract MorphoVaultV2AssetGuard is
         (balanceUsd18, ) = _valuePosition(pool, asset);
     }
 
-    /// @dev Shared by getBalance() and isValuationComplete() below, so the two can never
-    ///      disagree about which failure paths count as "incomplete" — see getBalance()'s
-    ///      previous documentation (now here) for why each of these degrades rather than
-    ///      reverts.
+    /// @dev getBalance()/isValuationComplete() value the pool's full share balance; see
+    ///      getWithdrawableBalance() below for the liquidity-capped variant (FNA-07).
+    function _valuePosition(
+        address pool,
+        address asset
+    ) internal view returns (uint256 balanceUsd18, bool complete) {
+        return _valueShares(pool, asset, IERC20(asset).balanceOf(pool));
+    }
+
+    /// @notice Liquidity-capped counterpart to getBalance() — see IWithdrawableBalanceGuard.
+    /// @dev maxRedeem() already reflects whatever the vault's own liquidity adapters can actually
+    ///      return this block (Morpho Vault V2's standard ERC-4626 accounting), so capping the
+    ///      pool's raw share balance by it before pricing is sufficient; no separate external
+    ///      liquidity query is needed the way a raw lending-market integration would require.
+    ///      Degrades to 0 (not getBalance()'s full value) on any failure, matching this guard's
+    ///      existing fail-open-to-empty convention — see _valuePosition's inherited documentation.
+    function getWithdrawableBalance(
+        address pool,
+        address asset
+    ) external view override returns (uint256 balanceUsd18) {
+        uint256 shares = IERC20(asset).balanceOf(pool);
+        if (shares == 0) return 0;
+
+        uint256 maxRedeemable;
+        try IERC4626(asset).maxRedeem(pool) returns (uint256 m) {
+            maxRedeemable = m;
+        } catch {
+            return 0;
+        }
+
+        uint256 withdrawableShares = shares < maxRedeemable ? shares : maxRedeemable;
+        (balanceUsd18, ) = _valueShares(pool, asset, withdrawableShares);
+    }
+
+    /// @notice See IWithdrawableBalanceGuard.
+    function isWithdrawableBalanceGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @dev Shared USD-valuation logic for an arbitrary share amount — used by both
+    ///      _valuePosition (full balance) and getWithdrawableBalance (liquidity-capped balance)
+    ///      so they can never disagree about which failure paths count as "incomplete"/degrade to
+    ///      0. See _valuePosition's previous documentation (now here) for why each step degrades
+    ///      rather than reverts.
     ///
     ///      getAssetPrice() reaches AssetHandler.getUSDPrice(), which reverts on a stale/missing
     ///      Chainlink feed or a down/just-recovered L2 sequencer — all real, transient operating
@@ -175,11 +217,11 @@ contract MorphoVaultV2AssetGuard is
     ///      isValuationComplete() lets callers that need to know the reading was trustworthy
     ///      (PoolManagerLogic.totalFundValueWithCompleteness(), removeAssetCheck() below) tell the
     ///      difference between "genuinely empty" and "temporarily unknowable".
-    function _valuePosition(
+    function _valueShares(
         address pool,
-        address asset
+        address asset,
+        uint256 shares
     ) internal view returns (uint256 balanceUsd18, bool complete) {
-        uint256 shares = IERC20(asset).balanceOf(pool);
         if (shares == 0) return (0, true);
 
         address underlying;
@@ -289,7 +331,17 @@ contract MorphoVaultV2AssetGuard is
         withdrawAsset = IERC4626(asset).asset();
         if (withdrawAsset == address(0)) revert InvalidUnderlying();
 
+        // FNA-07: withdrawPortion is sized by the caller against the *liquidity-capped* NAV (see
+        // getWithdrawableBalance), which for this asset already reflects maxRedeem(pool), not the
+        // full share balance. Applying that same portion to the full `shares` here (rather than
+        // to the capped amount) could still ask to redeem more than the vault can currently
+        // return whenever this position is the liquidity-constrained one — capping identically
+        // here is what actually prevents the redeem() call from reverting.
         uint256 shares = IERC20(asset).balanceOf(pool);
+        uint256 maxRedeemable = IERC4626(asset).maxRedeem(pool);
+        if (shares > maxRedeemable) {
+            shares = maxRedeemable;
+        }
         uint256 sharesToRedeem = (shares * withdrawPortion) / 1e18;
 
         if (sharesToRedeem == 0) {
