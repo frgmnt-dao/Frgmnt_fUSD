@@ -415,6 +415,24 @@ contract PoolLogic is
      * - Fees are minted in FUSD.
      * - The ordering of operations is critical to ensure fair reward
      *   distribution and to prevent fee minting from capturing past rewards.
+     *
+     * DESIGN NOTE (FNA-13 — reward recognition, not a bug):
+     * A positive NAV change is distributed across whoever holds sfUSD (effectiveSupply)
+     * at the moment THIS function runs — not proportionally to how long each holder has
+     * actually held their shares. stake() already calls this before minting new shares,
+     * so a staker can never retroactively capture value already visible in totalFundValue()
+     * at entry. But if value is earned before it becomes visible here (e.g. an incentive
+     * token the pool holds, recognized only once the manager converts it into a supported
+     * asset), a staker who enters between "earned" and "recognized" and exits immediately
+     * after receives a pro-rata share of that recognition event, same as any other holder
+     * present at the time — regardless of how briefly they held.
+     * This is an intentional, accepted tradeoff, not a defect: entry/exit fees and unstake
+     * lock periods are deliberately NOT used to discourage this (see PR/audit discussion for
+     * FNA-13), matching how fee-less, lock-free ERC-4626-style vaults generally behave —
+     * rewards belong to whoever holds the share token at recognition time, full stop. If
+     * this behavior ever needs to change, the fix is architectural (e.g. streaming
+     * recognition instead of discrete jumps, or accruing at the value-changing event itself
+     * rather than lazily on the next stake/unstake/harvest), not a parameter tweak.
      */
 
     function _accrueYield() internal {
@@ -564,6 +582,10 @@ contract PoolLogic is
     // =                           STAKE                           =
     // ============================================================
 
+    /// @dev FNA-13: both stake() overloads call _updateFeesAndRewardsFor()/_accrueYield()
+    ///      before minting shares, so a new staker never captures NAV growth already visible
+    ///      at entry. Value not yet visible (recognized later in a separate transaction) is a
+    ///      different, intentionally-accepted case — see the design note on _accrueYield().
     function stake(uint256 amountFusd) external nonReentrant updateFeesAndRewards(msg.sender) {
         // Backward-compatible wrapper: no minimum output enforced by the user
         _stake(msg.sender, amountFusd, 0);
