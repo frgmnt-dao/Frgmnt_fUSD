@@ -133,7 +133,11 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     ) external initializer {
         if (_factoryOwner == address(0)) revert InvalidFactory();
         if (_manager == address(0)) revert InvalidManager();
-        //	if (_poolLogic == address(0)) revert InvalidPoolLogic();
+        // FNA-09: _poolLogic is deliberately allowed to be address(0) here. PoolLogic.initialize()
+        // itself requires this contract's address, so the deployment script must deploy
+        // PoolManagerLogic first (with poolLogic unset) and wire it up afterward via
+        // setPoolLogic() once PoolLogic exists — see scripts/deploy_core_contracts.ts. setPoolLogic
+        // below enforces non-zero before that wiring completes.
         if (_governance == address(0)) revert InvalidGovernance();
         _initialize(_manager, _managerName);
         factoryOwner = _factoryOwner;
@@ -653,6 +657,9 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
     function setPoolLogic(address _poolLogic) external override returns (bool) {
         require(msg.sender == factoryOwner, "only owner allowed");
+        // FNA-09: explicit zero check for a clear revert reason — the external call below already
+        // reverts on address(0) (no code to decode a return value from), but only implicitly.
+        if (_poolLogic == address(0)) revert InvalidPoolLogic();
         require(IPoolLogic(_poolLogic).poolManagerLogic() == address(this), "invalid pool logic");
 
         poolLogic = _poolLogic;
@@ -677,6 +684,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     function setNftMembershipCollectionAddress(address addr) external onlyManager {
         address previous = nftMembershipCollectionAddress;
 
+        // FNA-09: address(0) is a deliberate, valid input here — it's how the manager disables
+        // NFT membership gating entirely, not a missing validation gap.
         if (addr == address(0)) {
             nftMembershipCollectionAddress = addr;
             emit NftMembershipCollectionAddressSet(previous, addr);

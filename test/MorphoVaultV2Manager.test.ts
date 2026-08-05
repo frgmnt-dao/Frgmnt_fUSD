@@ -31,6 +31,15 @@ describe('MorphoVaultV2Manager', () => {
     );
   });
 
+  it('setPoolVaults reverts if any vault entry is the zero address (FNA-09)', async () => {
+    const { manager } = await deploy();
+    const pool = ethers.Wallet.createRandom().address;
+    const vault1 = ethers.Wallet.createRandom().address;
+    await expect(
+      manager.setPoolVaults(pool, [vault1, ethers.ZeroAddress]),
+    ).to.be.revertedWith('Invalid vault address');
+  });
+
   it('setPoolVaults sets vaults and emits event', async () => {
     const { manager } = await deploy();
     const pool = ethers.Wallet.createRandom().address;

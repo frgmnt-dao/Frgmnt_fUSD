@@ -47,6 +47,7 @@ contract NftTrackerStorage is OwnableUpgradeable {
      * @param _poolFactory Address of the pool factory (dHEDGE / Frgmnt factory)
      */
     function initialize(address _poolFactory) external initializer {
+        require(_poolFactory != address(0), "NftTrackerStorage: poolFactory=0");
         __Ownable_init(msg.sender); // OZ v5 requires initialOwner param
         poolFactory = _poolFactory;
     }
