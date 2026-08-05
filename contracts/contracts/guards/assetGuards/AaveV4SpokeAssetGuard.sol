@@ -9,7 +9,6 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import { ISpoke } from "../../interfaces/aave/v4/ISpoke.sol";
 import { IHubBase } from "../../interfaces/aave/v4/IHubBase.sol";
-import { ITakerPositionManager } from "../../interfaces/aave/v4/ITakerPositionManager.sol";
 import { IAaveV4SpokeManager } from "../../interfaces/IAaveV4SpokeManager.sol";
 import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
@@ -51,8 +50,17 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    the valuation of the others.
 ///  - FNA-07: `getWithdrawableBalance`/`withdrawProcessing` cap each reserve's withdrawable
 ///    amount by `IHubBase.getAssetLiquidity`, so one under-liquid reserve sizes its own share
-///    down instead of `withdrawOnBehalfOf` reverting and taking every other reserve (and every
+///    down instead of `withdraw` reverting and taking every other reserve (and every
 ///    other asset in the pool) down with it via PoolLogic's single atomic withdrawal transaction.
+///  - FNA-15: `withdrawProcessing` calls `ISpoke.withdraw` directly rather than routing through
+///    Aave's TakerPositionManager. PoolLogic always dispatches these calls from its own address,
+///    so the position owner and the caller are the same address — Aave's own
+///    `_isPositionManager` check short-circuits to true for `user == manager`, needing no
+///    PositionManager delegation or allowance at all. This drops the per-reserve transaction
+///    count from three (approveWithdraw, withdrawOnBehalfOf, transfer) to two (withdraw,
+///    transfer). See `takerPositionManager`'s own doc comment for why that immutable is kept
+///    regardless (still needed by the separate, Taker-mediated manual withdrawal path in
+///    AaveV4SpokeContractGuard).
 contract AaveV4SpokeAssetGuard is
     ClosedAssetGuard,
     IAddAssetCheckGuard,
@@ -80,9 +88,8 @@ contract AaveV4SpokeAssetGuard is
 
     /// @dev Raw-unit dust tolerance for `removeAssetCheck`. `_appendReserveWithdrawTxs` computes
     ///      a full withdrawal's `amount` from a live-read `ISpoke.getUserSuppliedAssets` snapshot
-    ///      rather than a `type(uint256).max` sentinel (Aave V4's `withdrawOnBehalfOf` does not
-    ///      document supporting one, unlike `approveWithdraw`'s allowance — see
-    ///      ITakerPositionManager), because this guard forwards a fixed, pre-computed amount via
+    ///      rather than a `type(uint256).max` sentinel (Aave V4's `withdraw` does not document
+    ///      supporting one), because this guard forwards a fixed, pre-computed amount via
     ///      a direct `transfer(to, amount)` rather than a balance-delta measurement (multiple
     ///      reserves can share one Spoke with *different* underlyings, so PoolLogic's single-
     ///      `withdrawAsset` delta tracking doesn't apply here — see the contract-level
@@ -122,7 +129,14 @@ contract AaveV4SpokeAssetGuard is
     /// @notice Protocol-owned allowlist of Aave V4 Spoke reserves permitted per pool.
     address public immutable aaveV4SpokeManager;
 
-    /// @notice Aave V4's singleton TakerPositionManager, used to encode withdrawal transactions.
+    /// @notice Aave V4's singleton TakerPositionManager.
+    /// @dev FNA-15: automatic withdrawProcessing() no longer routes through Taker — it calls
+    ///      ISpoke.withdraw() directly, since a pool withdrawing its own position needs no
+    ///      PositionManager delegation at all (see _appendReserveWithdrawTxs). This immutable is
+    ///      kept (not removed, despite the finding's literal suggestion) because txGuard above
+    ///      (FNA-08) still needs it: the manager can still choose to withdraw manually via
+    ///      AaveV4SpokeContractGuard's execTransaction path, which does route through Taker and
+    ///      therefore still requires the pool to have approved Taker as a position manager.
     address public immutable takerPositionManager;
 
     /// @notice Aave V4's singleton GiverPositionManager.
@@ -465,14 +479,15 @@ contract AaveV4SpokeAssetGuard is
     /// @notice Builds the pro-rata withdrawal transactions across every TRACKED reserveId
     ///         (FNA-10 — see _valuePosition; includes reserves the protocol owner has since
     ///         delisted but that may still hold pool supply, not just the actively-allowed ones).
-    /// @dev Per reserve: approve-self-as-withdraw-spender, withdraw (lands at the pool, since
-    ///      Aave V4 sends withdrawn funds to msg.sender regardless of `onBehalfOf`), then a
+    /// @dev Per reserve: withdraw directly from the Spoke (FNA-15 — lands at the pool, since
+    ///      Aave V4 sends withdrawn funds to msg.sender regardless of `onBehalfOf`, and needs no
+    ///      PositionManager delegation since the caller IS the position owner), then a
     ///      direct transfer to `to` — see contract-level @dev for why this differs from the
     ///      single-`withdrawAsset` pattern used by Morpho Vault V2's guard. Returns
     ///      `withdrawAsset = address(0)` so PoolLogic does not attempt to track or forward
     ///      anything itself.
     ///
-    ///      This only calls `withdrawOnBehalfOf` — it does not fall back to any alternate
+    ///      This only calls `ISpoke.withdraw` — it does not fall back to any alternate
     ///      liquidity source. FNA-07: it also no longer needs one for an under-liquid reserve —
     ///      _appendReserveWithdrawTxs below caps each reserve's requested amount by
     ///      `IHubBase.getAssetLiquidity`, the same cap `getWithdrawableBalance` already applied
@@ -501,7 +516,7 @@ contract AaveV4SpokeAssetGuard is
             spoke
         );
 
-        txs = new MultiTransaction[](reserveIds.length * 3);
+        txs = new MultiTransaction[](reserveIds.length * 2);
         uint256 n;
         WithdrawCtx memory ctx = WithdrawCtx({
             pool: pool,
@@ -522,9 +537,11 @@ contract AaveV4SpokeAssetGuard is
         withdrawAmount = 0;
     }
 
-    /// @dev Appends the (approveWithdraw, withdrawOnBehalfOf, transfer) trio for one reserve to
-    ///      `txs` starting at index `n`, if the pool holds a nonzero withdrawable amount there.
-    ///      Returns the updated `n`.
+    /// @dev Appends the (withdraw, transfer) pair for one reserve to `txs` starting at index
+    ///      `n`, if the pool holds a nonzero withdrawable amount there. Returns the updated `n`.
+    ///      FNA-15: previously a (approveWithdraw, withdrawOnBehalfOf, transfer) trio routed
+    ///      through TakerPositionManager — dropped to two transactions since PoolLogic calling
+    ///      ISpoke.withdraw() for its own position needs no PositionManager approval step at all.
     ///
     ///      `withdrawPortion` is sized by the caller against `_withdrawableFundValue()`, which —
     ///      via getWithdrawableBalance()/_reserveWithdrawableValueUsd() — already floors each
@@ -533,12 +550,12 @@ contract AaveV4SpokeAssetGuard is
     ///      amount here (rather than to the same liquidity-capped amount the NAV was sized from)
     ///      would reopen exactly the mismatch this guards against: a caller could redeem a
     ///      portion sized against a smaller NAV while still receiving the larger, uncapped share
-    ///      — extracting more value than the fUSD burned pays for, or asking
-    ///      `withdrawOnBehalfOf` for more than the Spoke/Hub can currently return and reverting
-    ///      the whole withdrawal. A reserve that can't currently be priced or valued is skipped
-    ///      rather than withdrawn, exactly mirroring its 0 contribution to the NAV the portion
-    ///      was computed from — it stays reserved for its pre-failure holders until pricing
-    ///      recovers, rather than being extractable by whoever withdraws next.
+    ///      — extracting more value than the fUSD burned pays for, or asking `withdraw` for more
+    ///      than the Spoke/Hub can currently return and reverting the whole withdrawal. A reserve
+    ///      that can't currently be priced or valued is skipped rather than withdrawn, exactly
+    ///      mirroring its 0 contribution to the NAV the portion was computed from — it stays
+    ///      reserved for its pre-failure holders until pricing recovers, rather than being
+    ///      extractable by whoever withdraws next.
     function _appendReserveWithdrawTxs(
         WithdrawCtx memory ctx,
         uint256 reserveId,
@@ -561,21 +578,9 @@ contract AaveV4SpokeAssetGuard is
         if (!_reservePriceAvailable(ctx.pool, underlying)) return n;
 
         txs[n++] = MultiTransaction({
-            to: takerPositionManager,
+            to: ctx.spoke,
             txData: abi.encodeWithSelector(
-                ITakerPositionManager.approveWithdraw.selector,
-                ctx.spoke,
-                reserveId,
-                ctx.pool,
-                type(uint256).max
-            )
-        });
-
-        txs[n++] = MultiTransaction({
-            to: takerPositionManager,
-            txData: abi.encodeWithSelector(
-                ITakerPositionManager.withdrawOnBehalfOf.selector,
-                ctx.spoke,
+                ISpoke.withdraw.selector,
                 reserveId,
                 amount,
                 ctx.pool

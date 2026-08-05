@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 /// @notice Minimal configurable mock of an Aave V4 Spoke for guard unit tests.
 /// @dev `getReserve` returns `(underlying, hub, assetId)` — the exact first three fields of the
 ///      real Reserve struct (confirmed against Aave V4's published source, see ISpoke), which is
@@ -74,6 +76,23 @@ contract MockAaveV4Spoke {
     ) external view returns (uint256) {
         require(!brokenReserve[reserveId], "MockAaveV4Spoke: reserve broken");
         return suppliedAssets[reserveId][user];
+    }
+
+    /// @dev FNA-15: mirrors real Aave V4's Spoke.withdraw(reserveId, amount, onBehalfOf) —
+    ///      withdrawn funds are sent to msg.sender (the caller), not to `onBehalfOf`, exactly
+    ///      like the real contract (and like MockAaveV4TakerPositionManager.withdrawOnBehalfOf,
+    ///      which this replaces for the automatic withdrawal path). No allowance/PositionManager
+    ///      check here — this mock doesn't enforce Aave's own onlyPositionManager/self-shortcut,
+    ///      matching the FNA-08 mock note below.
+    function withdraw(
+        uint256 reserveId,
+        uint256 amount,
+        address onBehalfOf
+    ) external returns (uint256 withdrawnShares, uint256 withdrawnAmount) {
+        suppliedAssets[reserveId][onBehalfOf] -= amount;
+        IERC20(reserveUnderlying[reserveId]).transfer(msg.sender, amount);
+        withdrawnShares = amount;
+        withdrawnAmount = amount;
     }
 
     /// @dev Real Aave V4 returns a much larger Reserve struct; the guard only reads the first

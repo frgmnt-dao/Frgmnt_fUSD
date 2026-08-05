@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 /// @title Frgmnt — ISpoke (Aave V4)
 /// @notice Minimal interface for an Aave V4 Spoke — the user-facing, risk-isolated lending
 ///         module that draws/restores liquidity from a shared Liquidity Hub.
-/// @dev Only the read functions actually consumed by AaveV4SpokeAssetGuard are declared here.
+/// @dev Only the functions actually consumed by AaveV4SpokeAssetGuard are declared here.
 ///      `Reserve`'s field order is confirmed against Aave V4's published source
 ///      (github.com/aave/aave-v4, src/spoke/interfaces/ISpoke.sol, as of 2026-08):
 ///      `{ address underlying; IHubBase hub; uint16 assetId; uint8 decimals;
@@ -28,4 +28,19 @@ interface ISpoke {
     ///      position owner itself — requires a prior call to this function made BY the position
     ///      owner (msg.sender here must be the pool). See AaveV4SpokeAssetGuard.txGuard.
     function setUserPositionManager(address positionManager, bool approve) external;
+
+    /// @notice Withdraws `amount` of `reserveId`'s underlying asset from `onBehalfOf`'s position.
+    /// @dev FNA-15: `onlyPositionManager(onBehalfOf)` short-circuits to true when
+    ///      `msg.sender == onBehalfOf` (see `_isPositionManager`'s `user == manager` check) — a
+    ///      pool withdrawing its own position needs no PositionManager registration or approval
+    ///      at all. Funds are sent to `msg.sender` (the caller), NOT to `onBehalfOf` — mirroring
+    ///      `ITakerPositionManager.withdrawOnBehalfOf`; `onBehalfOf` only identifies whose
+    ///      position is debited. See AaveV4SpokeAssetGuard._appendReserveWithdrawTxs.
+    /// @return withdrawnShares Shares debited from `onBehalfOf`'s position.
+    /// @return withdrawnAmount Underlying asset amount actually withdrawn.
+    function withdraw(
+        uint256 reserveId,
+        uint256 amount,
+        address onBehalfOf
+    ) external returns (uint256 withdrawnShares, uint256 withdrawnAmount);
 }
