@@ -12,13 +12,17 @@ Frgmnt fUSD is built with a layered security model: access control limits who ca
 
 | Role | Contract | Key Permissions |
 |------|----------|----------------|
-| `DEFAULT_ADMIN_ROLE` | TokenLogic | Configure assets, set cooldown, upgrade contract, set pool references |
-| `EMERGENCY_ROLE` | TokenLogic | Pause / unpause deposits |
-| **Manager** | Managed (via PoolManagerLogic) | Configure vault assets, set fees, set withdrawal mode, change manager |
-| **Trader** | Managed (via PoolManagerLogic) | Execute guarded vault transactions (optionally restricted from asset changes) |
-| **Factory Owner** | PoolManagerLogic | Set fee caps, register pools, update AssetHandler/Governance, set pool logic |
-| **Timelock (DAO)** | All core contracts | UUPS upgrade authority; proposed via multisig with 48-hour delay |
-| **PoolLogic** (implicit) | TokenLogic | Exclusive access to `mintFromPool()` |
+| **Owner** | PoolLogic | `renounceOwnership`/`transferOwnership`; one-time `initializeAutoCompounding()` |
+| **Manager** | Managed (via PoolManagerLogic) | Configure vault assets, set fees, set withdrawal mode, change manager; `setImmediateWithdrawEnabled`, `finalizeCashWithdraw`, `execTransaction` on PoolLogic |
+| **Trader** | Managed (via PoolManagerLogic) | Execute guarded vault transactions via `execTransaction` (cannot toggle withdrawal mode or finalize requests) |
+| `DEFAULT_ADMIN_ROLE` | TokenLogic | `grantRole`/`revokeRole`, `upgradeToAndCall`, configure assets, cooldown, deposit caps/minimums, `setPoolLogic`/`setPoolManagerLogic` |
+| **poolLogic module** (implicit) | TokenLogic | Exclusive access to uncapped `mintFromPool()`; replaceable at any time by `DEFAULT_ADMIN_ROLE` |
+| `EMERGENCY_ROLE` | TokenLogic | Pause / unpause deposits and `mintFromPool()` |
+| **Owner** | Governance | `setContractGuard`, `setAssetGuard` — the guard registry every vault transaction is checked against |
+| **factoryOwner** | PoolManagerLogic | Set fee caps, register pools, `setGovernance`/`setAssetHandler` (can swap either reference to a new instance wholesale), `setFactoryOwner` |
+| **Owner** | AssetHandler | `setChainlinkTimeout`, `setSequencerUptimeFeed`, `addAsset`/`addAssets`/`removeAsset` — price-feed configuration for every priced asset |
+| **Owner** | AaveV4SpokeManager, AaveV4TokenizationManager, MorphoVaultV2Manager | `setPoolReserves`/`setPoolVaults` — the per-pool allowlist each guard consults for onboarding new reserves/vaults |
+| **Timelock (DAO)** | Governance, AssetHandler, PoolManagerLogic.factoryOwner — including PoolManagerLogic's UUPS upgrade authority, since `_authorizeUpgrade()` there is `onlyFactoryOwner` — once `scripts/transferRoles_Governance.ts` is run (see below) | Guard/price-feed/factory-reference changes and PoolManagerLogic upgrades, once wired; proposed via multisig with a 48-hour delay. **Not yet covering** `PoolLogic.owner` or `TokenLogic.DEFAULT_ADMIN_ROLE` (incl. TokenLogic's own UUPS upgrade authority) — see Centralization Risks below |
 | **Proposers / Executors** | Timelock | Propose and execute DAO operations |
 
 ### Key Modifiers
@@ -92,9 +96,11 @@ Cooldown does not apply to `unstake()` (sfUSD → fUSD) since sfUSD itself canno
 
 ## Upgrade Security
 
-All core contracts (TokenLogic, PoolLogic, PoolManagerLogic, AssetHandler) use the UUPS proxy pattern. The `_authorizeUpgrade()` function is restricted to `DEFAULT_ADMIN_ROLE` (TokenLogic) or `onlyFactoryOwner` (PoolManagerLogic), both of which are controlled by the Timelock.
+All core contracts (TokenLogic, PoolLogic, PoolManagerLogic, AssetHandler) use the UUPS proxy pattern. The `_authorizeUpgrade()` function is restricted to `DEFAULT_ADMIN_ROLE` (TokenLogic) or `onlyFactoryOwner` (PoolManagerLogic).
 
-The Timelock enforces a minimum 48-hour delay between proposal and execution of any upgrade or admin action.
+As of the current deploy tooling, this authority is held directly by `GOVERNANCE_SAFE` — `Timelock` is deployed alongside the rest of the stack but is not yet the actual owner/admin of anything. `scripts/transferRoles_Governance.ts` (added for FNA-01) transfers `Governance.owner`, `AssetHandler.owner`, and `PoolManagerLogic.factoryOwner` to the Timelock as a final, explicit deploy step, run once initial guard/asset bootstrap setup is complete. `PoolLogic.owner()` and `TokenLogic.DEFAULT_ADMIN_ROLE` are not yet covered by that script and remain on direct `GOVERNANCE_SAFE` control — a known, open gap (see Centralization Risks below).
+
+Once the Timelock is actually wired in for a given role, it enforces a minimum 48-hour delay between proposal and execution of any change gated by that role.
 
 ---
 
@@ -145,6 +151,36 @@ Withdrawal guards (AaveLendingPoolAssetGuard, UniswapV3AssetGuard) apply per-ope
 
 ---
 
+## Centralization Risks (FNA-01)
+
+The protocol has several privileged roles by necessity — active fund management, oracle/guard configuration, and emergency response all require *someone* to hold that authority. This section documents what each role can do, what currently backs it, and what's still open.
+
+### Role authority summary
+
+See the Role Matrix above for the full per-role permission list. In short: **PoolManagerLogic.factoryOwner** and **Governance.owner** are the highest-blast-radius roles — factoryOwner can repoint a pool at an entirely different Governance or AssetHandler instance, and Governance.owner controls the guard registry every vault transaction is checked against (`setContractGuard`/`setAssetGuard`). **AssetHandler.owner** controls price-feed configuration for every priced asset. **manager**/**trader** are lower blast-radius, constrained by the guard system itself (`PoolTxExecutor` requires an approved contract or asset guard for every `execTransaction` call) and cannot bypass it. **AaveV4SpokeManager/AaveV4TokenizationManager/MorphoVaultV2Manager owners** each control one integration's reserve/vault allowlist; a malicious entry still requires manager/trader to actually interact with it, and (per FNA-20/FNA-21) removing an allowlisted entry no longer blocks existing positions from being valued or exited.
+
+### Withdrawal Centralization Risk (ERC20Guard.txGuard())
+
+`ERC20Guard.txGuard()` permits an `approve()` call whenever the spender has *any* registered contract guard (`spenderGuard != address(0) && spenderGuard != address(this)`) — it does not separately verify the spender is a vetted protocol integration. This is accurate as described: it does not independently re-derive "is this a real protocol contract," it trusts the guard registry.
+
+That registry is `Governance.contractGuards`, writable only via `Governance.setContractGuard()` (`onlyOwner`). So this isn't a distinct vulnerability requiring its own fix — it reduces to the same trust boundary as the rest of this section: whoever controls `Governance.owner` (and, transitively, `PoolManagerLogic.factoryOwner`, which can replace Governance entirely) can already authorize approvals to an arbitrary address by registering a guard for it. Mitigating the general Governance/factoryOwner centralization risk (via the Timelock wiring below) directly mitigates this specific attack path too, rather than needing a separate contract change.
+
+### Current mitigations
+
+- **Timelock exists and is now wired for the three highest-risk roles.** `scripts/transferRoles_Governance.ts` (added for FNA-01) transfers `Governance.owner`, `AssetHandler.owner`, and `PoolManagerLogic.factoryOwner` to the already-deployed `Timelock` (48-hour `minDelay`, `GOVERNANCE_SAFE` as sole proposer) as an explicit final deploy step. Before this fix, `Timelock.sol` was deployed but never actually assigned as owner/admin of anything, despite its own header comment stating that was the intent.
+- **`AssetHandler`'s owner no longer defaults to the deployer key.** `AssetHandler.initialize()` runs `__Ownable_init(msg.sender)`; `deploy_core_contracts.ts` now transfers ownership to `GOVERNANCE_SAFE` immediately after deploy, matching every other core contract.
+- **`GOVERNANCE_SAFE` is intended to be a Gnosis Safe multisig**, not a single EOA (per `Timelock.sol`'s deployment comment) — this should be confirmed operationally at actual deployment time, since nothing on-chain enforces that the address behind `GOVERNANCE_SAFE` is in fact a multisig.
+- **Manager/trader authority is already constrained in code**, not just by trust: `PoolTxExecutor` requires an approved contract or asset guard for every `execTransaction` call, and Aave/Morpho positions are protected by `afterTxGuard()` health-factor checks regardless of which role initiated the transaction.
+
+### Open gaps (not yet addressed)
+
+- **`PoolLogic.owner()` and `TokenLogic.DEFAULT_ADMIN_ROLE`** are not covered by `transferRoles_Governance.ts` and remain on direct `GOVERNANCE_SAFE` control — no timelock delay on `TokenLogic` upgrades, role grants, deposit-cap changes, or `PoolLogic`'s one-time `initializeAutoCompounding()` migration.
+- **`AaveV4SpokeManager`, `AaveV4TokenizationManager`, `MorphoVaultV2Manager`** have no deploy script in this repo yet, and their `owner` role is not included in the Timelock lock-down — their reserve/vault allowlists remain on whatever key deploys them until a deploy script and equivalent lock-down step exist.
+- **No DAO/voting module** — governance is multisig + timelock only, matching CertiK's "Short Term" recommendation tier, not yet "Long Term" (DAO) or "Permanent" (renounced ownership). Renouncing ownership is not applicable here: the protocol requires ongoing configuration (new asset/protocol integrations, oracle updates) that a fully immutable owner would prevent.
+- **No public multisig-signer / timelock-address disclosure post yet** (the "medium/blog link" CertiK's template requests) — this is an operational/communications action outside this repository, not a code change.
+
+---
+
 ## Known Risks & Mitigations
 
 | Risk | Mitigation |
@@ -167,6 +203,9 @@ Withdrawal guards (AaveLendingPoolAssetGuard, UniswapV3AssetGuard) apply per-ope
 | Aave V4 Spoke Merkl/Points supply incentives unclaimable, risking expiry after `claimUntil` (FNA-19) | `MerklRewardClaimGuard`, registered against Merkl's Distributor, lets the manager/trader claim any Merkl-sourced reward (Morpho Blue, Aave V4 Spoke, or any future Merkl-integrated protocol) via `PoolLogic.execTransaction()`. A claimed `payoutToken` lands in PoolLogic's balance but is **not automatically counted toward NAV** — like any other ERC20 the pool holds, it only contributes to `totalFundValue()` once governance separately adds it as a supported asset via `changeAssets()` (which registers `ERC20Guard` for it and gives it a price feed); until then it sits unvalued but safely custodied |
 | A price move on a finalized-but-unclaimed queued withdrawal's reserved liquidity misread as pool yield (FNA-17) | `claimCashWithdraw()` runs fee/reward accrual (`updateFeesAndRewards`) *before* releasing `reservedAssetBalance` and transferring the asset out. Accrual now sources NAV from `FundCalculationLibrary.activeTotalValueWithCompleteness()`, which excludes each asset's reserved balance before pricing it — a finalized request's fixed payout amount can no longer be double-counted as pool yield between finalize and claim. `calculateAvailableManagerFee()`'s preview uses the same reserved-excluding NAV so it always matches what accrual would actually mint |
 | Deposit/queued-withdrawal math applied to a pre-valued/complex asset guard (Aave V3/V4, Morpho Blue, Morpho Vault V2, Uniswap V3) would mint or transfer against the wrong quantity (FNA-18) | These guards' `getBalance()` already returns a fully priced USD-18 figure (see `IPreValuedAssetGuard`); their registered price is a fixed $1 identity multiplier, not a real per-share/per-token price, so `TokenLogic._deposit()`/`fusdToAssetAmount()`/`computeFinalizeAssetAmount()` treating price/decimals as literal per-raw-unit conversion factors would be fundamentally incompatible — e.g. a $2 Morpho Vault V2 share would transfer double the shares a queued withdrawal should deliver. `PoolManagerLogic._addAsset()` now reverts `PreValuedAssetNotDepositable()` if `isDeposit=true` is requested for an asset whose guard implements `IPreValuedAssetGuard`, enforced at the single authoritative point `isDeposit` is ever set (both at initial `changeAssets()` and if later flipped from `false` to `true`) — such assets remain addable as `isDeposit=false` (NAV-only, manager-directed positions), unaffected |
+| `ERC20Guard.txGuard()` approves any spender with a registered contract guard, without independently verifying the spender is a legitimate protocol integration (FNA-01, "Withdrawal Centralization Risk") | Reduces to Governance/factoryOwner centralization risk, not a distinct code-level gap — the guard registry itself (`Governance.contractGuards`) is only writable by `Governance.owner`, which (along with `PoolManagerLogic.factoryOwner`, which can replace Governance entirely) is now transferable to the Timelock via `scripts/transferRoles_Governance.ts`; see Centralization Risks above |
+| `AssetHandler.initialize()` leaves the deployer key, not `GOVERNANCE_SAFE`, as owner (FNA-01) | `deploy_core_contracts.ts` now transfers `AssetHandler` ownership to `GOVERNANCE_SAFE` immediately after deploy |
+| `Timelock.sol` deployed but never assigned as owner/admin of anything, despite its own documented intent (FNA-01) | `scripts/transferRoles_Governance.ts` transfers `Governance.owner`, `AssetHandler.owner`, and `PoolManagerLogic.factoryOwner` to the Timelock as an explicit final deploy step, run once bootstrap setup (asset/contract guard registration) is complete — see Centralization Risks above for what's still uncovered (`PoolLogic.owner`, `TokenLogic.DEFAULT_ADMIN_ROLE`, the three integration Managers) |
 
 ---
 
