@@ -96,11 +96,6 @@ describe('MorphoVaultV2AssetGuard', () => {
     expect(await guard.isAddAssetCheckGuard()).to.equal(true);
   });
 
-  it('isWithdrawableBalanceGuard returns true (FNA-07)', async () => {
-    const { guard } = await deploy();
-    expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
-  });
-
   // -----------------------------------------------------------------------
   // addAssetCheck
   // -----------------------------------------------------------------------
@@ -275,6 +270,26 @@ describe('MorphoVaultV2AssetGuard', () => {
   });
 
   // -----------------------------------------------------------------------
+  // getDecimals
+  // -----------------------------------------------------------------------
+
+  it('getDecimals always returns 18', async () => {
+    const { guard, vaultAddr } = await deploy();
+    expect(await guard.getDecimals(vaultAddr)).to.equal(18n);
+    expect(await guard.getDecimals(ethers.ZeroAddress)).to.equal(18n);
+  });
+
+  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+    const { guard } = await deploy();
+    expect(await guard.isPreValuedAssetGuard()).to.equal(true);
+  });
+
+  it('isWithdrawableBalanceGuard returns true (FNA-07)', async () => {
+    const { guard } = await deploy();
+    expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
+  });
+
+  // -----------------------------------------------------------------------
   // getWithdrawableBalance (FNA-07: liquidity-capped counterpart to getBalance(), used by
   // PoolLogic's immediate withdrawal NAV/portion sizing so one under-liquid vault position sizes
   // its own share down instead of the whole withdrawal reverting)
@@ -339,21 +354,6 @@ describe('MorphoVaultV2AssetGuard', () => {
       await vault.setBrokenMaxRedeem(true);
       expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
     });
-  });
-
-  // -----------------------------------------------------------------------
-  // getDecimals
-  // -----------------------------------------------------------------------
-
-  it('getDecimals always returns 18', async () => {
-    const { guard, vaultAddr } = await deploy();
-    expect(await guard.getDecimals(vaultAddr)).to.equal(18n);
-    expect(await guard.getDecimals(ethers.ZeroAddress)).to.equal(18n);
-  });
-
-  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
-    const { guard } = await deploy();
-    expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
 
   // -----------------------------------------------------------------------
