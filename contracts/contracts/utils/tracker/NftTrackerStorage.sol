@@ -53,6 +53,28 @@ contract NftTrackerStorage is OwnableUpgradeable {
     }
 
     // -------------------------------------------------------------------------
+    //                          OWNER CONFIGURATION
+    // -------------------------------------------------------------------------
+
+    event PoolFactorySet(address indexed oldPoolFactory, address indexed newPoolFactory);
+
+    /**
+     * @notice Corrects the poolFactory address post-deploy.
+     * @dev Auditor-flagged (CertiK): deploy_contract_guard.ts previously passed PoolLogic's
+     *      address here instead of PoolManagerLogic's — poolFactory must implement
+     *      getContractGuard(), which only PoolManagerLogic does, or checkContractGuard()
+     *      permanently reverts for every guard, exactly as it did before this fix. No
+     *      addData/removeData/addUintId/removeUintId call could ever have succeeded under
+     *      the wrong address (checkContractGuard reverts before any state write), so
+     *      correcting this cannot orphan or overwrite any previously tracked position data.
+     */
+    function setPoolFactory(address _poolFactory) external onlyOwner {
+        require(_poolFactory != address(0), "NftTrackerStorage: poolFactory=0");
+        emit PoolFactorySet(poolFactory, _poolFactory);
+        poolFactory = _poolFactory;
+    }
+
+    // -------------------------------------------------------------------------
     //                             MODIFIERS
     // -------------------------------------------------------------------------
 
