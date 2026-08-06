@@ -356,6 +356,16 @@ contract PoolLogic is
         return FundCalculationLibrary.totalValueWithCompleteness(poolManagerLogic);
     }
 
+    /// @dev FNA-17: reserved-value-excluding NAV, used for accrual (_accrueYield()) and its
+    ///      calculateAvailableManagerFee() preview — see FundCalculationLibrary's docs on why
+    ///      these two call sites specifically must not treat a finalized-but-unclaimed queued
+    ///      withdrawal's reserved liquidity as part of the pool's active value. getFundSummary()
+    ///      deliberately keeps using the gross _totalValueWithCompleteness() above — it is a
+    ///      general display figure ("everything the pool currently holds"), not an accrual input.
+    function _activeTotalValueWithCompleteness() internal view returns (uint256, bool) {
+        return FundCalculationLibrary.activeTotalValueWithCompleteness(address(this), poolManagerLogic);
+    }
+
     function _unclaimedRewards() internal view returns (uint256) {
         return totalRewardAccrued - totalRewardHarvested;
     }
@@ -437,7 +447,7 @@ contract PoolLogic is
 
     function _accrueYield() internal {
         uint256 index = _requireAutoCompoundingInitialized();
-        (uint256 totalValue, bool navComplete) = _totalValueWithCompleteness();
+        (uint256 totalValue, bool navComplete) = _activeTotalValueWithCompleteness();
         uint256 totalFusd = _managementFeeBase();
 
         (
@@ -1049,8 +1059,17 @@ contract PoolLogic is
 
         IERC20(asset).safeTransfer(msg.sender, amount);
 
-        if (accountedAssets < fusdNetForAsset) revert InvalidFundValue();
-        accountedAssets -= fusdNetForAsset;
+        // FNA-17: saturates at 0 instead of reverting. `_accrueYield()` above (via
+        // updateFeesAndRewards) now correctly excludes this request's reservedAssetBalance —
+        // not fusdNetForAsset — from active NAV before ratcheting accountedAssets. For an
+        // underwater/haircut claim (FNA-05) those two differ by design: fusdNetForAsset is the
+        // claim's full pre-haircut FUSD amount, always fully burned, while reservedAssetBalance
+        // is only the smaller, haircut asset amount actually paid out. Reverting here on that
+        // gap would make an underwater pool's haircut-affected claim permanently unclaimable
+        // whenever accrual had not independently ratcheted accountedAssets high enough to also
+        // cover it — accountedAssets flooring at 0 correctly reflects that the shortfall was
+        // never backed by anything to begin with, rather than blocking the claim.
+        accountedAssets = accountedAssets > fusdNetForAsset ? accountedAssets - fusdNetForAsset : 0;
 
         emit CashWithdrawClaimed(requestId, msg.sender, asset, amount);
     }
@@ -1236,10 +1255,12 @@ contract PoolLogic is
 
     /// @notice Get available manager fee of the pool
     /// @dev Can be used on the frontend by passing in fund value
+    /// @dev FNA-17: mirrors _accrueYield()'s reserved-value-excluding NAV, so this preview always
+    ///      matches what accrual would actually mint — see _activeTotalValueWithCompleteness().
 
     /// @return fee available manager fee of the pool (in pool tokens)
     function calculateAvailableManagerFee() public view returns (uint256 fee) {
-        (uint256 totalValue, ) = _totalValueWithCompleteness();
+        (uint256 totalValue, ) = _activeTotalValueWithCompleteness();
         uint256 totalFusd = _managementFeeBase();
 
         (

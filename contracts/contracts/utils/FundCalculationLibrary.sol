@@ -71,9 +71,14 @@ library FundCalculationLibrary {
     ///      two upgrades order-independent — the same low-level-call-with-fallback pattern this
     ///      codebase already uses for cross-contract guard-marker detection
     ///      (isPreValuedAssetGuard(), isTxTrackingGuard(), isIncompleteValuationGuard()).
+    /// @dev public (not external): also called directly, by-name, from
+    ///      activeTotalValueWithCompleteness() below, within this same library — `external`
+    ///      functions cannot be invoked internally by name, only via `this.foo()`, which for a
+    ///      delegatecall-invoked library function would incorrectly resolve `this` to the
+    ///      caller's (PoolLogic's) address rather than this library's own.
     function totalValueWithCompleteness(
         address poolManagerLogic
-    ) external view returns (uint256 total, bool complete) {
+    ) public view returns (uint256 total, bool complete) {
         (bool ok, bytes memory data) = poolManagerLogic.staticcall(
             abi.encodeWithSignature("totalFundValueWithCompleteness()")
         );
@@ -81,6 +86,46 @@ library FundCalculationLibrary {
             return abi.decode(data, (uint256, bool));
         }
         return (IPoolManagerLogic(poolManagerLogic).totalFundValue(), true);
+    }
+
+    /// @notice FNA-17: reserved-value-excluding counterpart to totalValueWithCompleteness(),
+    ///         used wherever fee/yield accrual must not treat liquidity already earmarked for a
+    ///         finalized-but-unclaimed queued withdrawal (PoolLogic.reservedAssetBalance) as
+    ///         part of the pool's active NAV.
+    /// @dev A finalized queued withdrawal fixes `r.assetAmount` (a raw token amount) once, at
+    ///      finalize time, and leaves it sitting in PoolLogic until claimed — any price movement
+    ///      on that already-fixed amount between finalize and claim belongs to the withdrawing
+    ///      user (who receives that exact token amount regardless of its price at claim time),
+    ///      not to the remaining pool. `claimCashWithdraw()` runs accrual (via
+    ///      `updateFeesAndRewards`) *before* releasing the reservation and transferring the
+    ///      asset out, so accrual must already see the reserved leg as gone, or that price
+    ///      movement gets misread as pool yield and inflates `accountedAssets` (and possibly
+    ///      manager fees) against value that leaves the pool in the same transaction.
+    ///
+    ///      Deliberately builds on `totalValueWithCompleteness()`'s existing gross figure
+    ///      (identical `total`/`complete` for a pool with no active reservations, since the
+    ///      subtraction loop below then only touches assets with a nonzero
+    ///      `reservedAssetBalance`) rather than independently re-summing every supported asset's
+    ///      guard balance — the latter would silently diverge from whatever
+    ///      `IPoolManagerLogic.totalFundValue()`'s real implementation actually returns (e.g. any
+    ///      override or non-strictly-per-asset-guard computation), where this function must
+    ///      match it exactly except for the reserved subtraction.
+    function activeTotalValueWithCompleteness(
+        address pool,
+        address poolManagerLogic
+    ) external view returns (uint256 total, bool complete) {
+        (total, complete) = totalValueWithCompleteness(poolManagerLogic);
+
+        IHasSupportedAsset.Asset[] memory assets = IHasSupportedAsset(poolManagerLogic)
+            .getSupportedAssets();
+        for (uint256 i = 0; i < assets.length; ++i) {
+            address asset = assets[i].asset;
+            uint256 reserved = IPoolLogic(pool).reservedAssetBalance(asset);
+            if (reserved == 0) continue;
+
+            uint256 reservedValue = IPoolManagerLogic(poolManagerLogic).assetValue(asset, reserved);
+            total = total > reservedValue ? total - reservedValue : 0;
+        }
     }
 
     /// @dev Encapsulates both PoolLogic._accrueYield()'s totalValue-derived computation and

@@ -153,6 +153,13 @@ contract TestFundCalculationLibrary {
         return FundCalculationLibrary.totalValueWithCompleteness(poolManagerLogic);
     }
 
+    function activeTotalValueWithCompleteness(
+        address pool,
+        address poolManagerLogic
+    ) external view returns (uint256 total, bool complete) {
+        return FundCalculationLibrary.activeTotalValueWithCompleteness(pool, poolManagerLogic);
+    }
+
     function applyClaimsHaircut(
         uint256 grossFusd,
         uint256 fundValue,

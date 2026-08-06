@@ -1254,7 +1254,16 @@ describe('PoolLogic', () => {
     expect(await pool.pendingReward(await user.getAddress())).to.be.gt(0n);
   });
 
-  it('keeps queued claims from reducing unaccounted asset value', async () => {
+  it('FNA-17: a queued claim still succeeds and floors accountedAssets at zero when accrual never recognized it (accountedAssets tracks yield/fee bookkeeping, not claim eligibility)', async () => {
+    // poolManager.totalFundValue() is deliberately never set in this test (stays at the mock's
+    // 0 default) — finalizeCashWithdraw's own haircut sizing is unaffected, since it's driven by
+    // computeFinalizeAssetAmount's own per-asset guard balance (the real 100 units minted below),
+    // not this mock shortcut. Before FNA-17, claimCashWithdraw's accrual step also read this same
+    // 0 default, so accountedAssets never ratcheted up and the fusdNetForAsset subtraction
+    // reverted. That revert protected nothing real: the asset transfer and FUSD burn are already
+    // correctly sized by finalize; accountedAssets is a fee/yield bookkeeping figure, not a claim
+    // gate. FNA-17 makes it floor at zero instead, so a bookkeeping-baseline gap no longer blocks
+    // an already-correctly-sized, legitimate claim.
     const { pool, fusd, asset, manager, user } = await loadFixture(deployPoolFixture);
     const amount = ethers.parseUnits('100', 18);
 
@@ -1269,7 +1278,14 @@ describe('PoolLogic', () => {
     await asset.mint(await pool.getAddress(), amount);
     await pool.connect(manager).finalizeCashWithdraw(event!.args.requestId);
 
-    await expectRevert(pool.connect(user).claimCashWithdraw(event!.args.requestId), 'InvalidFundValue');
+    expect(await pool.accountedAssets()).to.equal(0n);
+
+    const before = await asset.balanceOf(await user.getAddress());
+    await pool.connect(user).claimCashWithdraw(event!.args.requestId);
+    const out = (await asset.balanceOf(await user.getAddress())) - before;
+
+    expect(out).to.equal(amount);
+    expect(await pool.accountedAssets()).to.equal(0n);
   });
 
   it('rejects reverting low-level guard transactions during immediate withdrawal', async () => {
@@ -1550,6 +1566,71 @@ describe('PoolLogic', () => {
       expect(bobStored.assetAmount).to.be.lte(ethers.parseUnits('50', 18));
       const totalReserved = aliceStored.assetAmount + bobStored.assetAmount;
       expect(totalReserved).to.be.lte(await asset.balanceOf(await pool.getAddress()));
+    });
+  });
+
+  // FNA-17: a finalized-but-unclaimed queued withdrawal's reservedAssetBalance sits inside
+  // PoolLogic until claimed. claimCashWithdraw() runs accrual (via updateFeesAndRewards) before
+  // releasing the reservation and transferring the asset out, so if accrual valued the pool
+  // using the gross (reserved-inclusive) NAV, a price move on the reserved leg between finalize
+  // and claim would be misread as pool yield — inflating accountedAssets and possibly manager
+  // fees against value that leaves the pool in the same transaction. Fixed via
+  // FundCalculationLibrary.activeTotalValueWithCompleteness(), which excludes each asset's
+  // reservedAssetBalance before pricing it — see that function's own tests in
+  // UtilityLibraries.test.ts for a precise, isolated proof of the underlying arithmetic.
+  describe('FNA-17: reserved withdrawal value must not be accrued as pool yield', () => {
+    it('a price increase on a finalized-but-unclaimed reservation is not credited as yield, and the withdrawer receives exactly their fixed pre-bump amount', async () => {
+      const { pool, fusd, asset, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const assetAddr = await asset.getAddress();
+
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      // Alice and Bob each hold an equal 100,000 FUSD claim against a jointly-funded, fully
+      // solvent pool (200,000 units of `asset` at $1, matching 200,000 FUSD of combined claims).
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('100000', 18));
+      await fusd.mint(await bob.getAddress(), ethers.parseUnits('100000', 18));
+      await asset.mint(await pool.getAddress(), ethers.parseUnits('200000', 18));
+
+      const tx = await pool.connect(alice).requestCashWithdraw(
+        ethers.parseUnits('100000', 18),
+        assetAddr,
+      );
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      const requestId = event!.args.requestId;
+
+      // Fully solvent at finalize time (matches computeFinalizeAssetAmount's own NAV source,
+      // the real per-asset guard balance — not this mock's totalFundValue shortcut), so Alice's
+      // claim finalizes at full par with no FNA-05 haircut.
+      await pool.connect(manager).finalizeCashWithdraw(requestId);
+      expect(await pool.reservedAssetBalance(assetAddr)).to.equal(ethers.parseUnits('100000', 18));
+
+      // Price rises +10bps between finalize and claim ($1.0000 -> $1.0010), mirroring the
+      // auditor's PoC. totalFundValue is bumped by the matching 0.1% to reflect it for accrual.
+      await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1.001', 18), 18);
+      await poolManager.setTotalFundValue(ethers.parseUnits('200200', 18)); // 200000 * 1.001
+
+      const before = await asset.balanceOf(await alice.getAddress());
+      await pool.connect(alice).claimCashWithdraw(requestId);
+      const aliceOut = (await asset.balanceOf(await alice.getAddress())) - before;
+
+      // Alice receives exactly her fixed, pre-bump raw token amount — the price move on her
+      // already-reserved leg is neither paid to her extra nor credited to the pool as yield.
+      expect(aliceOut).to.equal(ethers.parseUnits('100000', 18));
+      expect(await pool.reservedAssetBalance(assetAddr)).to.equal(0n);
+
+      // Without the fix, accrual would have ratcheted accountedAssets to the gross,
+      // reserved-inclusive NAV (200,200) before subtracting Alice's 100,000 claim, landing at
+      // 100,200 — crediting her reserved leg's +100 appreciation as if it were pool yield. With
+      // the fix, that leg is excluded from the NAV accrual sees, so the result stays well below
+      // that (bounded here rather than pinned to an exact figure, since the residual also
+      // interacts with the pre-existing, separately-tracked finalize-claims precision gap — see
+      // FundCalculationLibrary.computeFinalizeAssetAmount's "KNOWN LIMITATION" doc comment).
+      expect(await pool.accountedAssets()).to.be.lt(ethers.parseUnits('100150', 18));
     });
   });
 
