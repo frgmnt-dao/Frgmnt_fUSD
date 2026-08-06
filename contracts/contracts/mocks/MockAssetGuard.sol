@@ -7,6 +7,7 @@ contract MockAssetGuard {
     uint256 public dec;
     bool public removeTokenCheckResult = true;
     uint256 public balance;
+    bool public preValued;
     bool public incompleteValuationGuard;
     bool public valuationComplete = true;
 
@@ -34,9 +35,20 @@ contract MockAssetGuard {
         return balance;
     }
 
+    // PoolManagerLogic.assetValue() checks for this via low-level call, mirroring
+    // isAddAssetCheckGuard() above. Defaults to false so existing tests that don't call
+    // setPreValued() keep going through the price-multiplication path unchanged.
+    function setPreValued(bool _preValued) external {
+        preValued = _preValued;
+    }
+
+    function isPreValuedAssetGuard() external view returns (bool) {
+        return preValued;
+    }
+
     // PoolManagerLogic.totalFundValueWithCompleteness() checks for this via low-level call,
-    // mirroring isAddAssetCheckGuard() above. Defaults to false so existing tests that don't
-    // call setIncompleteValuationGuard() are always treated as complete.
+    // mirroring isAddAssetCheckGuard()/isPreValuedAssetGuard() above. Defaults to false so
+    // existing tests that don't call setIncompleteValuationGuard() are always treated as complete.
     function setIncompleteValuationGuard(bool _incomplete) external {
         incompleteValuationGuard = _incomplete;
     }
