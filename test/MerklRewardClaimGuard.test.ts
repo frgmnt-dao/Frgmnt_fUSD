@@ -1,7 +1,7 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 
-describe('MorphoBlueRewardClaimGuard', () => {
+describe('MerklRewardClaimGuard', () => {
   // ABI for the Merkl claim function
   const claimIface = new ethers.Interface([
     'function claim(address[] users, address[] tokens, uint256[] amounts, bytes32[][] proofs)',
@@ -12,7 +12,7 @@ describe('MorphoBlueRewardClaimGuard', () => {
     const poolLogicAddr = poolLogicSigner.address;
 
     // Guard
-    const GuardFactory = await ethers.getContractFactory('MorphoBlueRewardClaimGuard');
+    const GuardFactory = await ethers.getContractFactory('MerklRewardClaimGuard');
     const guard = await GuardFactory.deploy();
     await guard.waitForDeployment();
 
@@ -32,7 +32,10 @@ describe('MorphoBlueRewardClaimGuard', () => {
     await poolManager.waitForDeployment();
     const poolManagerAddr = await poolManager.getAddress();
 
-    const merklAddress = ethers.Wallet.createRandom().address;
+    // Merkl's Distributor is one shared, protocol-agnostic contract per chain — this guard is
+    // registered against it once and then covers every integrated protocol's Merkl campaigns
+    // (Morpho Blue, Aave V4 Spoke, etc.), since claim() itself carries no protocol identifier.
+    const merklDistributorAddress = ethers.Wallet.createRandom().address;
 
     return {
       guard,
@@ -43,7 +46,7 @@ describe('MorphoBlueRewardClaimGuard', () => {
       poolLogicSigner,
       deployer,
       other,
-      merklAddress,
+      merklDistributorAddress,
     };
   }
 
@@ -63,28 +66,29 @@ describe('MorphoBlueRewardClaimGuard', () => {
   });
 
   it('txGuard reverts when not called by poolLogic', async () => {
-    const { guard, poolManagerAddr, merklAddress, poolLogicCallerAddr } = await deploy();
+    const { guard, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } = await deploy();
     const data = encodeValidClaim(poolLogicCallerAddr);
     await expect(
-      guard.txGuard(poolManagerAddr, merklAddress, data),
-    ).to.be.revertedWith('MorphoRewardGuard: not pool logic');
+      guard.txGuard(poolManagerAddr, merklDistributorAddress, data),
+    ).to.be.revertedWith('MerklRewardGuard: not pool logic');
   });
 
   it('txGuard reverts for invalid method selector', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklAddress, poolLogicCallerAddr } = await deploy();
+    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress } = await deploy();
     const badData = '0xdeadbeef';
     await expect(
       poolLogicCaller.callTxGuard(
         await guard.getAddress(),
         poolManagerAddr,
-        merklAddress,
+        merklDistributorAddress,
         badData,
       ),
-    ).to.be.revertedWith('MorphoRewardGuard: invalid method');
+    ).to.be.revertedWith('MerklRewardGuard: invalid method');
   });
 
   it('txGuard reverts when multiple users in claim', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklAddress, poolLogicCallerAddr } = await deploy();
+    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } =
+      await deploy();
     const token = ethers.Wallet.createRandom().address;
     const data = claimIface.encodeFunctionData('claim', [
       [poolLogicCallerAddr, ethers.Wallet.createRandom().address], // 2 users
@@ -96,14 +100,14 @@ describe('MorphoBlueRewardClaimGuard', () => {
       poolLogicCaller.callTxGuard(
         await guard.getAddress(),
         poolManagerAddr,
-        merklAddress,
+        merklDistributorAddress,
         data,
       ),
-    ).to.be.revertedWith('MorphoRewardGuard: multiple users');
+    ).to.be.revertedWith('MerklRewardGuard: multiple users');
   });
 
   it('txGuard reverts when user != poolLogic', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklAddress } = await deploy();
+    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress } = await deploy();
     const token = ethers.Wallet.createRandom().address;
     const wrongUser = ethers.Wallet.createRandom().address;
     const data = claimIface.encodeFunctionData('claim', [
@@ -116,14 +120,15 @@ describe('MorphoBlueRewardClaimGuard', () => {
       poolLogicCaller.callTxGuard(
         await guard.getAddress(),
         poolManagerAddr,
-        merklAddress,
+        merklDistributorAddress,
         data,
       ),
-    ).to.be.revertedWith('MorphoRewardGuard: user != pool');
+    ).to.be.revertedWith('MerklRewardGuard: user != pool');
   });
 
   it('txGuard succeeds for valid claim and emits event', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklAddress, poolLogicCallerAddr } = await deploy();
+    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } =
+      await deploy();
     const token = ethers.Wallet.createRandom().address;
     const amount = ethers.parseEther('100');
     const data = claimIface.encodeFunctionData('claim', [
@@ -136,36 +141,62 @@ describe('MorphoBlueRewardClaimGuard', () => {
     const [txType, isPublic] = await poolLogicCaller.callTxGuard.staticCall(
       await guard.getAddress(),
       poolManagerAddr,
-      merklAddress,
+      merklDistributorAddress,
       data,
     );
-    expect(txType).to.equal(24); // MorphoRewardClaim
+    expect(txType).to.equal(24); // MerklRewardClaim
     expect(isPublic).to.equal(false);
 
     await expect(
-      poolLogicCaller.callTxGuard(await guard.getAddress(), poolManagerAddr, merklAddress, data),
+      poolLogicCaller.callTxGuard(await guard.getAddress(), poolManagerAddr, merklDistributorAddress, data),
     )
-      .to.emit(guard, 'MorphoRewardClaimed')
+      .to.emit(guard, 'MerklRewardClaimed')
       .withArgs(poolLogicCallerAddr, token, amount);
   });
 
   it('afterTxGuard succeeds when called by poolLogic', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklAddress, poolLogicCallerAddr } = await deploy();
+    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } =
+      await deploy();
     const data = encodeValidClaim(poolLogicCallerAddr);
     await poolLogicCaller.callAfterTxGuard(
       await guard.getAddress(),
       poolManagerAddr,
-      merklAddress,
+      merklDistributorAddress,
       data,
     );
     // no revert = success
   });
 
   it('afterTxGuard reverts when not called by poolLogic', async () => {
-    const { guard, poolManagerAddr, merklAddress, poolLogicCallerAddr } = await deploy();
+    const { guard, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } = await deploy();
     const data = encodeValidClaim(poolLogicCallerAddr);
     await expect(
-      guard.afterTxGuard(poolManagerAddr, merklAddress, data),
-    ).to.be.revertedWith('MorphoRewardGuard: not pool logic');
+      guard.afterTxGuard(poolManagerAddr, merklDistributorAddress, data),
+    ).to.be.revertedWith('MerklRewardGuard: not pool logic');
+  });
+
+  // FNA-19: this guard was previously named/framed as Morpho-specific, leaving Aave V4 Spoke's
+  // Merkl/Points supply incentives unclaimable in practice even though the on-chain claim
+  // mechanism is identical regardless of which integration's activity earned the reward — the
+  // same claim() call, same guard, same validation, just against Merkl's one shared Distributor.
+  it('FNA-19: the identical claim() call is accepted regardless of which integration earned the reward', async () => {
+    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } =
+      await deploy();
+    const payoutToken = ethers.Wallet.createRandom().address; // e.g. an Aave V4 Spoke reserve's Merkl payoutToken
+    const amount = ethers.parseEther('42');
+    const data = claimIface.encodeFunctionData('claim', [
+      [poolLogicCallerAddr],
+      [payoutToken],
+      [amount],
+      [[]],
+    ]);
+
+    const [txType] = await poolLogicCaller.callTxGuard.staticCall(
+      await guard.getAddress(),
+      poolManagerAddr,
+      merklDistributorAddress,
+      data,
+    );
+    expect(txType).to.equal(24); // MerklRewardClaim — no Aave/Morpho-specific txType exists, nor is one needed
   });
 });

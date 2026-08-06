@@ -12,16 +12,26 @@ import "../../interfaces/ITransactionTypes.sol";
 import "../../interfaces/IPoolManagerLogic.sol";
 
 /* -------------------------------------------------------------------------- */
-/*                       Morpho Reward Claim Contract Guard                    */
+/*                        Merkl Reward Claim Contract Guard                   */
 /* -------------------------------------------------------------------------- */
 
-/// @title MorphoBlueRewardClaimGuard
-/// @notice Guard allowing PoolLogic to claim Morpho rewards (Merkl)
+/// @title MerklRewardClaimGuard
+/// @notice Guard allowing PoolLogic to claim Merkl-distributed incentive rewards.
 /// @dev
-///  - Claim-only guard
-///  - Rewards are transferred directly to PoolLogic
-///  - Accounting handled off-cycle by manager
-contract MorphoBlueRewardClaimGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITransactionTypes {
+///  - Claim-only guard, protocol-agnostic: Merkl's Distributor is shared infrastructure that any
+///    integrated protocol's incentive campaigns settle through (Morpho Blue, Aave V4 Spoke, and
+///    any future one), all via the same standard `claim()` interface below. This single guard
+///    instance is meant to be registered in Governance against Merkl's Distributor address —
+///    once registered, it covers every Merkl-sourced reward stream a pool is exposed to, not
+///    just one integration's. FNA-19: previously named MorphoBlueRewardClaimGuard, which read as
+///    Morpho-specific and left Aave V4 Spoke's Merkl/Points supply incentives unclaimable even
+///    though the on-chain claim mechanism this guard already validates is identical.
+///  - Rewards are transferred directly to PoolLogic by the Distributor.
+///  - A claimed `payoutToken` only counts toward fund NAV once governance separately registers
+///    it as a supported asset (`changeAssets()` + the standard `ERC20Guard`) — the same as any
+///    other ERC20 balance the pool holds; this guard does not special-case that.
+///  - Accounting handled off-cycle by manager.
+contract MerklRewardClaimGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITransactionTypes {
     bool public override isTxTrackingGuard = true;
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -39,7 +49,7 @@ contract MorphoBlueRewardClaimGuard is TxDataUtils, IGuard, ITxTrackingGuard, IT
     //////////////////////////////////////////////////////////////////////////*/
 
     /// @notice Emitted after a successful reward claim
-    event MorphoRewardClaimed(address indexed pool, address indexed token, uint256 amount);
+    event MerklRewardClaimed(address indexed pool, address indexed token, uint256 amount);
 
     /*//////////////////////////////////////////////////////////////////////////
                                   CONSTRUCTOR
@@ -62,13 +72,13 @@ contract MorphoBlueRewardClaimGuard is TxDataUtils, IGuard, ITxTrackingGuard, IT
         address poolLogic = poolManager.poolLogic();
 
         // Enforce execution only through PoolLogic
-        require(msg.sender == poolLogic, "MorphoRewardGuard: not pool logic");
+        require(msg.sender == poolLogic, "MerklRewardGuard: not pool logic");
 
         bytes4 method = getMethod(data);
         bytes memory params = getParams(data);
 
         // Only allow claim()
-        require(method == SEL_CLAIM, "MorphoRewardGuard: invalid method");
+        require(method == SEL_CLAIM, "MerklRewardGuard: invalid method");
 
         txType = _handleClaim(poolLogic, params);
 
@@ -85,7 +95,7 @@ contract MorphoBlueRewardClaimGuard is TxDataUtils, IGuard, ITxTrackingGuard, IT
         bytes calldata
     ) external view override {
         address poolLogic = IPoolManagerLogic(_poolManagerLogic).poolLogic();
-        require(msg.sender == poolLogic, "MorphoRewardGuard: not pool logic");
+        require(msg.sender == poolLogic, "MerklRewardGuard: not pool logic");
     }
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -100,10 +110,10 @@ contract MorphoBlueRewardClaimGuard is TxDataUtils, IGuard, ITxTrackingGuard, IT
         );
 
         // Rewards must be claimed only for the pool itself
-        require(users.length == 1, "MorphoRewardGuard: multiple users");
-        require(users[0] == poolLogic, "MorphoRewardGuard: user != pool");
+        require(users.length == 1, "MerklRewardGuard: multiple users");
+        require(users[0] == poolLogic, "MerklRewardGuard: user != pool");
 
-        emit MorphoRewardClaimed(users[0], tokens[0], amounts[0]);
-        return uint16(TransactionType.MorphoRewardClaim);
+        emit MerklRewardClaimed(users[0], tokens[0], amounts[0]);
+        return uint16(TransactionType.MerklRewardClaim);
     }
 }
