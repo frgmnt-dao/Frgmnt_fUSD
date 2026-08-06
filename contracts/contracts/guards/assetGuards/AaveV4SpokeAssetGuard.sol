@@ -472,6 +472,47 @@ contract AaveV4SpokeAssetGuard is
         }
     }
 
+    /// @notice FNA-21: blocks removing `token` from the pool's supportedAssets while `asset` (an
+    ///         Aave V4 Spoke registered under this guard) still holds a live, non-dust supplied
+    ///         position in a TRACKED reserve (FNA-10 — not just the actively-allowed ones) whose
+    ///         underlying is exactly `token`.
+    /// @dev A single Spoke can host reserves with *different* underlyings under one registered
+    ///      asset (see contract-level documentation), so unlike removeAssetCheck above — which
+    ///      closes the Spoke itself only once every one of its own reserves is empty — this must
+    ///      check one specific token's usage across every tracked reserve individually.
+    ///
+    ///      Deliberately fault-isolated per reserve (try/catch, skip-and-continue), unlike
+    ///      removeAssetCheck's deliberate revert-on-failure above: removeTokenCheck is invoked
+    ///      once per (token being removed) x (every guard registered in the pool), so failing
+    ///      closed here on one unresolvable reserve would block removal of every OTHER, unrelated
+    ///      token in the entire pool for as long as that one reserve stayed unresolvable — a far
+    ///      broader availability failure than removeAssetCheck's narrower blast radius (which only
+    ///      ever blocks removing this one Spoke). See AaveV4TokenizationAssetGuard.removeTokenCheck
+    ///      (FNA-20) for the identical reasoning applied to that guard's analogous gap.
+    function removeTokenCheck(
+        address pool,
+        address asset,
+        address token
+    ) public view override returns (bool) {
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
+            pool,
+            asset
+        );
+        for (uint256 i = 0; i < reserveIds.length; ++i) {
+            uint256 suppliedAssets;
+            try ISpoke(asset).getUserSuppliedAssets(reserveIds[i], pool) returns (uint256 a) {
+                suppliedAssets = a;
+            } catch {
+                continue;
+            }
+            if (suppliedAssets <= RAW_DUST_TOLERANCE) continue;
+
+            (address underlying, , , bool ok) = _getReserveUnderlyingAndHub(asset, reserveIds[i]);
+            if (ok && underlying == token) return false;
+        }
+        return true;
+    }
+
     /*//////////////////////////////////////////////////////////////
                       WITHDRAW PROCESSING
     //////////////////////////////////////////////////////////////*/
