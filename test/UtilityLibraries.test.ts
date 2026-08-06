@@ -218,6 +218,88 @@ describe('Utility libraries', () => {
       });
     });
 
+    // FNA-17: reserved-value-excluding NAV used by PoolLogic._accrueYield()/
+    // calculateAvailableManagerFee(), so a finalized-but-unclaimed queued withdrawal's reserved
+    // liquidity is never credited to the pool as yield before it leaves in the same claim.
+    describe('activeTotalValueWithCompleteness', () => {
+      it('matches the gross total (and its completeness signal) when nothing is reserved', async () => {
+        const { fund, poolManager, fundCalcPool } = await loadFixture(deployLibrariesFixture);
+        await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
+
+        const [total, complete] = await fund.activeTotalValueWithCompleteness(
+          await fundCalcPool.getAddress(),
+          await poolManager.getAddress(),
+        );
+        expect(total).to.equal(ethers.parseUnits('1000', 18));
+        expect(complete).to.equal(true);
+
+        await poolManager.setValuationComplete(false);
+        const [, completeAfter] = await fund.activeTotalValueWithCompleteness(
+          await fundCalcPool.getAddress(),
+          await poolManager.getAddress(),
+        );
+        expect(completeAfter).to.equal(false);
+      });
+
+      it("subtracts the reserved leg's current USD value from the gross total", async () => {
+        const { fund, poolManager, fundCalcPool, token18 } = await loadFixture(deployLibrariesFixture);
+        const assetAddr = await token18.getAddress();
+        await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1', 18), 18);
+        await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
+        await fundCalcPool.setReservedAssetBalance(assetAddr, ethers.parseUnits('400', 18));
+
+        const [total] = await fund.activeTotalValueWithCompleteness(
+          await fundCalcPool.getAddress(),
+          await poolManager.getAddress(),
+        );
+        expect(total).to.equal(ethers.parseUnits('600', 18)); // 1000 - 400*$1
+      });
+
+      it('floors at zero rather than underflowing if the reserved value somehow exceeds the gross total', async () => {
+        const { fund, poolManager, fundCalcPool, token18 } = await loadFixture(deployLibrariesFixture);
+        const assetAddr = await token18.getAddress();
+        await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1', 18), 18);
+        await poolManager.setTotalFundValue(ethers.parseUnits('100', 18));
+        await fundCalcPool.setReservedAssetBalance(assetAddr, ethers.parseUnits('400', 18));
+
+        const [total] = await fund.activeTotalValueWithCompleteness(
+          await fundCalcPool.getAddress(),
+          await poolManager.getAddress(),
+        );
+        expect(total).to.equal(0n);
+      });
+
+      it('FNA-17: a price increase on the reserved leg is excluded, while the same increase on the rest of the pool is still recognized', async () => {
+        const { fund, poolManager, fundCalcPool, token18 } = await loadFixture(deployLibrariesFixture);
+        const assetAddr = await token18.getAddress();
+        await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1', 18), 18);
+        await fundCalcPool.setReservedAssetBalance(assetAddr, ethers.parseUnits('100000', 18));
+
+        await poolManager.setTotalFundValue(ethers.parseUnits('200000', 18));
+        const [totalBefore] = await fund.activeTotalValueWithCompleteness(
+          await fundCalcPool.getAddress(),
+          await poolManager.getAddress(),
+        );
+        expect(totalBefore).to.equal(ethers.parseUnits('100000', 18)); // 200000 - 100000*$1
+
+        // Reserved asset's price rises +10bps ($1.0000 -> $1.0010), mirroring the auditor's PoC.
+        // Both the reserved and unreserved legs hold the same asset here, so gross NAV rises by
+        // the same relative move across the whole pool: 200000 * 1.001 = 200200.
+        await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1.001', 18), 18);
+        await poolManager.setTotalFundValue(ethers.parseUnits('200200', 18));
+
+        const [totalAfter] = await fund.activeTotalValueWithCompleteness(
+          await fundCalcPool.getAddress(),
+          await poolManager.getAddress(),
+        );
+        // Active total rose by exactly 100 (the UNRESERVED leg's own appreciation:
+        // 100000 * 0.001), not by 200 (the whole pool's) -- the reserved leg's 100 of
+        // appreciation is excluded, exactly the gap FNA-17 closes.
+        expect(totalAfter).to.equal(ethers.parseUnits('100100', 18));
+        expect(totalAfter - totalBefore).to.equal(ethers.parseUnits('100', 18));
+      });
+    });
+
     describe('computeYieldAccrual', () => {
       it('is a no-op when navComplete is false, leaving accountedAssets and lastFeeMintTime unchanged', async () => {
         const { fund } = await loadFixture(deployLibrariesFixture);
