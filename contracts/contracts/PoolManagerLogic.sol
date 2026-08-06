@@ -115,6 +115,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     error CannotAddPoolAsset();
     error InvalidAsset();
     error AssetNotSupported();
+    error PreValuedAssetNotDepositable();
 
     modifier onlyFactoryOwner() {
         require(msg.sender == factoryOwner, "only factoryOwner allowed");
@@ -357,6 +358,28 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
             );
             if (hasFn && abi.decode(data, (bool))) {
                 IAddAssetCheckGuard(guard).addAssetCheck(poolLogic, _asset);
+            }
+
+            // FNA-18: a pre-valued/complex guard's getBalance() already returns a fully priced
+            // USD-18 figure (see IPreValuedAssetGuard) — its registered price is a fixed $1
+            // identity multiplier, not a real per-share/per-token price. TokenLogic's deposit
+            // and PoolLogic's queued-withdrawal math (_convertToUSD, fusdToAssetAmount,
+            // computeFinalizeAssetAmount) all treat the registered price/decimals as literal
+            // per-raw-unit conversion factors instead, so depositing or queue-withdrawing such
+            // an asset would mint or transfer against the wrong quantity entirely whenever one
+            // unit's real value isn't exactly $1 (e.g. a Morpho Vault V2 share worth $2 would
+            // transfer double the shares a queued withdrawal should deliver). Enforced here,
+            // not just by convention, since this is the single authoritative point isDeposit is
+            // ever set — TokenLogic.configureAsset() already requires
+            // poolManagerLogic.isDepositAsset() to be true first, so blocking it here is
+            // sufficient without a second, redundant check on that separately-upgradeable proxy.
+            if (isDeposit) {
+                (bool isPreValued, bytes memory pvData) = guard.staticcall(
+                    abi.encodeWithSignature("isPreValuedAssetGuard()")
+                );
+                if (isPreValued && pvData.length == 32 && abi.decode(pvData, (bool))) {
+                    revert PreValuedAssetNotDepositable();
+                }
             }
         }
 

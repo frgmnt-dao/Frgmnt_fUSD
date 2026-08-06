@@ -687,6 +687,65 @@ describe('PoolManagerLogic', () => {
       });
     });
 
+    // FNA-18: a pre-valued/complex guard's getBalance() already returns a fully priced USD-18
+    // figure — its registered price is a fixed $1 identity multiplier, not a real
+    // per-share/per-token price. Deposit/queued-withdrawal math treats price/decimals as literal
+    // per-raw-unit conversion factors, so isDeposit=true is fundamentally incompatible with it.
+    describe('FNA-18: pre-valued asset guards cannot be configured as deposit assets', () => {
+      async function deployPreValuedAsset(fixture: any) {
+        const { mockAssetHandler, mockGovernance, tokenB } = fixture;
+        const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
+        const spokeGuard = await MockAssetGuard.deploy(18);
+        await mockGovernance.setAssetGuard(2, await spokeGuard.getAddress());
+        await mockAssetHandler.addAsset(tokenB, 2, DUMMY_AGGREGATOR);
+        await spokeGuard.setPreValued(true);
+        return spokeGuard;
+      }
+
+      it('reverts PreValuedAssetNotDepositable when isDeposit=true is requested for a new pre-valued asset', async () => {
+        const fixture = await loadFixture(setupFixture);
+        const { contract, manager, tokenB } = fixture;
+        await deployPreValuedAsset(fixture);
+
+        await expect(
+          contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: true }], []),
+        ).to.be.revertedWithCustomError(contract, 'PreValuedAssetNotDepositable');
+      });
+
+      it('still allows a pre-valued asset to be added with isDeposit=false', async () => {
+        const fixture = await loadFixture(setupFixture);
+        const { contract, manager, tokenB } = fixture;
+        await deployPreValuedAsset(fixture);
+
+        await expect(
+          contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []),
+        ).to.not.be.reverted;
+        expect(await contract.isDepositAsset(tokenB)).to.equal(false);
+      });
+
+      it('reverts when later flipping an already-supported pre-valued asset from isDeposit=false to true', async () => {
+        const fixture = await loadFixture(setupFixture);
+        const { contract, manager, tokenB } = fixture;
+        await deployPreValuedAsset(fixture);
+
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+
+        await expect(
+          contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: true }], []),
+        ).to.be.revertedWithCustomError(contract, 'PreValuedAssetNotDepositable');
+      });
+
+      it('a non-pre-valued guard asset is unaffected: isDeposit=true still succeeds normally', async () => {
+        const { contract, manager, tokenA } = await loadFixture(setupFixture);
+        // tokenA is already isDeposit=true from the fixture's own setup; re-applying it must
+        // still succeed and leave the flag true.
+        await expect(
+          contract.connect(manager).changeAssets([{ asset: tokenA, isDeposit: true }], []),
+        ).to.not.be.reverted;
+        expect(await contract.isDepositAsset(tokenA)).to.equal(true);
+      });
+    });
+
     // Regression coverage for FNA-04: a guard whose getBalance() can silently degrade to a
     // value lower than the position's true worth (e.g. on a broken price feed) must be able to
     // flag that reading as incomplete, so PoolLogic._accrueYield() can withhold yield/fee
