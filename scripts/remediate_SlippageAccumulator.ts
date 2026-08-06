@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { ethers } from 'hardhat';
 
 // --------------------------------------------------
@@ -11,49 +13,39 @@ import { ethers } from 'hardhat';
 // (0x9530E699E519D7BCF621BA7CA17e119B6865b5C7), which is the address that actually
 // implements getContractGuard()/getAssetPrice().
 //
-// Unlike NftTrackerStorage, SlippageAccumulator is NOT upgradeable — poolFactory is set
-// once in its constructor with no setter. This forces a full redeploy, which in turn
-// forces redeploying its only consumer, UniswapV3RouterGuard
-// (0xcAE75F063Ef5b432F4ad3140960c888a0795d5dc — confirmed on-chain to be currently
-// registered in Governance for the Uniswap V3 Router, 0x2626664c2603336E57B271c5C0b26F421741e481),
-// since that guard takes the SlippageAccumulator address as an immutable constructor
-// argument too.
+// SECURITY MODEL — two phases, deliberately separated (same pattern as
+// remediate_NftTrackerStorage.ts):
 //
-// Steps:
-//   1) Deploy a new SlippageAccumulator with the correct PoolManagerLogic address,
-//      reusing the exact decayTime/maxCumulativeSlippage the live (broken) instance was
-//      configured with (read directly from it below — SlippageAccumulator has no
-//      upgrade path, but decayTime/maxCumulativeSlippage ARE public and owner-settable
-//      going forward via setDecayTime/setMaxCumulativeSlippage, so reading them live
-//      rather than hardcoding preserves whatever governance may have already tuned).
-//   2) Deploy a new UniswapV3RouterGuard pointing at the new SlippageAccumulator.
-//   3) Call Governance.setContractGuard(UNISWAP_ROUTER, newGuard) to atomically swap the
-//      registration — this single call is what activates the fix; the old (broken)
-//      SlippageAccumulator/UniswapV3RouterGuard instances are simply orphaned afterward
-//      (both stateless/immutable, no cleanup call needed or possible).
+//   Phase 1 (this script, permissionless): deploys a replacement SlippageAccumulator
+//   (unlike NftTrackerStorage, it has no upgrade path — poolFactory is immutable, set
+//   once in the constructor — so a full redeploy is unavoidable) plus a replacement
+//   UniswapV3RouterGuard pointing at it, reusing the live decayTime/maxCumulativeSlippage
+//   read on-chain rather than hardcoded. Neither deploy needs any special privilege.
+//
+//   Phase 2 (owner-gated: Governance.setContractGuard()) is NOT sent directly.
+//   GOVERNANCE_SAFE is a Gnosis Safe multisig (per Timelock.sol's deployment comment), so
+//   by default this script only *builds* a Gnosis Safe Transaction Builder-compatible
+//   JSON batch (written to deployments/slippage-remediation-<chainId>.json) with that one
+//   call, to be reviewed and proposed through the Safe UI. Set SEND=1 to instead sign and
+//   broadcast directly with the local signer (fork/testnet use only).
 //
 // No data-migration risk: onlyContractGuard() gates updateSlippageImpact(), the only
-// state-changing function, and has been permanently reverting since deploy (same
-// self-referential-guard-check failure mode as NftTrackerStorage) — managerData is
-// guaranteed to hold no accumulated slippage for any pool manager.
-//
-// Precondition: Governance.owner() confirmed on-chain 2026-08-06 to still be
-// GOVERNANCE_SAFE (0xafb9B883637f72767ADf7193Bb3B8e59C02Ea05d) directly — not yet
-// Timelock-covered (see docs/security.md / scripts/transferRoles_Governance.ts), so this
-// setContractGuard call can be sent directly. Re-confirm before running in case that has
-// changed since.
+// state-changing function, and has been permanently reverting since deploy — managerData
+// is guaranteed to hold no accumulated slippage for any pool manager. The old, broken
+// SlippageAccumulator/UniswapV3RouterGuard instances are simply orphaned once this runs;
+// both are stateless/immutable, so no cleanup call exists or is needed.
 // --------------------------------------------------
 
 const POOL_MANAGER_LOGIC = '0x9530E699E519D7BCF621BA7CA17e119B6865b5C7';
 const GOVERNANCE = '0xC393A896D15641cA970F682BE62e89347941985d';
+const GOVERNANCE_SAFE = '0xafb9B883637f72767ADf7193Bb3B8e59C02Ea05d';
 const UNISWAP_ROUTER = '0x2626664c2603336E57B271c5C0b26F421741e481';
 const OLD_SLIPPAGE_ACCUMULATOR = '0xcf8aCb91851D6651649598aaE175b61ab20c70cB';
 const OLD_UNISWAP_V3_ROUTER_GUARD = '0xcAE75F063Ef5b432F4ad3140960c888a0795d5dc';
-const WRONG_POOL_FACTORY_EXPECTED = '0x704c56974e0CA4BF8ff8fe8acc51FBF1E053878E'; // PoolLogic — sanity check only
 
 async function main() {
   const [signer] = await ethers.getSigners();
-  console.log('Signer:', signer.address);
+  console.log('Signer (gas payer, deploy only — not necessarily GOVERNANCE_SAFE):', signer.address);
 
   const oldSlippage = await ethers.getContractAt(
     'SlippageAccumulator',
@@ -85,6 +77,9 @@ async function main() {
   console.log('\nReusing live config — decayTime:', decayTime.toString());
   console.log('Reusing live config — maxCumulativeSlippage:', maxCumulativeSlippage.toString());
 
+  // -----------------------------------------------------------------------
+  // Phase 1: permissionless deploys.
+  // -----------------------------------------------------------------------
   console.log('\nDeploying new SlippageAccumulator with the correct PoolManagerLogic address...');
   const SlippageAccumulator = await ethers.getContractFactory('SlippageAccumulator', signer);
   const newSlippage = await SlippageAccumulator.deploy(
@@ -93,26 +88,69 @@ async function main() {
     maxCumulativeSlippage,
   );
   await newSlippage.waitForDeployment();
-  console.log('New SlippageAccumulator deployed at:', newSlippage.target);
+  const newSlippageAddress = await newSlippage.getAddress();
+  console.log('New SlippageAccumulator deployed at:', newSlippageAddress);
+
+  console.log('\nConfirming the new SlippageAccumulator resolves prices correctly...');
+  const value = await newSlippage.assetValue(usdc, 1_000_000n);
+  console.log('  assetValue(USDC, 1 USDC) =', ethers.formatUnits(value, 18), 'USD (no revert)');
 
   console.log('\nDeploying new UniswapV3RouterGuard pointing at the new SlippageAccumulator...');
   const UniswapV3RouterGuard = await ethers.getContractFactory('UniswapV3RouterGuard', signer);
-  const newGuard = await UniswapV3RouterGuard.deploy(newSlippage.target);
+  const newGuard = await UniswapV3RouterGuard.deploy(newSlippageAddress);
   await newGuard.waitForDeployment();
-  console.log('New UniswapV3RouterGuard deployed at:', newGuard.target);
+  const newGuardAddress = await newGuard.getAddress();
+  console.log('New UniswapV3RouterGuard deployed at:', newGuardAddress);
 
-  console.log('\nRegistering the new guard in Governance...');
+  // -----------------------------------------------------------------------
+  // Phase 2: owner-gated call — build a Safe Transaction Builder batch by default.
+  // -----------------------------------------------------------------------
   const governance = await ethers.getContractAt('Governance', GOVERNANCE, signer);
-  await (await governance.setContractGuard(UNISWAP_ROUTER, newGuard.target)).wait();
+  const setContractGuardCalldata = governance.interface.encodeFunctionData('setContractGuard', [
+    UNISWAP_ROUTER,
+    newGuardAddress,
+  ]);
 
-  const registered = await governance.contractGuards(UNISWAP_ROUTER);
-  console.log('Governance.contractGuards(UNISWAP_ROUTER) now:', registered);
-  if (registered.toLowerCase() !== (await newGuard.getAddress()).toLowerCase()) {
-    throw new Error('Registration did not update as expected — investigate before relying on this fix.');
+  if (process.env.SEND === '1') {
+    console.log('\nSEND=1 set — signing and broadcasting directly with the local signer.');
+    await (await governance.setContractGuard(UNISWAP_ROUTER, newGuardAddress)).wait();
+    const registered = await governance.contractGuards(UNISWAP_ROUTER);
+    console.log('Governance.contractGuards(UNISWAP_ROUTER) now:', registered);
+    if (registered.toLowerCase() !== newGuardAddress.toLowerCase()) {
+      throw new Error('Registration did not update as expected — investigate before relying on this fix.');
+    }
+    console.log('\nDone.');
+    return;
   }
 
-  console.log('\nDone. Uniswap V3 swaps through this pool now route through the corrected guard.');
-  console.log('Old, broken instances are orphaned and can be left as-is (both stateless, no');
+  const chainId = (await ethers.provider.getNetwork()).chainId.toString();
+  const batch = {
+    version: '1.0',
+    chainId,
+    createdAt: Date.now(),
+    meta: {
+      name: 'SlippageAccumulator / UniswapV3RouterGuard remediation',
+      description:
+        `Registers the new UniswapV3RouterGuard (${newGuardAddress}, built on the ` +
+        `redeployed SlippageAccumulator ${newSlippageAddress} with the corrected ` +
+        'PoolManagerLogic address) in place of the broken one. Propose via the ' +
+        'GOVERNANCE_SAFE multisig, do not execute with a single key.',
+      txBuilderVersion: '1.16.5',
+    },
+    transactions: [{ to: GOVERNANCE, value: '0', data: setContractGuardCalldata }],
+  };
+
+  const dir = path.join(process.cwd(), 'deployments');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `slippage-remediation-${chainId}.json`);
+  fs.writeFileSync(file, JSON.stringify(batch, null, 2));
+
+  console.log('\nNo governance transaction sent (default, safest mode). Wrote a Gnosis Safe');
+  console.log('Transaction Builder batch to:', file);
+  console.log('Import it at https://app.safe.global under GOVERNANCE_SAFE ' + GOVERNANCE_SAFE);
+  console.log('and propose it for the multisig to review and sign. Set SEND=1 to instead');
+  console.log('broadcast directly with the local signer (fork/testnet use only).');
+  console.log('\nOld, broken instances are orphaned and can be left as-is (both stateless, no');
   console.log('cleanup call exists or is needed):');
   console.log('  old SlippageAccumulator :', OLD_SLIPPAGE_ACCUMULATOR);
   console.log('  old UniswapV3RouterGuard:', OLD_UNISWAP_V3_ROUTER_GUARD);
