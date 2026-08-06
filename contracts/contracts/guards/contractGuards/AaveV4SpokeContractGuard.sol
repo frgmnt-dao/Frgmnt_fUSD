@@ -59,6 +59,13 @@ import "../../interfaces/IAaveV4SpokeManager.sol";
 ///         the tracked set, not the active one) and leaving the position stuck until governance
 ///         re-adds the reserve. See AaveV4SpokeManager's contract-level documentation for why
 ///         tracked/active are governed by two separate mappings.
+///
+///      FNA-19: this guard deliberately does NOT handle Aave V4's Merkl/Points incentive claims
+///      (`useClaimRewards`-style calls) — those settle through Merkl's own Distributor contract,
+///      a separate target with its own generic `claim()` interface shared across every
+///      Merkl-integrated protocol (Morpho Blue, Aave V4 Spoke, etc.), not a Spoke or
+///      PositionManager method. See `MerklRewardClaimGuard`, registered separately in Governance
+///      against Merkl's Distributor address, for that path.
 contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     /*//////////////////////////////////////////////////////////////////////////
                                 FUNCTION SELECTORS

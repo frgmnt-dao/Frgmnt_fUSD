@@ -147,17 +147,21 @@ async function main() {
   deployments.MorphoBlueContractGuard = morphoGuard.target;
 
   // ============================================================
-  // 5) MORPHO REWARD GUARD
+  // 5) MERKL REWARD GUARD
   // ============================================================
+  // FNA-19: this guard is protocol-agnostic — Merkl's Distributor is shared infrastructure, so
+  // this single deployed instance should be registered in Governance (setContractGuard) against
+  // Merkl's Distributor address to cover every integrated protocol's Merkl campaigns (Morpho
+  // Blue, Aave V4 Spoke, and any future one), not deployed/registered separately per integration.
 
-  console.log('\n--- Deploy MorphoBlueRewardClaimGuard ---');
-  const MorphoRewardGuard = await ethers.getContractFactory('MorphoBlueRewardClaimGuard', signer);
-  const morphoReward = await MorphoRewardGuard.deploy(txOpts());
-  await morphoReward.waitForDeployment();
-  console.log('Address:', morphoReward.target);
+  console.log('\n--- Deploy MerklRewardClaimGuard ---');
+  const MerklRewardGuard = await ethers.getContractFactory('MerklRewardClaimGuard', signer);
+  const merklReward = await MerklRewardGuard.deploy(txOpts());
+  await merklReward.waitForDeployment();
+  console.log('Address:', merklReward.target);
   nonce++;
 
-  deployments.MorphoBlueRewardClaimGuard = morphoReward.target;
+  deployments.MerklRewardClaimGuard = merklReward.target;
 
   // ============================================================
   // 6) UNISWAP V3 GUARD

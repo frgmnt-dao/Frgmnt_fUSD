@@ -29,7 +29,7 @@ interface ITransactionTypes {
         MorphoWithdrawCollateral, // 21
         MorphoLiquidate, // 22
         MorphoFlashLoan, // 23
-        MorphoRewardClaim, // 24
+        MerklRewardClaim, // 24 — FNA-19: renamed from MorphoRewardClaim; numeric value unchanged. Covers any Merkl-sourced reward claim (Morpho Blue, Aave V4 Spoke, etc.), not just Morpho's.
         MorphoVaultV2Deposit, // 25
         MorphoVaultV2Mint, // 26
         MorphoVaultV2Withdraw, // 27
