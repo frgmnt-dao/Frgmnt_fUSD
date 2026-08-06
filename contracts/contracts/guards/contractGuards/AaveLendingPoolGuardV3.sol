@@ -289,18 +289,21 @@ contract AaveLendingPoolGuardV3 is TxDataUtils, IGuard, ITxTrackingGuard, ITrans
         }
 
         // -------------------------
-        // WITHDRAW: risky only if asset is collateral
+        // WITHDRAW always requires a post-check.
         // -------------------------
+        // FNA-24: previously only treated as risk-increasing when Aave still reported the
+        // withdrawn reserve as collateral-enabled *after* the withdrawal executed (afterTxGuard
+        // runs post-transaction). Aave clears that exact flag when a withdrawal empties the
+        // caller's aToken balance for the reserve, so a full withdrawal of a collateral asset
+        // observed itself as already-disabled and skipped the health-factor check entirely,
+        // while an otherwise-identical partial withdrawal of the same asset (flag still true)
+        // was correctly checked. Unconditionally checking on every withdrawal closes that gap
+        // regardless of size, and is safe for a non-collateral or debt-free withdrawal too:
+        // health factor is unaffected by withdrawing an asset that wasn't backing any debt, and
+        // getUserAccountData reports healthFactor = type(uint256).max for a pool with no debt,
+        // so the check trivially passes in both cases.
         if (method == bytes4(keccak256("withdraw(address,uint256,address)"))) {
-            (address asset, , ) = abi.decode(getParams(data), (address, uint256, address));
-
-            (, , , , , , , , bool usageAsCollateralEnabled) = IAaveProtocolDataProvider(
-                aaveProtocolDataProviderV3
-            ).getUserReserveData(asset, poolLogic);
-
-            if (usageAsCollateralEnabled) {
-                riskIncreasing = true;
-            }
+            riskIncreasing = true;
         }
 
         // -------------------------

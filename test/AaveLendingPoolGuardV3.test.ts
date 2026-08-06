@@ -408,20 +408,74 @@ describe('AaveLendingPoolGuardV3', () => {
     ).to.be.revertedWith('Frgmnt: health factor too low');
   });
 
-  it('afterTxGuard checks collateral withdrawals only when collateral is enabled', async () => {
+  it('afterTxGuard checks every withdrawal unconditionally (FNA-24)', async () => {
+    // Previously only checked when Aave's post-withdrawal collateral flag was still true,
+    // which Aave itself clears exactly when a withdrawal fully empties the position — see the
+    // dedicated FNA-24 tests below for the exact bypass this closes. Passing health factor
+    // must still succeed regardless of the (now-irrelevant) collateral flag.
     const data = aaveIface.encodeFunctionData('withdraw', [
       assetLending,
       ethers.parseEther('1'),
       poolLogicAddr,
     ]);
 
-    await aavePool.setHealthFactor(ethers.parseEther('1'));
+    await aavePool.setHealthFactor(ethers.parseEther('2'));
     await poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data);
 
-    await dataProvider.setUserReserveData(assetLending, poolLogicAddr, ethers.parseEther('1'), 0, 0);
+    await aavePool.setHealthFactor(ethers.parseEther('1'));
     await expect(
       poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data),
     ).to.be.revertedWith('Frgmnt: health factor too low');
+  });
+
+  /*──────────────────────────────────────────────────────────────
+              FNA-24: full-withdrawal health-factor bypass
+  ──────────────────────────────────────────────────────────────*/
+
+  it('FNA-24: reverts a low-health-factor withdrawal even when Aave already cleared the collateral flag (full withdrawal)', async () => {
+    // Reproduces the exact bypass: Aave clears usageAsCollateralEnabled when the withdrawn
+    // amount equals the full aToken balance, so by the time afterTxGuard runs (post-tx), the
+    // pre-fix code would read the already-cleared flag and skip the health-factor check.
+    const data = aaveIface.encodeFunctionData('withdraw', [
+      assetLending,
+      ethers.parseEther('1'),
+      poolLogicAddr,
+    ]);
+
+    await dataProvider.setUserReserveData(assetLending, poolLogicAddr, 0, 0, 0); // collateral flag false, as Aave leaves it post-full-withdrawal
+    await aavePool.setHealthFactor(ethers.parseEther('1')); // below the 1.01 boundary
+
+    await expect(
+      poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data),
+    ).to.be.revertedWith('Frgmnt: health factor too low');
+  });
+
+  it('FNA-24: succeeds withdrawing a non-collateral asset when health factor is fine', async () => {
+    const data = aaveIface.encodeFunctionData('withdraw', [
+      assetLending,
+      ethers.parseEther('1'),
+      poolLogicAddr,
+    ]);
+
+    await dataProvider.setUserReserveData(assetLending, poolLogicAddr, 0, 0, 0);
+    await aavePool.setHealthFactor(ethers.parseEther('2'));
+
+    await poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data);
+  });
+
+  it('FNA-24: succeeds withdrawing from a debt-free position regardless of health factor bookkeeping', async () => {
+    // Aave reports healthFactor = type(uint256).max for an account with no debt; the guard no
+    // longer reads getUserReserveData at all for withdraw (see the fix), so this only exercises
+    // getUserAccountData's health factor.
+    const data = aaveIface.encodeFunctionData('withdraw', [
+      assetLending,
+      ethers.parseEther('1'),
+      poolLogicAddr,
+    ]);
+
+    await aavePool.setHealthFactor(ethers.MaxUint256);
+
+    await poolLogicCaller.callAfterTxGuard(guard.target, poolManager.target, lendingPool, data);
   });
 
   it('afterTxGuard checks disabling collateral', async () => {
