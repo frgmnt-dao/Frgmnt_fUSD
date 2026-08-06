@@ -13,5 +13,8 @@ jobs:
             - name: Setup
               uses: ./.github/actions/setup
 
+            - name: Branch parity check
+              run: bash scripts/check-branch-parity.sh
+
             - name: Test
               run: npm run coverage # or npm run test
