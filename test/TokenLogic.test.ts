@@ -525,7 +525,10 @@ describe('TokenLogic (FUSD)', () => {
 
       await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
       await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
-      await usdc.connect(user).approve(await fusd.getAddress(), 1_000_000n);
+      // Large enough to cover every deposit attempted below (including the ones expected to
+      // revert on a later, USD-value-dependent check, now that the balance-delta transfer in
+      // _deposit runs ahead of those checks — see FNA-23).
+      await usdc.connect(user).approve(await fusd.getAddress(), 1_000_000n * 10n ** 6n);
 
       await expect(fusd.connect(user).deposit(usdcAddress, 100n, otherAddress)).to.be.revertedWith(
         'TokenLogic: use depositWithAuthorization',
@@ -636,6 +639,97 @@ describe('TokenLogic (FUSD)', () => {
           .connect(other)
           .depositWithAuthorization(usdcAddress, amount + 1n, userAddress, 0n, deadline, invalidSig.v, invalidSig.r, invalidSig.s),
       ).to.be.revertedWith('TokenLogic: invalid auth');
+    });
+
+    // -------------------------------------------------------------------------
+    // FNA-23: fee-on-transfer collateral must mint against what PoolLogic actually
+    // received, not the nominal amount requested.
+    // -------------------------------------------------------------------------
+    describe('fee-on-transfer collateral (FNA-23)', () => {
+      async function deployFeeAsset(deployFixtureResult: any, feeBps: number) {
+        const { admin, user, poolMgr, fusd, mockPoolLogic } = deployFixtureResult;
+        const FeeToken = await ethers.getContractFactory('MockFeeOnTransferERC20');
+        const feeToken = await FeeToken.deploy('Fee Token', 'FEE', feeBps);
+        await feeToken.waitForDeployment();
+        const feeTokenAddress = await feeToken.getAddress();
+
+        await feeToken.mint(await user.getAddress(), 1_000_000n * WAD);
+        await poolMgr.setSupportedAsset(feeTokenAddress, true, WAD, 18); // $1
+        await fusd.connect(admin).configureAsset(feeTokenAddress, true, ethers.MaxUint256);
+        await feeToken.connect(user).approve(await fusd.getAddress(), ethers.MaxUint256);
+
+        return { feeToken, feeTokenAddress, mockPoolLogic };
+      }
+
+      it('mints FUSD for the amount actually received, not the nominal amount requested', async () => {
+        const fx = await loadFixture(deployFixture);
+        const { fusd, user, mockPoolLogic } = fx;
+        const userAddress = await user.getAddress();
+
+        // 5% fee: depositing 1000 tokens delivers only 950 to PoolLogic.
+        const { feeToken, feeTokenAddress } = await deployFeeAsset(fx, 500);
+
+        const nominalAmount = 1000n * WAD;
+        const receivedAmount = 950n * WAD; // nominalAmount * (1 - 5%)
+        const expectedFusd = 950n * WAD; // $1 price, 18 decimals
+
+        await expect(fusd.connect(user).deposit(feeTokenAddress, nominalAmount, userAddress))
+          .to.emit(fusd, 'Deposited')
+          .withArgs(userAddress, feeTokenAddress, receivedAmount, expectedFusd);
+
+        expect(await fusd.balanceOf(userAddress)).to.equal(expectedFusd);
+        expect(await feeToken.balanceOf(await mockPoolLogic.getAddress())).to.equal(receivedAmount);
+        expect(await mockPoolLogic.accountedAssets()).to.equal(expectedFusd);
+      });
+
+      it('enforces minFusdAmount slippage protection against the post-fee amount', async () => {
+        const fx = await loadFixture(deployFixture);
+        const { fusd, user } = fx;
+        const userAddress = await user.getAddress();
+        const { feeTokenAddress } = await deployFeeAsset(fx, 500); // 5% fee
+
+        const nominalAmount = 1000n * WAD;
+        const receivedFusd = 950n * WAD;
+
+        // A slippage floor that only the *nominal* amount would clear is correctly rejected
+        // once the fee is accounted for.
+        await expect(
+          fusd
+            .connect(user)
+            ['deposit(address,uint256,address,uint256)'](
+              feeTokenAddress,
+              nominalAmount,
+              userAddress,
+              receivedFusd + 1n,
+            ),
+        ).to.be.revertedWith('TokenLogic: slippage');
+
+        await expect(
+          fusd
+            .connect(user)
+            ['deposit(address,uint256,address,uint256)'](
+              feeTokenAddress,
+              nominalAmount,
+              userAddress,
+              receivedFusd,
+            ),
+        ).to.not.be.reverted;
+      });
+
+      it('has no effect on a standard (zero-fee) token: received always equals the nominal amount', async () => {
+        const fx = await loadFixture(deployFixture);
+        const { fusd, user, mockPoolLogic } = fx;
+        const userAddress = await user.getAddress();
+        const { feeToken, feeTokenAddress } = await deployFeeAsset(fx, 0);
+
+        const amount = 1000n * WAD;
+        await expect(fusd.connect(user).deposit(feeTokenAddress, amount, userAddress))
+          .to.emit(fusd, 'Deposited')
+          .withArgs(userAddress, feeTokenAddress, amount, amount);
+
+        expect(await feeToken.balanceOf(await mockPoolLogic.getAddress())).to.equal(amount);
+        expect(await mockPoolLogic.accountedAssets()).to.equal(amount);
+      });
     });
   });
 

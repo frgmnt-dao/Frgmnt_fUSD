@@ -140,6 +140,7 @@ Withdrawal guards (AaveLendingPoolAssetGuard, UniswapV3AssetGuard) apply per-ope
 | Manager | Acts in good faith within protocol limits; cannot steal funds directly |
 | Timelock + DAO multisig | Multisig signers are honest and keys are secure |
 | Base sequencer | Sequencer is available; uptime feed is accurate |
+| Supported asset tokens (governance-whitelisted) | Behave as standard ERC-20: `transfer`/`transferFrom` move exactly the requested amount (no fee-on-transfer), balances don't change outside of transfers (no rebasing), and no external call/hook fires during a transfer to the pool or to the guard's underlying position (no ERC-777-style hooks) — see FNA-23 below for what's independently defended even if this assumption is violated |
 
 ---
 
@@ -158,6 +159,10 @@ Withdrawal guards (AaveLendingPoolAssetGuard, UniswapV3AssetGuard) apply per-ope
 | Collateral removal with open positions | `removeAssetCheck()` enforces zero balance before removal |
 | `forceDeallocate` griefing of a pool's Morpho Vault V2 position | Permissionless on the vault itself — any third party can already call it against any pool's position independent of Frgmnt's guards; penalty is capped on-chain by Morpho's protocol-level maximum; `MorphoVaultV2Manager.getVaultAdapterPenalties()` lets governance review each adapter's configured penalty before whitelisting a vault |
 | Single illiquid/misbehaving asset blocking fund-wide pro-rata withdrawals | `MorphoVaultV2AssetGuard.getBalance()` degrades to 0 instead of reverting on a misbehaving vault, so it can be removed via `changeAssets()` rather than bricking the pool; manager can switch to queued withdrawals (`setImmediateWithdrawEnabled(false)`) to decouple requests from requiring every asset to be liquid simultaneously |
+| Fee-on-transfer / deflationary deposit collateral (FNA-23) | `TokenLogic._deposit()` mints FUSD against the actual balance delta PoolLogic receives, not the caller-supplied nominal amount — closed in code, not just by policy; a mismatch shrinks the minted amount (and trips `minFusdAmount`/`minDepositUSD` if severe) instead of over-minting against collateral the pool never got |
+| Negatively rebasing deposit collateral | Not separately guarded, and doesn't need to be: NAV (`PoolManagerLogic.assetValue()` → `assetBalance()` → asset guard's `getBalance()`) is computed from each asset's live on-chain balance every time, never a cached deposit total, so a rebase down is reflected in fund value automatically and immediately, the same way a price drop is — governance should still avoid whitelisting such tokens, since a sudden large rebase reads identically to a price crash for anyone withdrawing at that moment |
+| ERC-777-style transfer hooks on deposit/collateral tokens (FNA-23) | `nonReentrant` (see Cooldown Protection / role matrix above) on every deposit, stake, unstake, withdraw, and claim entrypoint in `TokenLogic`, `PoolLogic`, and `FrgmntUserActions` blocks a hook from reentering any of those functions mid-transfer; a hook token could still waste its own gas trying |
+| Fee-on-transfer / rebasing / hook-bearing tokens as a Uniswap V3 position asset or a Morpho market/vault underlying | Not defensible in code the way collateral deposits are — `UniswapV3AssetGuard`'s `collect()` pays the withdrawing recipient directly from the Uniswap pool (bypassing this repo's own balance-delta accounting entirely), and Morpho's own internal share accounting is out of this protocol's control. Governance must not whitelist such a token for these integrations; `addAssetCheck()` has no on-chain way to detect the behavior ahead of time |
 
 ---
 
