@@ -7,62 +7,100 @@ import { ethers, upgrades } from 'hardhat';
 // chainId 8453) from their current `audit`-branch implementations to the
 // `feature/06-aave-v4` tip, which carries every fix from this engagement
 // (FNA-01 through FNA-24, the POOL_FACTORY fix, etc.). NftTrackerStorage is handled
-// separately by scripts/remediate_NftTrackerStorage.ts (already covers this same class
-// of upgrade for that one contract).
+// separately by scripts/remediate_NftTrackerStorage.ts.
 //
-// STORAGE-LAYOUT VERIFICATION (manual diff, audit vs feature/06-aave-v4, done before
-// writing this script):
-//   - AssetHandler:      2 new vars (eurUsdAggregator, eurUsdTimeout), appended before
-//                         the storage gap (uint256[50] -> uint256[48]). Safe.
-//   - PoolManagerLogic:  zero new state variables. __gap unchanged (uint256[20]). Safe.
-//   - PoolLogic:         3 new items (compoundedRewardIndex,
-//                         autoCompoundStartRewardPerShare, rewardIndexInitialized),
-//                         all appended strictly after every pre-existing variable.
-//                         PoolLogic has no __gap at all (never had one) — append-only
-//                         is still safe as long as nothing is reordered or removed,
-//                         which the diff confirms. Bytecode: 24248/24576 bytes (328
-//                         bytes headroom) — fits, but with very little room left for
-//                         anything further.
-//   - TokenLogic:        2 new vars (maxDepositFusdSupply, protocolFusdOutstanding),
-//                         appended before the storage gap (uint256[40] -> uint256[38]).
-//                         Safe.
-// Also re-validated automatically below via @openzeppelin/hardhat-upgrades'
-// forceImport + validateUpgrade for each contract, which is a second, independent
-// check beyond the manual diff above.
+// *** REAL, ALREADY-STAKED USER FUNDS ARE LIVE IN THIS POOL. Two of the four ***
+// *** contracts being upgraded ship a real-money migration, not just new logic. ***
+//
+// STORAGE-LAYOUT VERIFICATION (manual diff, audit vs feature/06-aave-v4):
+//   - AssetHandler:      2 new vars, appended before the storage gap (50 -> 48). Safe.
+//   - PoolManagerLogic:  zero new state variables. __gap unchanged. Safe.
+//   - PoolLogic:         3 new items, all strictly appended after every pre-existing
+//                         variable. No __gap exists on this contract at all (never
+//                         had one) — append-only ordering is what's relied on for
+//                         safety, confirmed by direct comparison. Bytecode: 328 bytes
+//                         of headroom on the current branch tip — fits, but tight.
+//   - TokenLogic:        2 new vars, appended before the storage gap (40 -> 38). Safe.
+// Also re-validated automatically per-contract below via
+// @openzeppelin/hardhat-upgrades' forceImport + validateUpgrade.
+//
+// TWO MANDATORY POST-UPGRADE MIGRATION CALLS — MUST be bundled atomically with their
+// respective proxy upgrade, not run as a separate later transaction:
+//
+//   1) PoolLogic.initializeAutoCompounding() (onlyOwner, reinitializer(2)). The new
+//      compoundedRewardIndex field starts at 0 on the live proxy (the audit-branch
+//      initialize() never set it — the field didn't exist there). Every reward-gated
+//      user action (stake/unstake/harvest, and anything that runs
+//      updateFeesAndRewards) calls _requireAutoCompoundingInitialized(), which
+//      REVERTS while compoundedRewardIndex == 0. Upgrading PoolLogic's implementation
+//      WITHOUT this call in the same transaction would leave every staker unable to
+//      unstake, harvest, or have new deposits recognized as rewards until a second,
+//      separate transaction runs it — a real, if temporary, denial-of-service on
+//      already-staked funds.
+//
+//      Migration correctness (verified analytically, see below for what this does
+//      and does not cover): initializeAutoCompounding() snapshots
+//      autoCompoundStartRewardPerShare = rewardPerShare (freezing the legacy
+//      MasterChef-style accounting at the exact pre-migration value). Each user's
+//      legacy pending reward is then folded in lazily, once, the first time they're
+//      next touched (_migrateRewardIndex, called from _updateUserReward): it computes
+//      Math.mulDiv(balanceOf(user), autoCompoundStartRewardPerShare, 1e18) - rewardDebt
+//      — algebraically identical to the audit branch's own pending-reward formula
+//      (accumulated = balance * rewardPerShare / 1e18; pending += accumulated -
+//      rewardDebt), just anchored to the frozen snapshot instead of a live-updating
+//      value. This preserves each user's already-accrued-but-uncredited legacy reward
+//      without loss or double-counting, UNDER THE ASSUMPTION that a user's balance
+//      does not change between the migration snapshot and their own first
+//      post-migration interaction other than through functions that already call
+//      _updateUserReward (stake/unstake/harvest) — the same assumption the
+//      pre-existing (audit-branch) reward-debt system already relied on for any
+//      bare ERC20 transfer of the share token, so this is not a new risk introduced
+//      by the migration itself.
+//
+//      NOT independently verified in this session: this exact migration path (old
+//      state -> upgrade -> initializeAutoCompounding -> existing user harvests) has
+//      no dedicated test in this repo (test/PoolLogicAutoCompounding.test.ts only
+//      covers the fresh-deployment path, where compoundedRewardIndex is already 1e18
+//      from initialize() and initializeAutoCompounding() is expected to revert). An
+//      attempt to rehearse this against a fork of the actual live pool state hit an
+//      environment-level Hardhat/EDR limitation forking Base (see
+//      pool_factory_mixup_live_deployment memory / commit history for that attempt).
+//      STRONGLY RECOMMENDED: dry-run this upgrade + migration against a forked/copied
+//      snapshot of the real live state (with real staker balances) before executing
+//      on mainnet, using whatever forking setup is available to the team, and confirm
+//      at least one real staker's pendingReward() before vs. after matches by hand.
+//
+//   2) TokenLogic.initializeDepositFusdCap(newCap) (onlyRole(DEFAULT_ADMIN_ROLE),
+//      reinitializer(2)). maxDepositFusdSupply starts at 0 on the live proxy, and
+//      deposit() unconditionally requires
+//      protocolFusdOutstanding + fusdAmount <= maxDepositFusdSupply — with
+//      maxDepositFusdSupply == 0, EVERY deposit would revert with "deposit cap
+//      exceeded" until this is called. NEW_DEPOSIT_FUSD_CAP below is a genuine
+//      product decision this script cannot make on its own — it is deliberately left
+//      unset. Current live fUSD totalSupply (checked 2026-08-06) is ~97,188.41 —
+//      whatever cap is chosen must be large enough to (a) cover that existing supply,
+//      since initializeDepositFusdCap() sets protocolFusdOutstanding = totalSupply()
+//      as the baseline, and (b) leave room for actual new deposits, or the pool would
+//      effectively still be deposit-frozen despite the migration having run.
 //
 // LIBRARY LINKING: PoolLogic links FundCalculationLibrary, PoolTxExecutor, and
-// CallResultChecker at compile time. FundCalculationLibrary and PoolTxExecutor both
-// changed between audit and feature/06-aave-v4 (confirmed via diff), so both are
-// redeployed here. CallResultChecker is unchanged (confirmed via diff — zero diff
-// output), so the existing deployed instance is reused rather than redeployed.
+// CallResultChecker at compile time. The first two changed since audit and are
+// redeployed here; CallResultChecker is unchanged (confirmed via diff) and reused.
 //
-// CUSTODY (confirmed on-chain 2026-08-06 — do not assume, re-verify before running):
+// CUSTODY (confirmed on-chain 2026-08-06 — re-verify before running, do not assume):
 //   - AssetHandler's ProxyAdmin, PoolManagerLogic's ProxyAdmin, and TokenLogic's
 //     DEFAULT_ADMIN_ROLE are all held by GOVERNANCE_SAFE (0xafb9B883...), which has
-//     NO CONTRACT CODE — it is a single EOA, not a multisig, despite Timelock.sol's
-//     comment describing it as one. There is currently no Safe UI to propose into for
-//     these three; the plain transaction list below must be signed and sent by
-//     whoever holds that key directly.
-//   - PoolLogic's ProxyAdmin, uniquely, has ALREADY been transferred (via
-//     transferRoles_poolLogic.ts, run previously — this script does not do it) to a
-//     genuine 3-of-4 Gnosis Safe at 0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3. That
-//     one call is written out as a proper Gnosis Safe Transaction Builder batch.
+//     NO CONTRACT CODE — a single EOA, not a multisig, despite Timelock.sol's comment
+//     describing it as one.
+//   - PoolLogic's ProxyAdmin AND its own onlyOwner (needed for
+//     initializeAutoCompounding()) are both already held by a genuine 3-of-4 Gnosis
+//     Safe at 0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3 (confirmed via
+//     getOwners()/getThreshold()) — a DAO Safe, separate from GOVERNANCE_SAFE.
 //
 // SECURITY MODEL: same two-phase separation as the other remediation scripts. Phase 1
-// (this script, permissionless — any funded key) deploys and storage-validates every
-// new implementation/library. Phase 2 (owner-gated) is never sent directly; it is
-// written to disk as review artifacts (a plain tx list for the GOVERNANCE_SAFE EOA to
-// sign, and a Safe Transaction Builder JSON for the DAO Safe multisig to propose).
-// SEND=1 opts into direct broadcast with the local signer (fork/testnet use only).
-//
-// ATOMICITY NOTE: the three GOVERNANCE_SAFE-owned upgrades (AssetHandler,
-// PoolManagerLogic, TokenLogic) have no inherent ordering dependency on each other —
-// each proxy's address is stable regardless of which implementation is currently
-// active behind the others, so cross-contract calls always resolve correctly. Still,
-// bundling all three as one batch of transactions (signed and sent together) rather
-// than upgrading them independently over time avoids any window where the live
-// deployment runs a mix of old and new logic across these contracts, which is easier
-// to reason about even though it is not strictly required for correctness here.
+// (permissionless) deploys and storage-validates every new implementation/library.
+// Phase 2 (owner-gated) is never sent directly by default — written to disk as review
+// artifacts. SEND=1 opts into direct broadcast (fork/testnet use only).
 // --------------------------------------------------
 
 const GOVERNANCE_SAFE = '0xafb9B883637f72767ADf7193Bb3B8e59C02Ea05d';
@@ -81,7 +119,22 @@ const TOKEN_LOGIC_PROXY = '0xeB82611A2B2dC9FBEAF5903d5decDf801765B759'; // UUPS,
 
 const EXISTING_CALL_RESULT_CHECKER = '0x1574827fF626CD70eE5c2AD8fA20Ccf4e999156c'; // unchanged, reused
 
+// REQUIRED — a genuine product decision, not something this script can infer. Must be
+// >= current live fUSD totalSupply (~97,188.41 as of 2026-08-06) plus however much new
+// deposit headroom is intended. Fill in before running; the script refuses to proceed
+// with this left at 0.
+const NEW_DEPOSIT_FUSD_CAP = 0n; // 18-decimal fUSD units
+
 async function main() {
+  if (NEW_DEPOSIT_FUSD_CAP === 0n) {
+    throw new Error(
+      'Set NEW_DEPOSIT_FUSD_CAP before running — this is a product decision (the new ' +
+        'TokenLogic deposit cap), not something this script can choose for you. It must ' +
+        'exceed the live fUSD totalSupply or deposits will remain effectively frozen ' +
+        'even after this migration runs.',
+    );
+  }
+
   const [signer] = await ethers.getSigners();
   console.log('Signer (gas payer, deploy only — not GOVERNANCE_SAFE or the DAO Safe):', signer.address);
 
@@ -144,10 +197,9 @@ async function main() {
 
   // -----------------------------------------------------------------------
   // Phase 1e: PoolLogic (Transparent, linked libraries) — storage-validated deploy.
-  // Note: OZ upgrades plugin's forceImport/validateUpgrade does not support
-  // externally-linked libraries the same way deployProxy does; storage-layout safety
-  // for PoolLogic was instead confirmed by the manual diff documented above, which is
-  // authoritative here (full source-level comparison, not a heuristic).
+  // OZ upgrades plugin's forceImport/validateUpgrade doesn't support externally-linked
+  // libraries the same way deployProxy does; storage-layout safety for PoolLogic rests
+  // on the manual diff documented above instead, which is authoritative here.
   // -----------------------------------------------------------------------
   console.log('\n=== PoolLogic ===');
   const PoolLogicFactory = await ethers.getContractFactory('PoolLogic', {
@@ -164,7 +216,10 @@ async function main() {
   console.log('New implementation:', newPoolLogicImplAddress);
 
   // -----------------------------------------------------------------------
-  // Phase 2: owner-gated calls — split by actual custody, not assumed.
+  // Phase 2: owner-gated calls — split by actual custody, not assumed. PoolLogic and
+  // TokenLogic bundle their mandatory migration call into the SAME transaction as the
+  // upgrade itself (via upgradeAndCall/upgradeToAndCall's data parameter), so there is
+  // no window where the proxy is upgraded but the pool is left non-functional.
   // -----------------------------------------------------------------------
   const assetHandlerAdmin = await ethers.getContractAt('ProxyAdmin', ASSET_HANDLER_PROXY_ADMIN, signer);
   const poolManagerLogicAdmin = await ethers.getContractAt(
@@ -173,6 +228,7 @@ async function main() {
     signer,
   );
   const tokenLogic = await ethers.getContractAt('TokenLogic', TOKEN_LOGIC_PROXY, signer);
+  const poolLogic = await ethers.getContractAt('PoolLogic', POOL_LOGIC_PROXY, signer);
   const poolLogicAdmin = await ethers.getContractAt('ProxyAdmin', POOL_LOGIC_PROXY_ADMIN, signer);
 
   const assetHandlerUpgradeCalldata = assetHandlerAdmin.interface.encodeFunctionData('upgradeAndCall', [
@@ -184,14 +240,24 @@ async function main() {
     'upgradeAndCall',
     [POOL_MANAGER_LOGIC_PROXY, newPoolManagerLogicImplAddress, '0x'],
   );
+
+  const initializeDepositFusdCapCalldata = tokenLogic.interface.encodeFunctionData(
+    'initializeDepositFusdCap',
+    [NEW_DEPOSIT_FUSD_CAP],
+  );
   const tokenLogicUpgradeCalldata = tokenLogic.interface.encodeFunctionData('upgradeToAndCall', [
     newTokenLogicImplAddress,
-    '0x',
+    initializeDepositFusdCapCalldata,
   ]);
+
+  const initializeAutoCompoundingCalldata = poolLogic.interface.encodeFunctionData(
+    'initializeAutoCompounding',
+    [],
+  );
   const poolLogicUpgradeCalldata = poolLogicAdmin.interface.encodeFunctionData('upgradeAndCall', [
     POOL_LOGIC_PROXY,
     newPoolLogicImplAddress,
-    '0x',
+    initializeAutoCompoundingCalldata,
   ]);
 
   if (process.env.SEND === '1') {
@@ -206,9 +272,11 @@ async function main() {
         '0x',
       )
     ).wait();
-    await (await tokenLogic.upgradeToAndCall(newTokenLogicImplAddress, '0x')).wait();
     await (
-      await poolLogicAdmin.upgradeAndCall(POOL_LOGIC_PROXY, newPoolLogicImplAddress, '0x')
+      await tokenLogic.upgradeToAndCall(newTokenLogicImplAddress, initializeDepositFusdCapCalldata)
+    ).wait();
+    await (
+      await poolLogicAdmin.upgradeAndCall(POOL_LOGIC_PROXY, newPoolLogicImplAddress, initializeAutoCompoundingCalldata)
     ).wait();
     console.log('Done.');
     return;
@@ -225,8 +293,9 @@ async function main() {
     note:
       'GOVERNANCE_SAFE is a single EOA, not a multisig — these three transactions must ' +
       'be reviewed and signed directly by whoever holds that key, e.g. via a hardware ' +
-      'wallet, in the exact order listed (order does not affect correctness here, but ' +
-      'keeps this a single reviewable session).',
+      'wallet. The TokenLogic upgrade bundles initializeDepositFusdCap(' +
+      NEW_DEPOSIT_FUSD_CAP.toString() +
+      ') atomically — deposits stay broken (0 cap) until this exact transaction lands.',
     transactions: [
       {
         description: 'AssetHandler: upgrade ProxyAdmin to new implementation',
@@ -241,7 +310,9 @@ async function main() {
         data: poolManagerLogicUpgradeCalldata,
       },
       {
-        description: 'TokenLogic: UUPS upgradeToAndCall to new implementation',
+        description:
+          'TokenLogic: UUPS upgradeToAndCall to new implementation, bundling ' +
+          `initializeDepositFusdCap(${NEW_DEPOSIT_FUSD_CAP.toString()}) atomically`,
         to: TOKEN_LOGIC_PROXY,
         value: '0',
         data: tokenLogicUpgradeCalldata,
@@ -251,8 +322,8 @@ async function main() {
   const eoaFile = path.join(dir, `core-upgrade-governance-safe-eoa-${chainId}.json`);
   fs.writeFileSync(eoaFile, JSON.stringify(eoaBatch, null, 2));
 
-  // PoolLogic's ProxyAdmin is owned by a genuine 3-of-4 Gnosis Safe — a proper Safe
-  // Transaction Builder batch is the right artifact here.
+  // PoolLogic's ProxyAdmin (and its own onlyOwner) is owned by a genuine 3-of-4 Gnosis
+  // Safe — a proper Safe Transaction Builder batch is the right artifact here.
   const safeBatch = {
     version: '1.0',
     chainId,
@@ -261,8 +332,13 @@ async function main() {
       name: 'PoolLogic upgrade (sync to feature/06-aave-v4)',
       description:
         `Upgrades PoolLogic to the new implementation (${newPoolLogicImplAddress}), ` +
-        'linked against redeployed FundCalculationLibrary and PoolTxExecutor. Propose ' +
-        'via the DAO Safe multisig, do not execute with a single key.',
+        'linked against redeployed FundCalculationLibrary and PoolTxExecutor, and ' +
+        'bundles initializeAutoCompounding() atomically — stake/unstake/harvest stay ' +
+        'broken for every staker until this exact transaction lands. Propose via the ' +
+        'DAO Safe multisig, do not execute with a single key. STRONGLY RECOMMENDED: ' +
+        'dry-run this exact transaction against a fork of live mainnet state first — ' +
+        'see this script\'s header comment for what is and is not independently ' +
+        'verified about the reward migration math.',
       txBuilderVersion: '1.16.5',
     },
     transactions: [{ to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: poolLogicUpgradeCalldata }],
@@ -275,6 +351,9 @@ async function main() {
   console.log('  DAO Safe (3-of-4 multisig) batch        :', safeFile);
   console.log('\nImport the DAO Safe batch at https://app.safe.global under', DAO_SAFE);
   console.log('The GOVERNANCE_SAFE list must be signed and sent directly by that key\'s holder.');
+  console.log('Both TokenLogic and PoolLogic transactions bundle their mandatory migration');
+  console.log('call atomically — see the script header for why, and for the PoolLogic reward');
+  console.log('migration\'s verification status before executing against real staked funds.');
   console.log('Set SEND=1 to instead broadcast all four upgrades directly with the local signer');
   console.log('(fork/testnet use only).');
 }
