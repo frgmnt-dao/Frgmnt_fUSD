@@ -518,9 +518,19 @@ contract TokenLogic is
         require(payer != address(0), "TokenLogic: zero address");
         require(to != address(0), "TokenLogic: zero address");
 
+        // FNA-23: mint against what PoolLogic actually received, not the nominal `amount`
+        // requested, so a fee-on-transfer (or otherwise nonstandard) collateral token can't mint
+        // FUSD backed by collateral the pool never got. No behavior change for a standard ERC-20,
+        // where the balance delta always equals `amount` exactly. Safe to transfer ahead of the
+        // require()s below despite `_deposit` being called from a `nonReentrant` entrypoint: any
+        // later revert unwinds this transfer along with the rest of the transaction.
+        uint256 balanceBefore = IERC20(asset).balanceOf(poolLogic);
+        IERC20(asset).safeTransferFrom(payer, poolLogic, amount);
+        uint256 received = IERC20(asset).balanceOf(poolLogic) - balanceBefore;
+
         //  Compute USD value of the deposit, normalized to 18 decimals
         uint256 priceUSD = poolManagerLogic.getAssetPrice(asset); // 18 decimals
-        fusdAmount = _convertToUSD(amount, cfg.decimals_, priceUSD);
+        fusdAmount = _convertToUSD(received, cfg.decimals_, priceUSD);
         require(fusdAmount >= minDepositUSD, "TokenLogic: below minimum deposit");
         require(
             protocolFusdOutstanding + fusdAmount <= maxDepositFusdSupply,
@@ -531,18 +541,15 @@ contract TokenLogic is
         require(fusdAmount >= minFusdAmount, "TokenLogic: slippage");
 
         // Update total deposited for this asset
-        cfg.totalDeposited_ += amount;
+        cfg.totalDeposited_ += received;
 
         // Mint FUSD to the user
         _mint(to, fusdAmount);
 
-        // Forward collateral to PoolLogic
-        IERC20(asset).safeTransferFrom(payer, poolLogic, amount);
-
         // Increment accountedAssets
         IPoolLogic(poolLogic).incrementAccountedAssets(fusdAmount);
 
-        emit Deposited(to, asset, amount, fusdAmount);
+        emit Deposited(to, asset, received, fusdAmount);
     }
 
     function _actionSender() internal view returns (address sender) {
