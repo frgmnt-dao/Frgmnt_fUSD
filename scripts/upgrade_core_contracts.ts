@@ -75,13 +75,11 @@ import { ethers, upgrades } from 'hardhat';
 //      deposit() unconditionally requires
 //      protocolFusdOutstanding + fusdAmount <= maxDepositFusdSupply — with
 //      maxDepositFusdSupply == 0, EVERY deposit would revert with "deposit cap
-//      exceeded" until this is called. NEW_DEPOSIT_FUSD_CAP below is a genuine
-//      product decision this script cannot make on its own — it is deliberately left
-//      unset. Current live fUSD totalSupply (checked 2026-08-06) is ~97,188.41 —
-//      whatever cap is chosen must be large enough to (a) cover that existing supply,
-//      since initializeDepositFusdCap() sets protocolFusdOutstanding = totalSupply()
-//      as the baseline, and (b) leave room for actual new deposits, or the pool would
-//      effectively still be deposit-frozen despite the migration having run.
+//      exceeded" until this is called. NEW_DEPOSIT_FUSD_CAP below is set to 500,000
+//      fUSD (product decision, confirmed 2026-08-06). initializeDepositFusdCap() sets
+//      protocolFusdOutstanding = totalSupply() as the baseline, so this cap must
+//      cover the current live fUSD totalSupply (~97,188.41 as of 2026-08-06) with
+//      room left for actual new deposits — 500,000 leaves ~402,811.59 of headroom.
 //
 // LIBRARY LINKING: PoolLogic links FundCalculationLibrary, PoolTxExecutor, and
 // CallResultChecker at compile time. The first two changed since audit and are
@@ -119,11 +117,9 @@ const TOKEN_LOGIC_PROXY = '0xeB82611A2B2dC9FBEAF5903d5decDf801765B759'; // UUPS,
 
 const EXISTING_CALL_RESULT_CHECKER = '0x1574827fF626CD70eE5c2AD8fA20Ccf4e999156c'; // unchanged, reused
 
-// REQUIRED — a genuine product decision, not something this script can infer. Must be
-// >= current live fUSD totalSupply (~97,188.41 as of 2026-08-06) plus however much new
-// deposit headroom is intended. Fill in before running; the script refuses to proceed
-// with this left at 0.
-const NEW_DEPOSIT_FUSD_CAP = 0n; // 18-decimal fUSD units
+// Product decision, confirmed 2026-08-06: 500,000 fUSD. Comfortably above the live
+// totalSupply (~97,188.41 as of 2026-08-06), leaving ~402,811.59 of new deposit headroom.
+const NEW_DEPOSIT_FUSD_CAP = ethers.parseUnits('500000', 18); // 18-decimal fUSD units
 
 async function main() {
   if (NEW_DEPOSIT_FUSD_CAP === 0n) {
