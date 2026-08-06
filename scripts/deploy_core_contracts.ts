@@ -188,6 +188,18 @@ async function main() {
     console.log('AssetHandler EUR/USD conversion configured');
   }
 
+  // FNA-01: AssetHandler.initialize() runs __Ownable_init(msg.sender), so without this the
+  // deployer key — not GOVERNANCE_SAFE — would end up owning price-feed configuration
+  // (setChainlinkTimeout, addAsset, removeAsset, setSequencerUptimeFeed). Matches every other
+  // core contract, which already takes GOVERNANCE_SAFE as an explicit constructor/initializer
+  // argument instead of relying on msg.sender.
+  await sendTxWithRetry(
+    () => assetHandler.transferOwnership(GOVERNANCE_SAFE, txOpts()),
+    'AssetHandler.transferOwnership',
+  );
+  nonce++;
+  console.log('AssetHandler ownership transferred to GOVERNANCE_SAFE');
+
   // ============================================================
   // 5) PoolManagerLogic (proxy + initialize with poolLogic = 0)
   // ============================================================
