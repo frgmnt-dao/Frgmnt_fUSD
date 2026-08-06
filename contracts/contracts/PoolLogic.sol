@@ -1168,6 +1168,21 @@ contract PoolLogic is
         emit AccountedAssetsIncremented(amount);
     }
 
+    /// @notice FNA-22: settles pending management/performance fee accrual using the fUSD
+    ///         supply and fund value as they stand right now, before TokenLogic applies an
+    ///         incoming deposit's effects (minting new fUSD, crediting new collateral) — see
+    ///         the FNA-13 design note above on _accrueYield() for why stake() already
+    ///         checkpoints before minting new shares; deposit previously did not.
+    /// @dev Only callable by TokenLogic (fusd), exactly like incrementAccountedAssets. Reverts
+    ///      if autocompounding isn't initialized (_accrueYield()'s own precondition, e.g. an
+    ///      already-deployed pool that hasn't called initializeAutoCompounding() yet) —
+    ///      TokenLogic calls this via a fail-open low-level call specifically so that case
+    ///      leaves deposits unaffected rather than reverting them.
+    function checkpointFeesForDeposit() external {
+        if (msg.sender != fusd) revert OnlyTokenLogic();
+        _accrueYield();
+    }
+
     // ============================================================
     // =           GUARDED TX EXECUTION (LIKE dHEDGE)              =
     // ============================================================

@@ -315,6 +315,84 @@ describe('Utility libraries', () => {
 
         expect(result.newAccountedAssets).to.equal(accountedAssets);
       });
+
+      // FNA-22: TokenLogic._deposit() previously minted new fUSD without first checkpointing
+      // management-fee accrual, so a deposit landing partway through a fee interval got
+      // retroactively taxed as if it had existed for the whole interval. PoolLogic now exposes
+      // checkpointFeesForDeposit() (calls _accrueYield() using the pre-deposit state), which
+      // TokenLogic calls before minting — see PoolLogic.test.ts's own FNA-22 coverage for that
+      // wiring. This isolates the underlying arithmetic directly against computeYieldAccrual,
+      // decoupled from the management-fee-vs-netYield clamp (applyClamp=false, matching
+      // calculateAvailableManagerFee's uncapped-preview semantics), to prove the fix
+      // mathematically rather than just observing PoolLogic's clamped, minted amounts.
+      describe('FNA-22: pre-deposit checkpoint closes the retroactive-taxation gap', () => {
+        it('checkpointing before a supply increase charges each period against the supply that actually existed for it', async () => {
+          const { fund } = await loadFixture(deployLibrariesFixture);
+          const now = BigInt(await time.latest());
+          const day = 24n * 60n * 60n;
+          const mgmtNumerator = 1_000n; // 10%/year
+          const denominator = 10_000n;
+
+          const preDepositSupply = ethers.parseUnits('1000', 18);
+          const postDepositSupply = ethers.parseUnits('101000', 18); // +100,000 deposit
+
+          // Step 1: checkpoint "now", 30 days after the prior checkpoint — settles the period
+          // BEFORE the deposit, against the smaller, correct pre-deposit supply.
+          const step1 = await fund.computeYieldAccrual(
+            preDepositSupply,
+            true,
+            preDepositSupply,
+            preDepositSupply,
+            now - 30n * day,
+            0n,
+            mgmtNumerator,
+            denominator,
+            false,
+          );
+          expect(step1.managementFee).to.equal((preDepositSupply * mgmtNumerator * (30n * day)) / denominator / (365n * day));
+
+          // Step 2: the deposit lands right after step 1's checkpoint. The next accrual (here,
+          // "now") only covers the 1 day since step 1, correctly charged against the new,
+          // larger supply for exactly the period it existed.
+          const step2 = await fund.computeYieldAccrual(
+            postDepositSupply,
+            true,
+            postDepositSupply,
+            postDepositSupply,
+            now - 1n * day,
+            0n,
+            mgmtNumerator,
+            denominator,
+            false,
+          );
+          expect(step2.managementFee).to.equal((postDepositSupply * mgmtNumerator * (1n * day)) / denominator / (365n * day));
+
+          const totalWithCheckpoint = step1.managementFee + step2.managementFee;
+
+          // Without the fix: no interim checkpoint, so the *entire* 31-day period is charged in
+          // one shot against the post-deposit supply once the deposit's mint updates
+          // totalSupply() but lastFeeMintTime never moved.
+          const withoutCheckpoint = await fund.computeYieldAccrual(
+            postDepositSupply,
+            true,
+            postDepositSupply,
+            postDepositSupply,
+            now - 31n * day,
+            0n,
+            mgmtNumerator,
+            denominator,
+            false,
+          );
+          expect(withoutCheckpoint.managementFee).to.equal(
+            (postDepositSupply * mgmtNumerator * (31n * day)) / denominator / (365n * day),
+          );
+
+          // The fix charges roughly 1/24th of what the unfixed path would have (dominated by
+          // 1 day at the large supply vs. 31 days at the large supply) — a stark, easily
+          // verified reduction, not just a marginal rounding difference.
+          expect(totalWithCheckpoint).to.be.lt(withoutCheckpoint.managementFee / 20n);
+        });
+      });
     });
 
     // FNA-05: claims-pro-rata loss-socialized sizing for immediate/queued redemptions.

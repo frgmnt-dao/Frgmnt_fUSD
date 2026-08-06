@@ -2060,4 +2060,133 @@ describe('PoolLogic', () => {
       });
     });
   });
+
+  describe('FNA-22: pre-deposit fee checkpoint', () => {
+    // _accrueYield() clamps managementFee to netYield (totalValue - accountedAssets), so every
+    // test below sets totalFundValue far ahead of any accountedAssets ratcheting these small
+    // management-fee numbers could cause, keeping netYield comfortably non-binding throughout.
+    // See UtilityLibraries.test.ts's FNA-22 coverage for a clamp-independent, exact-arithmetic
+    // proof of the underlying retroactive-taxation fix via computeYieldAccrual directly.
+    const ampleFundValue = ethers.parseUnits('10000000', 18);
+
+    it('checkpointFeesForDeposit reverts unless called by TokenLogic (fusd)', async () => {
+      const { pool, user } = await loadFixture(deployPoolFixture);
+
+      await expect(
+        pool.connect(user).checkpointFeesForDeposit(),
+      ).to.be.revertedWithCustomError(pool, 'OnlyTokenLogic');
+    });
+
+    it('checkpointFeesForDeposit settles the management fee against the pre-call fUSD supply and resets the accrual clock', async () => {
+      const { pool, fusd, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n); // 10%/year mgmt, 0% perf
+      await poolManager.setTotalFundValue(ampleFundValue);
+
+      const managerAddr = await manager.getAddress();
+      const poolAddr = await pool.getAddress();
+
+      // Establishes the fUSD supply the fee will be based on. Minted directly (not staked),
+      // since totalSupply() is what _managementFeeBase() reads regardless of who holds it.
+      await fusd.mint(await user.getAddress(), ethers.parseUnits('1000', 18));
+
+      await increaseTime(30 * 24 * 60 * 60); // dt = 30 days since pool initialization
+
+      const lastFeeMintTimeBefore = await pool.lastFeeMintTime();
+      // Management fee is minted as FUSD via ITokenLogic.mintFromPool(), not as sfUSD pool
+      // shares — check fusd's balance, not pool's.
+      const mgrBalBefore = await fusd.balanceOf(managerAddr);
+
+      const ok = await fusd.triggerCheckpointFeesForDeposit.staticCall(poolAddr);
+      expect(ok).to.equal(true);
+      const tx = await fusd.triggerCheckpointFeesForDeposit(poolAddr);
+      const receipt = await tx.wait();
+      const block = await ethers.provider.getBlock(receipt!.blockNumber);
+      const dt = block!.timestamp - Number(lastFeeMintTimeBefore);
+
+      // Management fee for ~30 days over 1000 fUSD at 10%/year, minted as new fUSD to the
+      // manager via mintFromPool (see FundCalculationLibrary.calculateManagementFee). dt is
+      // read from the actual mined block rather than assumed, since intervening transactions
+      // (the mint above) can each advance the chain's timestamp by a second or more.
+      const mgrBalAfter = await fusd.balanceOf(managerAddr);
+      const expectedFee = (ethers.parseUnits('1000', 18) * 1000n * BigInt(dt)) / 10_000n / (365n * 24n * 60n * 60n);
+      expect(mgrBalAfter - mgrBalBefore).to.equal(expectedFee);
+
+      // The accrual clock is reset, so an immediate second checkpoint (dt ~= 0) mints nothing.
+      expect(await pool.lastFeeMintTime()).to.be.gt(lastFeeMintTimeBefore);
+      const mgrBalAfterCheckpoint = mgrBalAfter;
+      await fusd.triggerCheckpointFeesForDeposit(poolAddr);
+      expect(await fusd.balanceOf(managerAddr)).to.equal(mgrBalAfterCheckpoint);
+    });
+
+    it('closes the retroactive-taxation gap: a large supply increase right before an accrual is not taxed for the whole elapsed period', async () => {
+      // Without the fix (no checkpoint call before the supply increase), the *next* accrual
+      // would charge the entire elapsed dt (here, 30 days + 1 day) against the post-increase
+      // (large) supply — see the sibling 'without the fix' test below for that exact scenario,
+      // reproduced against the same numbers for direct comparison.
+      const { pool, fusd, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n); // 10%/year mgmt, 0% perf
+      await poolManager.setTotalFundValue(ampleFundValue);
+
+      const managerAddr = await manager.getAddress();
+      const poolAddr = await pool.getAddress();
+
+      await fusd.mint(await user.getAddress(), ethers.parseUnits('1000', 18));
+      await increaseTime(30 * 24 * 60 * 60); // dt1 = 30 days
+
+      // FNA-22 fix: TokenLogic now calls this before minting a deposit's fUSD.
+      await fusd.triggerCheckpointFeesForDeposit(poolAddr);
+      const mgrBalAfterCheckpoint = await fusd.balanceOf(managerAddr);
+
+      // Simulate a large deposit arriving right after the checkpoint. Fund value is bumped
+      // further ahead of the just-ratcheted accountedAssets so netYield stays ample for the
+      // next accrual too.
+      await fusd.mint(await user2.getAddress(), ethers.parseUnits('100000', 18));
+      await poolManager.setTotalFundValue(ampleFundValue * 2n);
+      await increaseTime(1 * 24 * 60 * 60); // dt2 = 1 day
+
+      // Trigger the next accrual via a dust stake (transfers, doesn't mint/burn fUSD, so it
+      // doesn't itself perturb totalSupply()).
+      await mintAndApproveFUSD(fusd, pool, user, 1n);
+      await pool.connect(user).stake(1n);
+
+      const mgrBalAfterSecondAccrual = await fusd.balanceOf(managerAddr);
+      const secondFee = mgrBalAfterSecondAccrual - mgrBalAfterCheckpoint;
+
+      // Only dt2 (1 day) should be charged, not dt1+dt2 (31 days) — bound it well under what
+      // 31 days over the post-deposit supply would be (~858 fUSD) and consistent with ~1 day
+      // over the ~1000-101000 fUSD supply that existed for that day (~27.7 fUSD).
+      expect(secondFee).to.be.lt(ethers.parseUnits('50', 18));
+      expect(secondFee).to.be.gt(0n);
+    });
+
+    it('[reference] without the fix, the same scenario retroactively taxes the whole elapsed period at the post-deposit supply', async () => {
+      // Same inputs as the previous test, but skipping the pre-deposit checkpoint entirely —
+      // reproduces exactly what TokenLogic._deposit() did before FNA-22, and what any other
+      // future caller that forgets to checkpoint before minting fUSD would still do.
+      const { pool, fusd, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n);
+      await poolManager.setTotalFundValue(ampleFundValue);
+
+      const managerAddr = await manager.getAddress();
+
+      await fusd.mint(await user.getAddress(), ethers.parseUnits('1000', 18));
+      await increaseTime(30 * 24 * 60 * 60); // dt1 = 30 days, no checkpoint taken here
+
+      const mgrBalBefore = await fusd.balanceOf(managerAddr);
+
+      // Large deposit arrives with no checkpoint first.
+      await fusd.mint(await user2.getAddress(), ethers.parseUnits('100000', 18));
+      await increaseTime(1 * 24 * 60 * 60); // dt2 = 1 day
+
+      await mintAndApproveFUSD(fusd, pool, user, 1n);
+      await pool.connect(user).stake(1n); // first-ever accrual: dt = dt1 + dt2 = 31 days
+
+      const fee = (await fusd.balanceOf(managerAddr)) - mgrBalBefore;
+
+      // ~101000 fUSD * 10%/year * 31/365 =~ 858 fUSD — the entire 31-day period charged
+      // against a supply that only existed for the final day. Far above the fixed scenario's
+      // bound (< 50 fUSD), demonstrating the exact gap FNA-22 closes.
+      expect(fee).to.be.gt(ethers.parseUnits('800', 18));
+    });
+  });
 });
