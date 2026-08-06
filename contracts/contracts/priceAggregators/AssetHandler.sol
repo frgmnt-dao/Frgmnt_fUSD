@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 
 import "../interfaces/IAggregatorV3Interface.sol";
 import "../interfaces/IAssetHandler.sol";
@@ -9,7 +10,9 @@ import "../interfaces/IAssetHandler.sol";
 /**
  * @title Frgmnt Asset Price Feeds
  * @notice Central registry mapping assets → (type, Chainlink USD aggregator).
- * @dev    Returns USD prices scaled to 18 decimals.
+ * @dev    Returns asset prices scaled to 18 decimals. If an EUR/USD conversion
+ *         feed is configured, USD asset feeds are converted into EUR-denominated
+ *         prices while preserving the existing getUSDPrice ABI.
  * @custom:project Frgmnt
  */
 // Asset types:
@@ -34,11 +37,19 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
     /// @notice Chainlink L2 sequencer uptime feed (for Base, OP, Arbitrum, etc.)
     IAggregatorV3Interface public sequencerUptimeFeed;
 
+    /// @notice Optional Chainlink EUR/USD feed used to convert USD asset prices into EUR.
+    IAggregatorV3Interface public eurUsdAggregator;
+
+    /// @notice Freshness window for the EUR/USD conversion feed.
+    uint256 public eurUsdTimeout;
+
     /// @notice Grace period after sequencer recovery (seconds)
     uint256 public constant SEQUENCER_GRACE_PERIOD = 3600; // 1 hour
 
     event SetChainlinkTimeout(address indexed asset, uint256 chainlinkTimeout_);
     event SetSequencerUptimeFeed(address indexed feed);
+    event SetEurUsdAggregator(address indexed feed, uint256 timeout);
+    event ClearedEurUsdAggregator(address indexed oldFeed);
 
     /// @notice Initializer (upgradeable pattern).
     /// @param assets Array of assets to add on deploy.
@@ -51,9 +62,15 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
     /* ─────────────────────────────── Views ─────────────────────────────── */
 
     /**
-     * @notice Returns the Chainlink USD price for `asset`, scaled to 1e18.
+     * @notice Returns the asset price scaled to 1e18.
      * @dev    Handles aggregators with variable decimals by querying `decimals()`
-     *         and normalizing to 18 decimals.
+     *         and normalizing to 18 decimals. Asset feeds are expected to be
+     *         USD-denominated. When eurUsdAggregator is configured, this function
+     *         converts asset/USD into asset/EUR using:
+     *
+     *         assetEUR = assetUSD / EURUSD
+     *
+     *         Example: USDC/USD = 1.00, EUR/USD = 1.08 => USDC/EUR = 0.9259.
      *         Reverts if:
      *           - no aggregator registered
      *           - data is stale beyond `chainlinkTimeout`
@@ -71,27 +88,55 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
         uint256 timeout = chainlinkTimeouts[asset];
         require(timeout != 0, "Frgmnt: timeout not set");
 
-        // NEW: handle variable decimals (e.g. 8, 18, etc.)
-        uint8 _decimals = IAggregatorV3Interface(aggregator).decimals();
+        price = _readAggregatorPrice(
+            IAggregatorV3Interface(aggregator),
+            timeout,
+            "Frgmnt: CL price expired",
+            "Frgmnt: price fetch failed",
+            "Frgmnt: price not available"
+        );
+
+        if (address(eurUsdAggregator) != address(0)) {
+            uint256 eurUsdPrice = _readAggregatorPrice(
+                eurUsdAggregator,
+                eurUsdTimeout,
+                "Frgmnt: EUR/USD price expired",
+                "Frgmnt: EUR/USD fetch failed",
+                "Frgmnt: EUR/USD price not available"
+            );
+            price = Math.mulDiv(price, 1e18, eurUsdPrice);
+        }
+        require(price > 0, "Frgmnt: price not available");
+    }
+
+    function _readAggregatorPrice(
+        IAggregatorV3Interface aggregator,
+        uint256 timeout,
+        string memory staleError,
+        string memory fetchError,
+        string memory unavailableError
+    ) internal view returns (uint256 price) {
+        require(timeout != 0, "Frgmnt: timeout not set");
+
+        uint8 _decimals = aggregator.decimals();
         require(_decimals <= 18, "Frgmnt: unsupported decimals");
 
-        try IAggregatorV3Interface(aggregator).latestRoundData() returns (
+        try aggregator.latestRoundData() returns (
             uint80,
             int256 _price,
             uint256,
             uint256 updatedAt,
             uint80
         ) {
-            // freshness check
-            require(updatedAt + timeout >= block.timestamp, "Frgmnt: CL price expired");
+            require(updatedAt + timeout >= block.timestamp, staleError);
             if (_price > 0) {
-                // Normalize to 18 decimals: price * 10^(18 - decimals)
                 price = uint256(_price) * (10 ** (18 - _decimals));
             }
         } catch {
-            revert("Frgmnt: price fetch failed");
+            revert(fetchError);
         }
-        require(price > 0, "Frgmnt: price not available");
+
+        require(price > 0, unavailableError);
     }
 
     /// @notice Checks sequencer status and grace period
@@ -133,6 +178,24 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
         emit SetSequencerUptimeFeed(feed);
     }
 
+    /// @notice Configure the EUR/USD conversion feed.
+    /// @dev The feed must return USD per 1 EUR, as standard Chainlink EUR/USD feeds do.
+    function setEurUsdAggregator(address feed, uint256 timeout) external onlyOwner {
+        require(feed != address(0), "Frgmnt: eur/usd feed=0");
+        require(timeout != 0, "Frgmnt: eur/usd timeout=0");
+        eurUsdAggregator = IAggregatorV3Interface(feed);
+        eurUsdTimeout = timeout;
+        emit SetEurUsdAggregator(feed, timeout);
+    }
+
+    /// @notice Disable USD-to-EUR conversion and return raw USD asset-feed prices again.
+    function clearEurUsdAggregator() external onlyOwner {
+        address oldFeed = address(eurUsdAggregator);
+        eurUsdAggregator = IAggregatorV3Interface(address(0));
+        eurUsdTimeout = 0;
+        emit ClearedEurUsdAggregator(oldFeed);
+    }
+
     /// @notice Register a single asset with type and Chainlink aggregator.
     function addAsset(
         address asset,
@@ -164,5 +227,5 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
     }
 
     // Storage gap for future upgrades.
-    uint256[50] private __gap;
+    uint256[48] private __gap;
 }

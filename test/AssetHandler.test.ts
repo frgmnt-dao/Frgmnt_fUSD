@@ -176,6 +176,103 @@ describe('AssetHandler', () => {
       const price = await handler.getUSDPrice(asset);
       expect(price).to.equal(10n * 10n ** 18n);
     });
+
+    it('converts USD asset feeds into EUR prices when EUR/USD is configured', async () => {
+      const handler = await deployAssetHandler();
+      const assetFeed = await deployMockAggregator();
+      const eurUsdFeed = await deployMockAggregator();
+      const asset = ethers.Wallet.createRandom().address;
+      const now = BigInt((await ethers.provider.getBlock('latest'))!.timestamp);
+
+      await assetFeed.setData(1n * 10n ** 8n, now, false); // asset/USD = 1.00
+      await eurUsdFeed.setData(125_000_000n, now, false); // EUR/USD = 1.25
+
+      await handler.initialize([{ asset, assetType: 2n, aggregator: await assetFeed.getAddress() }]);
+      await handler.setChainlinkTimeout(asset, ASSET_TIMEOUT);
+      await handler.setEurUsdAggregator(await eurUsdFeed.getAddress(), ASSET_TIMEOUT);
+
+      expect(await handler.getUSDPrice(asset)).to.equal(8n * 10n ** 17n);
+    });
+
+    it('can disable EUR conversion and return raw USD feed prices again', async () => {
+      const handler = await deployAssetHandler();
+      const assetFeed = await deployMockAggregator();
+      const eurUsdFeed = await deployMockAggregator();
+      const asset = ethers.Wallet.createRandom().address;
+      const now = BigInt((await ethers.provider.getBlock('latest'))!.timestamp);
+
+      await assetFeed.setData(1n * 10n ** 8n, now, false);
+      await eurUsdFeed.setData(125_000_000n, now, false);
+
+      await handler.initialize([{ asset, assetType: 2n, aggregator: await assetFeed.getAddress() }]);
+      await handler.setChainlinkTimeout(asset, ASSET_TIMEOUT);
+      await handler.setEurUsdAggregator(await eurUsdFeed.getAddress(), ASSET_TIMEOUT);
+      expect(await handler.getUSDPrice(asset)).to.equal(8n * 10n ** 17n);
+
+      await expect(handler.clearEurUsdAggregator())
+        .to.emit(handler, 'ClearedEurUsdAggregator')
+        .withArgs(await eurUsdFeed.getAddress());
+      expect(await handler.eurUsdAggregator()).to.equal(ethers.ZeroAddress);
+      expect(await handler.eurUsdTimeout()).to.equal(0n);
+      expect(await handler.getUSDPrice(asset)).to.equal(1n * 10n ** 18n);
+    });
+
+    it('reverts when the EUR/USD conversion feed is stale or unavailable', async () => {
+      const handler = await deployAssetHandler();
+      const assetFeed = await deployMockAggregator();
+      const eurUsdFeed = await deployMockAggregator();
+      const asset = ethers.Wallet.createRandom().address;
+      const now = BigInt((await ethers.provider.getBlock('latest'))!.timestamp);
+
+      await assetFeed.setData(1n * 10n ** 8n, now, false);
+      await eurUsdFeed.setData(125_000_000n, 1n, false);
+
+      await handler.initialize([{ asset, assetType: 2n, aggregator: await assetFeed.getAddress() }]);
+      await handler.setChainlinkTimeout(asset, ASSET_TIMEOUT);
+      await handler.setEurUsdAggregator(await eurUsdFeed.getAddress(), ASSET_TIMEOUT);
+
+      await expect(handler.getUSDPrice(asset)).to.be.revertedWith('Frgmnt: EUR/USD price expired');
+
+      await eurUsdFeed.setData(0n, now, false);
+      await expect(handler.getUSDPrice(asset)).to.be.revertedWith(
+        'Frgmnt: EUR/USD price not available',
+      );
+    });
+  });
+
+  describe('setEurUsdAggregator', () => {
+    it('allows owner to configure the EUR/USD feed and emits event', async () => {
+      const handler = await deployAssetHandler();
+      const feed = await deployMockAggregator();
+      await handler.initialize([]);
+
+      await expect(handler.setEurUsdAggregator(await feed.getAddress(), ASSET_TIMEOUT))
+        .to.emit(handler, 'SetEurUsdAggregator')
+        .withArgs(await feed.getAddress(), ASSET_TIMEOUT);
+
+      expect(await handler.eurUsdAggregator()).to.equal(await feed.getAddress());
+      expect(await handler.eurUsdTimeout()).to.equal(ASSET_TIMEOUT);
+    });
+
+    it('reverts on bad EUR/USD config and non-owner calls', async () => {
+      const [, other] = await ethers.getSigners();
+      const handler = await deployAssetHandler();
+      const feed = await deployMockAggregator();
+      await handler.initialize([]);
+
+      await expect(handler.setEurUsdAggregator(ethers.ZeroAddress, ASSET_TIMEOUT)).to.be.revertedWith(
+        'Frgmnt: eur/usd feed=0',
+      );
+      await expect(handler.setEurUsdAggregator(await feed.getAddress(), 0n)).to.be.revertedWith(
+        'Frgmnt: eur/usd timeout=0',
+      );
+      await expect(handler.connect(other).setEurUsdAggregator(await feed.getAddress(), ASSET_TIMEOUT))
+        .to.be.revertedWithCustomError(handler, 'OwnableUnauthorizedAccount')
+        .withArgs(other.address);
+      await expect(handler.connect(other).clearEurUsdAggregator())
+        .to.be.revertedWithCustomError(handler, 'OwnableUnauthorizedAccount')
+        .withArgs(other.address);
+    });
   });
 
   describe('setChainlinkTimeout', () => {
