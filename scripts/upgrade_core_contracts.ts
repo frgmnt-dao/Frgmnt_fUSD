@@ -85,15 +85,22 @@ import { ethers, upgrades } from 'hardhat';
 // CallResultChecker at compile time. The first two changed since audit and are
 // redeployed here; CallResultChecker is unchanged (confirmed via diff) and reused.
 //
-// CUSTODY (confirmed on-chain 2026-08-06 — re-verify before running, do not assume):
-//   - AssetHandler's ProxyAdmin, PoolManagerLogic's ProxyAdmin, and TokenLogic's
-//     DEFAULT_ADMIN_ROLE are all held by GOVERNANCE_SAFE (0xafb9B883...), which has
+// CUSTODY (confirmed on-chain 2026-08-07 via direct eth_call against each contract —
+// re-verify before running, do not assume; an earlier draft of this comment incorrectly
+// assumed TokenLogic's admin role followed GOVERNANCE_SAFE, corrected here):
+//   - AssetHandler's ProxyAdmin and PoolManagerLogic's ProxyAdmin (and PoolManagerLogic's
+//     own factoryOwner/owner()) are held by GOVERNANCE_SAFE (0xafb9B883...), which has
 //     NO CONTRACT CODE — a single EOA, not a multisig, despite Timelock.sol's comment
 //     describing it as one.
-//   - PoolLogic's ProxyAdmin AND its own onlyOwner (needed for
-//     initializeAutoCompounding()) are both already held by a genuine 3-of-4 Gnosis
-//     Safe at 0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3 (confirmed via
-//     getOwners()/getThreshold()) — a DAO Safe, separate from GOVERNANCE_SAFE.
+//   - PoolLogic's ProxyAdmin, its own onlyOwner (needed for initializeAutoCompounding()),
+//     AND TokenLogic's DEFAULT_ADMIN_ROLE (needed for the UUPS upgrade itself and for
+//     initializeDepositFusdCap()) are ALL already held by a genuine 3-of-4 Gnosis Safe at
+//     0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3 (confirmed via getOwners()/getThreshold(),
+//     and via TokenLogic.hasRole(DEFAULT_ADMIN_ROLE, <address>) directly — true for this
+//     Safe, false for GOVERNANCE_SAFE) — a DAO Safe, separate from GOVERNANCE_SAFE. So
+//     TokenLogic's upgrade transaction belongs in the DAO Safe batch below, not the
+//     GOVERNANCE_SAFE list, even though GOVERNANCE_SAFE holds every other TokenLogic-
+//     adjacent role in this stack.
 //
 // SECURITY MODEL: same two-phase separation as the other remediation scripts. Phase 1
 // (permissionless) deploys and storage-validates every new implementation/library.
@@ -283,15 +290,15 @@ async function main() {
   fs.mkdirSync(dir, { recursive: true });
 
   // GOVERNANCE_SAFE is an EOA — a Safe Transaction Builder JSON is not the right
-  // artifact for it. Write a plain, human-reviewable transaction list instead.
+  // artifact for it. Write a plain, human-reviewable transaction list instead. Only
+  // AssetHandler and PoolManagerLogic belong here — TokenLogic's DEFAULT_ADMIN_ROLE is
+  // held by the DAO Safe, not GOVERNANCE_SAFE (confirmed on-chain, see CUSTODY above).
   const eoaBatch = {
     signer: GOVERNANCE_SAFE,
     note:
-      'GOVERNANCE_SAFE is a single EOA, not a multisig — these three transactions must ' +
+      'GOVERNANCE_SAFE is a single EOA, not a multisig — these two transactions must ' +
       'be reviewed and signed directly by whoever holds that key, e.g. via a hardware ' +
-      'wallet. The TokenLogic upgrade bundles initializeDepositFusdCap(' +
-      NEW_DEPOSIT_FUSD_CAP.toString() +
-      ') atomically — deposits stay broken (0 cap) until this exact transaction lands.',
+      'wallet.',
     transactions: [
       {
         description: 'AssetHandler: upgrade ProxyAdmin to new implementation',
@@ -305,46 +312,45 @@ async function main() {
         value: '0',
         data: poolManagerLogicUpgradeCalldata,
       },
-      {
-        description:
-          'TokenLogic: UUPS upgradeToAndCall to new implementation, bundling ' +
-          `initializeDepositFusdCap(${NEW_DEPOSIT_FUSD_CAP.toString()}) atomically`,
-        to: TOKEN_LOGIC_PROXY,
-        value: '0',
-        data: tokenLogicUpgradeCalldata,
-      },
     ],
   };
   const eoaFile = path.join(dir, `core-upgrade-governance-safe-eoa-${chainId}.json`);
   fs.writeFileSync(eoaFile, JSON.stringify(eoaBatch, null, 2));
 
-  // PoolLogic's ProxyAdmin (and its own onlyOwner) is owned by a genuine 3-of-4 Gnosis
-  // Safe — a proper Safe Transaction Builder batch is the right artifact here.
+  // PoolLogic's ProxyAdmin/onlyOwner AND TokenLogic's DEFAULT_ADMIN_ROLE are both held
+  // by the same genuine 3-of-4 Gnosis Safe — one Safe Transaction Builder batch covers
+  // both upgrades, since both need that Safe's approval anyway.
   const safeBatch = {
     version: '1.0',
     chainId,
     createdAt: Date.now(),
     meta: {
-      name: 'PoolLogic upgrade (sync to feature/06-aave-v4)',
+      name: 'PoolLogic + TokenLogic upgrade (sync to feature/06-aave-v4)',
       description:
         `Upgrades PoolLogic to the new implementation (${newPoolLogicImplAddress}), ` +
-        'linked against redeployed FundCalculationLibrary and PoolTxExecutor, and ' +
-        'bundles initializeAutoCompounding() atomically — stake/unstake/harvest stay ' +
-        'broken for every staker until this exact transaction lands. Propose via the ' +
-        'DAO Safe multisig, do not execute with a single key. STRONGLY RECOMMENDED: ' +
-        'dry-run this exact transaction against a fork of live mainnet state first — ' +
-        'see this script\'s header comment for what is and is not independently ' +
-        'verified about the reward migration math.',
+        'linked against redeployed FundCalculationLibrary and PoolTxExecutor, bundling ' +
+        'initializeAutoCompounding() atomically — stake/unstake/harvest stay broken for ' +
+        'every staker until this transaction lands. Also upgrades TokenLogic to the new ' +
+        `implementation (${newTokenLogicImplAddress}), bundling ` +
+        `initializeDepositFusdCap(${NEW_DEPOSIT_FUSD_CAP.toString()}) atomically — ` +
+        'deposits stay broken (0 cap) until this transaction lands. Propose via the DAO ' +
+        'Safe multisig, do not execute with a single key. STRONGLY RECOMMENDED: dry-run ' +
+        'both transactions against a fork of live mainnet state first — see this ' +
+        'script\'s header comment for what is and is not independently verified about ' +
+        'the reward migration math.',
       txBuilderVersion: '1.16.5',
     },
-    transactions: [{ to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: poolLogicUpgradeCalldata }],
+    transactions: [
+      { to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: poolLogicUpgradeCalldata },
+      { to: TOKEN_LOGIC_PROXY, value: '0', data: tokenLogicUpgradeCalldata },
+    ],
   };
   const safeFile = path.join(dir, `core-upgrade-dao-safe-${chainId}.json`);
   fs.writeFileSync(safeFile, JSON.stringify(safeBatch, null, 2));
 
   console.log('\nNo transactions sent (default, safest mode). Wrote two review artifacts:');
-  console.log('  GOVERNANCE_SAFE (EOA) transaction list :', eoaFile);
-  console.log('  DAO Safe (3-of-4 multisig) batch        :', safeFile);
+  console.log('  GOVERNANCE_SAFE (EOA) transaction list          :', eoaFile);
+  console.log('  DAO Safe (3-of-4 multisig) batch (PoolLogic + TokenLogic):', safeFile);
   console.log('\nImport the DAO Safe batch at https://app.safe.global under', DAO_SAFE);
   console.log('The GOVERNANCE_SAFE list must be signed and sent directly by that key\'s holder.');
   console.log('Both TokenLogic and PoolLogic transactions bundle their mandatory migration');
