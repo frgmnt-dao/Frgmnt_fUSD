@@ -62,4 +62,9 @@ contract TestTokenLogic is ERC20 {
         );
         require(ok, "incrementAccountedAssets failed");
     }
+
+    // ---- Test helper: simulate TokenLogic's FNA-22 pre-deposit fee checkpoint on pool ----
+    function triggerCheckpointFeesForDeposit(address pool) external returns (bool ok) {
+        (ok, ) = pool.call(abi.encodeWithSignature("checkpointFeesForDeposit()"));
+    }
 }

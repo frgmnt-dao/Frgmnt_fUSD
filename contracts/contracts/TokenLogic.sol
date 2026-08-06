@@ -518,6 +518,18 @@ contract TokenLogic is
         require(payer != address(0), "TokenLogic: zero address");
         require(to != address(0), "TokenLogic: zero address");
 
+        // FNA-22: settle any pending management/performance fee accrual using the fUSD supply
+        // and fund value as they stand right now — before this deposit's collateral arrives or
+        // its fUSD is minted. Must run first, ahead of every other effect below: checkpointing
+        // after the collateral transfer (but before the fUSD mint) would already misread the
+        // just-arrived collateral as unrecognized yield and wrongly charge performance fee on
+        // it; checkpointing even later would let this deposit's new fUSD supply be retroactively
+        // taxed for the entire elapsed period since the last checkpoint. Fails open (tolerates
+        // revert — e.g. a not-yet-upgraded PoolLogic, or a pool that hasn't called
+        // initializeAutoCompounding() yet): same behavior as before this fix in that case, not a
+        // new revert surface for deposits.
+        poolLogic.call(abi.encodeWithSignature("checkpointFeesForDeposit()"));
+
         // FNA-23: mint against what PoolLogic actually received, not the nominal `amount`
         // requested, so a fee-on-transfer (or otherwise nonstandard) collateral token can't mint
         // FUSD backed by collateral the pool never got. No behavior change for a standard ERC-20,
