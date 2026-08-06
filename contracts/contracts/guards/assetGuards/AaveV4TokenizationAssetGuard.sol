@@ -13,6 +13,7 @@ import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
+import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
@@ -38,6 +39,7 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 contract AaveV4TokenizationAssetGuard is
     ClosedAssetGuard,
     IAddAssetCheckGuard,
+    IPreValuedAssetGuard,
     IIncompleteValuationGuard
 {
     /*//////////////////////////////////////////////////////////////
@@ -225,6 +227,12 @@ contract AaveV4TokenizationAssetGuard is
     ///      `getBalance()` (price=1e18, decimals=18).
     function getDecimals(address) external pure override returns (uint256) {
         return 18;
+    }
+
+    /// @notice getBalance() already returns a fully priced base-currency value; see
+    ///         IPreValuedAssetGuard and PoolManagerLogic.assetValue().
+    function isPreValuedAssetGuard() external pure override returns (bool) {
+        return true;
     }
 
     /// @notice See IIncompleteValuationGuard.

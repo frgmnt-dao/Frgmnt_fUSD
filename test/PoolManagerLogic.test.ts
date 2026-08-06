@@ -627,6 +627,66 @@ describe('PoolManagerLogic', () => {
       expect(await contract.totalFundValue()).to.equal(0n);
     });
 
+    // Regression coverage for FNA-02: a pre-valued guard's getBalance() already returns a
+    // fully priced, base-currency value (e.g. computed from underlying prices under an
+    // AssetHandler EUR/USD conversion). assetValue() must return that figure directly, not
+    // multiply it again by the guard's own registered pseudo-asset price — doing so silently
+    // double-applies whatever conversion is already baked into getBalance().
+    describe('pre-valued guards (FNA-02)', () => {
+      it('assetValue(address,uint256) returns the amount unchanged for a pre-valued guard, ignoring the registered price entirely', async () => {
+        const { contract, guard, mockAssetHandler, tokenB } = await loadFixture(setupFixture);
+
+        await guard.setPreValued(true);
+        // Deliberately skew tokenB's registered price away from the "no-op" 1e18 a pre-valued
+        // pseudo-asset is normally paired with — simulating AssetHandler's EUR/USD conversion
+        // corrupting what should be an inert $1 feed.
+        await mockAssetHandler.setPrice(tokenB, ethers.parseUnits('0.8', 18));
+
+        const preValuedAmount = ethers.parseUnits('1000', 18);
+        const value = await contract['assetValue(address,uint256)'](tokenB, preValuedAmount);
+
+        expect(value).to.equal(preValuedAmount);
+      });
+
+      it('assetValue(address) end-to-end: totalFundValue reflects getBalance() directly for a pre-valued asset, not a second price multiplication', async () => {
+        const { contract, manager, mockAssetHandler, mockGovernance, tokenB } =
+          await loadFixture(setupFixture);
+
+        // Dedicated guard for tokenB, registered under its own asset type (2), isolated from
+        // tokenA's assetType=1 guard — tokenA and tokenB must not share mutable mock state.
+        const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
+        const spokeGuard = await MockAssetGuard.deploy(18);
+        await mockGovernance.setAssetGuard(2, await spokeGuard.getAddress());
+        await mockAssetHandler.addAsset(tokenB, 2, DUMMY_AGGREGATOR);
+
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+
+        await spokeGuard.setPreValued(true);
+        const preValuedBalance = ethers.parseUnits('800', 18); // e.g. 1000 USDC already converted to EUR once
+        await spokeGuard.setBalance(preValuedBalance);
+        // Skewed pseudo-asset price, as above — must be ignored for a pre-valued guard.
+        await mockAssetHandler.setPrice(tokenB, ethers.parseUnits('0.8', 18));
+
+        // tokenA (assetType=1, default MockAssetGuard: balance=0) contributes nothing, so this
+        // isolates tokenB's contribution precisely.
+        expect(await contract.assetBalance(tokenB)).to.equal(preValuedBalance);
+        expect(await contract['assetValue(address)'](tokenB)).to.equal(preValuedBalance);
+        expect(await contract.totalFundValue()).to.equal(preValuedBalance);
+      });
+
+      it('a non-pre-valued guard is unaffected: assetValue still multiplies by the registered price as before', async () => {
+        const { contract, guard, tokenA } = await loadFixture(setupFixture);
+
+        // Sanity: default MockAssetGuard state is not pre-valued.
+        expect(await guard.isPreValuedAssetGuard()).to.equal(false);
+
+        const amount = 10n ** 6n; // 1 token, 6 decimals
+        const value = await contract['assetValue(address,uint256)'](tokenA, amount);
+        // tokenA price = 1e18 → 1e18 * 1e6 / 1e6 = 1e18, same as the pre-existing behavior.
+        expect(value).to.equal(10n ** 18n);
+      });
+    });
+
     // FNA-18: a pre-valued/complex guard's getBalance() already returns a fully priced USD-18
     // figure — its registered price is a fixed $1 identity multiplier, not a real
     // per-share/per-token price. Deposit/queued-withdrawal math treats price/decimals as literal

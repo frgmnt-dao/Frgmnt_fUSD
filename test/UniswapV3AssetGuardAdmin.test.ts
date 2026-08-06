@@ -179,6 +179,11 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
     expect(await guard.getDecimals(ethers.ZeroAddress)).to.equal(18n);
   });
 
+  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+    const { guard } = await deployReal();
+    expect(await guard.isPreValuedAssetGuard()).to.equal(true);
+  });
+
   it('removeTokenCheck returns true when no owned NFTs', async () => {
     const { guard } = await deployReal();
 

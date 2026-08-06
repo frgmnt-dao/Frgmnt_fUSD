@@ -5,6 +5,7 @@ import { IAaveProtocolDataProvider } from "../../interfaces/aave/IAaveProtocolDa
 import { IAaveV3Pool } from "../../interfaces/aave/v3/IAaveV3Pool.sol";
 import { IAaveLendingPoolAssetGuard } from "../../interfaces/guards/IAaveLendingPoolAssetGuard.sol";
 import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckingGuard.sol";
+import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
@@ -17,7 +18,8 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 contract AaveV3LendingPoolAssetGuard is
     ClosedAssetGuard,
     IAaveLendingPoolAssetGuard,
-    ISlippageCheckingGuard
+    ISlippageCheckingGuard,
+    IPreValuedAssetGuard
 {
     // -----------------------------
     // Constants
@@ -198,6 +200,12 @@ contract AaveV3LendingPoolAssetGuard is
 
     function getDecimals(address) external pure override returns (uint256) {
         return 18;
+    }
+
+    /// @notice getBalance() already returns a fully priced base-currency value; see
+    ///         IPreValuedAssetGuard and PoolManagerLogic.assetValue().
+    function isPreValuedAssetGuard() external pure override returns (bool) {
+        return true;
     }
 
     function removeAssetCheck(address pool, address) public view override {

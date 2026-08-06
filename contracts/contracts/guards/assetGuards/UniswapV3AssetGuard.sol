@@ -11,6 +11,7 @@ import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 
 import "./ERC20Guard.sol";
+import "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import "../../interfaces/IHasAssetInfo.sol";
 import "../../interfaces/IPoolLogic.sol";
 import "../../interfaces/IERC20Extended.sol";
@@ -26,7 +27,7 @@ import "../../utils/UniswapV3PriceLibrary.sol";
  *      - Skips NFTs whose underlying tokens are not valid assets in the factory.
  * @custom:project Frgmnt
  */
-contract UniswapV3AssetGuard is ERC20Guard {
+contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
     struct UniV3PoolParams {
         address token0;
         address token1;
@@ -200,6 +201,12 @@ contract UniswapV3AssetGuard is ERC20Guard {
     /// @notice Synthetic valuation uses 18 decimals.
     function getDecimals(address) external pure override returns (uint256 decimals) {
         decimals = 18;
+    }
+
+    /// @notice getBalance() already returns a fully priced base-currency value; see
+    ///         IPreValuedAssetGuard and PoolManagerLogic.assetValue().
+    function isPreValuedAssetGuard() external pure override returns (bool) {
+        return true;
     }
 
     function removeTokenCheck(

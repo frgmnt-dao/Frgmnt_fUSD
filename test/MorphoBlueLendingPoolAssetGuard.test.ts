@@ -252,6 +252,11 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     expect(await guard.getDecimals(ethers.ZeroAddress)).to.equal(18n);
   });
 
+  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+    const { guard } = await deploy();
+    expect(await guard.isPreValuedAssetGuard()).to.equal(true);
+  });
+
   // Helper: deploy a pool mock that satisfies IPoolLogic.factory()
   async function deployPool() {
     const PLF = await ethers.getContractFactory('MockPoolLogicWithManager');

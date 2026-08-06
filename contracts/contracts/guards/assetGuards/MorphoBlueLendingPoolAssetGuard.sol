@@ -19,6 +19,7 @@ import { SharesMathLib } from "@morpho-org/morpho-blue/src/libraries/SharesMathL
 import { IMorphoBlueLendingPoolAssetGuard } from "../../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckingGuard.sol";
+import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IMorphoBlueManager } from "../../interfaces/IMorphoBlueManager.sol";
 import { IERC20Extended } from "../../interfaces/IERC20Extended.sol";
@@ -45,7 +46,8 @@ contract MorphoBlueLendingPoolAssetGuard is
     Ownable,
     ClosedAssetGuard,
     IMorphoBlueLendingPoolAssetGuard,
-    ISlippageCheckingGuard
+    ISlippageCheckingGuard,
+    IPreValuedAssetGuard
 {
     /// @notice Required flag for dHEDGE slippage guards
     bool public override isSlippageCheckingGuard = true;
@@ -220,6 +222,12 @@ contract MorphoBlueLendingPoolAssetGuard is
     /// @notice AssetGuard balances are always expressed in USD (18 decimals)
     function getDecimals(address) external pure override returns (uint256) {
         return 18;
+    }
+
+    /// @notice getBalance() already returns a fully priced base-currency value; see
+    ///         IPreValuedAssetGuard and PoolManagerLogic.assetValue().
+    function isPreValuedAssetGuard() external pure override returns (bool) {
+        return true;
     }
 
     /// @notice Ensures no open Morpho position exists before asset removal
