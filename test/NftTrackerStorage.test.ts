@@ -64,6 +64,61 @@ describe('NftTrackerStorage', function () {
   });
 
   // ---------------------------------------------------------------------------
+  // setPoolFactory (auditor-flagged: deploy_contract_guard.ts previously passed
+  // PoolLogic's address instead of PoolManagerLogic's, permanently breaking
+  // checkContractGuard for every guard; this is the in-place fix for an
+  // already-deployed proxy)
+  // ---------------------------------------------------------------------------
+
+  it('allows owner to correct poolFactory and emits PoolFactorySet', async function () {
+    const MockGuardInfo = await ethers.getContractFactory('MockGuardInfo');
+    const newMockGuardInfo = await MockGuardInfo.deploy();
+    await newMockGuardInfo.setContractGuard(guardedContract, guard.address);
+
+    await expect(nftTracker.connect(deployer).setPoolFactory(newMockGuardInfo.target))
+      .to.emit(nftTracker, 'PoolFactorySet')
+      .withArgs(mockGuardInfo.target, newMockGuardInfo.target);
+
+    expect(await nftTracker.poolFactory()).to.equal(newMockGuardInfo.target);
+  });
+
+  it('checkContractGuard resolves against the corrected poolFactory after setPoolFactory', async function () {
+    // Simulates the real bug: start with a "poolFactory" that doesn't implement
+    // getContractGuard at all (like PoolLogic didn't) — every guarded call reverts.
+    const NotAFactory = await ethers.getContractFactory('MockERC20'); // any contract lacking getContractGuard
+    const notAFactory = await NotAFactory.deploy(18);
+
+    const NftTrackerStorage = await ethers.getContractFactory('NftTrackerStorage');
+    const broken = await NftTrackerStorage.deploy();
+    await broken.initialize(notAFactory.target);
+
+    const nftType = makeType('BROKEN_FACTORY');
+    await expect(
+      broken.connect(guard).addData(guardedContract, nftType, pool.address, toBytes('x')),
+    ).to.be.reverted;
+
+    // Owner corrects poolFactory to the real, working guard-info contract.
+    await broken.connect(deployer).setPoolFactory(mockGuardInfo.target);
+
+    // The exact same call now succeeds — no state was lost, since nothing could
+    // ever have been written under the broken address.
+    await expect(broken.connect(guard).addData(guardedContract, nftType, pool.address, toBytes('x')))
+      .to.not.be.reverted;
+  });
+
+  it('reverts setPoolFactory with zero address', async function () {
+    await expect(
+      nftTracker.connect(deployer).setPoolFactory(ethers.ZeroAddress),
+    ).to.be.revertedWith('NftTrackerStorage: poolFactory=0');
+  });
+
+  it('reverts setPoolFactory when called by non-owner', async function () {
+    await expect(nftTracker.connect(other).setPoolFactory(mockGuardInfo.target))
+      .to.be.revertedWithCustomError(nftTracker, 'OwnableUnauthorizedAccount')
+      .withArgs(other.address);
+  });
+
+  // ---------------------------------------------------------------------------
   // Access control via checkContractGuard
   // ---------------------------------------------------------------------------
 
