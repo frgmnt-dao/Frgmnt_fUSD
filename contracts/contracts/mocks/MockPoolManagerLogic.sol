@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 /// @notice Minimal mock that satisfies both IPoolManagerLogic and IManaged
 ///         for the purposes of ERC20Guard.
 contract MockPoolManagerLogic {
@@ -29,6 +31,13 @@ contract MockPoolManagerLogic {
 
     function poolLogic() external view returns (address) {
         return _poolLogic;
+    }
+
+    // Lets a test point poolLogic() at this contract itself (e.g. address(this)), so the same
+    // mock can stand in for IPoolLogic.reservedAssetBalance() when exercising code paths that
+    // resolve pool via managerLogic.poolLogic() rather than receiving it as a direct parameter.
+    function setPoolLogic(address poolLogic_) external {
+        _poolLogic = poolLogic_;
     }
 
     // IManaged-like
@@ -66,5 +75,13 @@ contract MockPoolManagerLogic {
 
     function setAssetGuard(address asset, address guard) external {
         _assetGuards[asset] = guard;
+    }
+
+    // Lets a test set up a pre-existing allowance from this mock (acting as the pool, when
+    // poolLogic() is pointed at itself via setPoolLogic) before exercising
+    // ERC20Guard.txGuard()'s approve() handling, to test that reducing or matching an
+    // already-outstanding allowance is never blocked by the reserved-balance check.
+    function approveToken(address token_, address spender, uint256 amount) external {
+        IERC20(token_).approve(spender, amount);
     }
 }
