@@ -248,15 +248,40 @@ library FundCalculationLibrary {
     ///      fUSD address is then looked up via IPoolLogic.fusd()). `netFusd` has already been
     ///      burned from fUSD's totalSupply() by the caller before this runs, so it's added back
     ///      to recover outstanding claims as they stood immediately before this withdrawal.
+    /// @dev FNA-07 follow-up (CertiK): the solvency haircut (_applyClaimsHaircut) is run against
+    ///      a separately-derived, reserved-excluding NAV that is NOT capped by external liquidity
+    ///      (see _withdrawableFundValue's capByLiquidity=false branch below) — not against
+    ///      `withdrawableFundValue` itself. An earlier version of this function used the
+    ///      liquidity-capped figure for both, so a single under-liquid lending position
+    ///      (temporary, self-correcting) was indistinguishable from the pool actually being
+    ///      underwater (permanent, requires loss socialization per FNA-05), and haircut every
+    ///      immediate withdrawal for no solvency reason. Only the resulting fair share is then
+    ///      capped to what's actually liquid right now, via `withdrawableFundValue`.
+    /// @param withdrawableFundValue Liquidity-capped NAV (PoolLogic._withdrawableFundValue()) —
+    ///        what can actually be paid out immediately, and the denominator `portion` is derived
+    ///        against so that applying it to each asset's own liquidity-capped balance sums to
+    ///        the returned fair share. Passed in rather than recomputed here since the caller
+    ///        (PoolLogic._withdrawProRata) already needs it independently for its own EmptyFund
+    ///        check and post-withdrawal accounting.
     function computeImmediateWithdrawPortion(
         address pool,
         uint256 netFusd,
-        uint256 fundValue
+        uint256 withdrawableFundValue
     ) external view returns (uint256 portion) {
-        if (fundValue == 0) return 0;
+        if (withdrawableFundValue == 0) return 0;
+        address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
+        uint256 completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
         uint256 totalClaims = IERC20(IPoolLogic(pool).fusd()).totalSupply() + netFusd;
-        uint256 effectiveFusd = _applyClaimsHaircut(netFusd, fundValue, totalClaims);
-        portion = (effectiveFusd * 1e18) / fundValue;
+        uint256 fairFusd = _applyClaimsHaircut(netFusd, completeFundValue, totalClaims);
+        // The fair share can still exceed what's actually liquid right now (a temporary
+        // liquidity gap, distinct from insolvency). netFusd has already been burned by the
+        // caller before this runs, so under-delivering here instead of reverting would be an
+        // unrecoverable user loss for what is, at worst, a self-correcting shortfall — return 0
+        // (PoolLogic's existing WithdrawAmountTooSmall check reverts the whole, still-atomic
+        // transaction, unwinding that burn) rather than silently paying out less than the fair
+        // share.
+        if (fairFusd > withdrawableFundValue) return 0;
+        portion = (fairFusd * 1e18) / withdrawableFundValue;
     }
 
     function _applyClaimsHaircut(

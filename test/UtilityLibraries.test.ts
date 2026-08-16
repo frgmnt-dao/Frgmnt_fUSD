@@ -498,36 +498,56 @@ describe('Utility libraries', () => {
     });
 
     describe('computeImmediateWithdrawPortion', () => {
+      // FNA-07 follow-up: the function now internally derives a separate, non-liquidity-capped
+      // NAV (via poolManagerLogic()/getSupportedAssets()) for its solvency haircut, so every test
+      // here needs a wired-up pool/asset/guard, mirroring computeFinalizeAssetAmount's setupPool()
+      // below. assetGuard18.setBalance() feeds that internally-derived "complete" NAV; the
+      // `withdrawableFundValue` argument passed to the function is the separate, liquidity-capped
+      // figure PoolLogic would compute via _withdrawableFundValue() — passed directly here since
+      // it's a plain uint256 parameter, not something this mock needs to simulate on-chain.
+      async function setupPool() {
+        const fixture = await loadFixture(deployLibrariesFixture);
+        const { fundCalcPool, poolManager, assetGuard18, token18 } = fixture;
+        const assetAddr = await token18.getAddress();
+
+        await fundCalcPool.setFusd(assetAddr);
+        await fundCalcPool.setPoolManagerLogic(await poolManager.getAddress());
+        await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1', 18), 18);
+        await poolManager.setAssetGuard(assetAddr, await assetGuard18.getAddress());
+
+        return { ...fixture, assetAddr };
+      }
+
       it('reproduces par redemption when the pool is solvent (fundValue == totalClaims)', async () => {
-        const { fund, fundCalcPool, token18, manager } = await loadFixture(deployLibrariesFixture);
-        await fundCalcPool.setFusd(await token18.getAddress());
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
         // Remaining claims (Bob) after Alice's netFusd has already been burned by the caller.
         await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18));
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18)); // complete NAV
 
         const netFusd = ethers.parseUnits('50', 18); // Alice's withdrawal
-        const fundValue = ethers.parseUnits('100', 18); // totalClaims = 50 + 50 = 100 == fundValue
+        const withdrawableFundValue = ethers.parseUnits('100', 18); // totalClaims = 50 + 50 = 100, fully liquid
 
         const portion = await fund.computeImmediateWithdrawPortion(
           await fundCalcPool.getAddress(),
           netFusd,
-          fundValue,
+          withdrawableFundValue,
         );
         // Matches today's par formula exactly (netFusd * 1e18 / fundValue) when solvent.
         expect(portion).to.equal(ethers.parseUnits('0.5', 18));
       });
 
       it('haircuts the extracted portion and preserves the collateralization ratio when underwater', async () => {
-        const { fund, fundCalcPool, token18, manager } = await loadFixture(deployLibrariesFixture);
-        await fundCalcPool.setFusd(await token18.getAddress());
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
         await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18)); // Bob's remaining claim
+        await assetGuard18.setBalance(ethers.parseUnits('80', 18)); // 80 backing 100 total claims, fully liquid
 
         const netFusd = ethers.parseUnits('50', 18); // Alice's withdrawal
-        const fundValue = ethers.parseUnits('80', 18); // only 80 backing 100 total claims (80% collateralized)
+        const withdrawableFundValue = ethers.parseUnits('80', 18);
 
         const portion = await fund.computeImmediateWithdrawPortion(
           await fundCalcPool.getAddress(),
           netFusd,
-          fundValue,
+          withdrawableFundValue,
         );
         // Old vulnerable formula would give netFusd*1e18/fundValue = 0.625e18 (62.5%, par redemption
         // against live NAV). The haircut instead gives Alice exactly her 80%-collateralized share.
@@ -535,18 +555,80 @@ describe('Utility libraries', () => {
 
         // Verify the collateralization ratio is preserved across the withdrawal (loss-socialization
         // property): remaining assets / remaining claims should still be 80%, same as before.
-        const extractedAssets = (fundValue * portion) / ethers.parseUnits('1', 18);
-        const remainingAssets = fundValue - extractedAssets;
+        const extractedAssets = (withdrawableFundValue * portion) / ethers.parseUnits('1', 18);
+        const remainingAssets = withdrawableFundValue - extractedAssets;
         const remainingClaims = ethers.parseUnits('50', 18); // Bob's claim, untouched
         expect((remainingAssets * 10_000n) / remainingClaims).to.equal(8_000n); // 80.00%
       });
 
-      it('returns 0 when fundValue is 0', async () => {
-        const { fund, fundCalcPool, token18 } = await loadFixture(deployLibrariesFixture);
-        await fundCalcPool.setFusd(await token18.getAddress());
+      it('returns 0 when withdrawableFundValue is 0', async () => {
+        const { fund, fundCalcPool } = await setupPool();
         expect(
           await fund.computeImmediateWithdrawPortion(await fundCalcPool.getAddress(), 50n, 0n),
         ).to.equal(0n);
+      });
+
+      // CertiK follow-up: a temporary liquidity shortfall (one under-liquid lending position)
+      // must not be misread as insolvency. A fully solvent pool (complete NAV covers total
+      // claims) whose currently-liquid value is smaller must still pay Alice her FULL fair share
+      // — sized against the liquid figure, not haircut by it.
+      it('does not haircut a solvent pool merely because currently-liquid value is temporarily below total claims', async () => {
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('850', 18)); // Bob's remaining claim
+        await assetGuard18.setBalance(ethers.parseUnits('1000', 18)); // complete NAV — fully solvent
+
+        const netFusd = ethers.parseUnits('150', 18); // Alice's withdrawal; totalClaims = 850 + 150 = 1000
+        // Only 200 of the pool's 1000 total value is currently liquid (e.g. an Aave position
+        // holding the other 800 is temporarily under-liquid) — passed directly, as PoolLogic
+        // would compute via its own liquidity-capped _withdrawableFundValue().
+        const withdrawableFundValue = ethers.parseUnits('200', 18);
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          withdrawableFundValue,
+        );
+        // Old (buggy) formula ran the solvency haircut against the liquidity-capped 200 as if it
+        // were total NAV: fairFusd = 150 * 200 / 1000 = 30, portion = 30 * 1e18 / 200 = 0.15e18
+        // (15%) — misreading a temporary liquidity gap as an 80% insolvency. The fix: no haircut
+        // at all (pool is fully solvent by complete NAV), so Alice's full 150 fair share is paid
+        // out of what's liquid: portion = 150 * 1e18 / 200 = 0.75e18 (75%).
+        expect(portion).to.equal(ethers.parseUnits('0.75', 18));
+      });
+
+      it('reverts (portion 0) rather than under-delivering when the fair share exceeds what is currently liquid', async () => {
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('850', 18));
+        await assetGuard18.setBalance(ethers.parseUnits('1000', 18)); // fully solvent, fairFusd = netFusd = 150
+
+        const netFusd = ethers.parseUnits('150', 18);
+        const withdrawableFundValue = ethers.parseUnits('100', 18); // less than the 150 fair share
+
+        expect(
+          await fund.computeImmediateWithdrawPortion(
+            await fundCalcPool.getAddress(),
+            netFusd,
+            withdrawableFundValue,
+          ),
+        ).to.equal(0n);
+      });
+
+      it('still applies the solvency haircut using complete NAV, then separately fits within available liquidity', async () => {
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('850', 18));
+        // Complete NAV of 800 backing 1000 total claims — genuinely 80% collateralized.
+        await assetGuard18.setBalance(ethers.parseUnits('800', 18));
+
+        const netFusd = ethers.parseUnits('150', 18); // totalClaims = 850 + 150 = 1000
+        // fairFusd = 150 * 800 / 1000 = 120, comfortably within the 500 that's liquid.
+        const withdrawableFundValue = ethers.parseUnits('500', 18);
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          withdrawableFundValue,
+        );
+        expect(portion).to.equal(ethers.parseUnits('0.24', 18)); // 120 * 1e18 / 500
       });
     });
 

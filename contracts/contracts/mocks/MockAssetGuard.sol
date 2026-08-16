@@ -67,6 +67,32 @@ contract MockAssetGuard {
     ) external view returns (bool) {
         return valuationComplete;
     }
+
+    // FundCalculationLibrary.computeWithdrawableFundValue() checks for this via low-level call,
+    // mirroring isPreValuedAssetGuard()/isIncompleteValuationGuard() above. Defaults to false so
+    // existing tests that don't call setWithdrawableBalanceGuard() keep going through the plain
+    // getBalance() path unchanged (FNA-07).
+    bool public withdrawableBalanceGuard;
+    uint256 public withdrawableBalance;
+
+    function setWithdrawableBalanceGuard(bool _isGuard) external {
+        withdrawableBalanceGuard = _isGuard;
+    }
+
+    function isWithdrawableBalanceGuard() external view returns (bool) {
+        return withdrawableBalanceGuard;
+    }
+
+    function setWithdrawableBalance(uint256 _balance) external {
+        withdrawableBalance = _balance;
+    }
+
+    function getWithdrawableBalance(
+        address /*pool*/,
+        address /*asset*/
+    ) external view returns (uint256) {
+        return withdrawableBalance;
+    }
     function getDecimals(address /*asset*/) external view returns (uint256) {
         return dec;
     }

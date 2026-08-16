@@ -171,9 +171,14 @@ contract TestFundCalculationLibrary {
     function computeImmediateWithdrawPortion(
         address pool,
         uint256 netFusd,
-        uint256 fundValue
+        uint256 withdrawableFundValue
     ) external view returns (uint256) {
-        return FundCalculationLibrary.computeImmediateWithdrawPortion(pool, netFusd, fundValue);
+        return
+            FundCalculationLibrary.computeImmediateWithdrawPortion(
+                pool,
+                netFusd,
+                withdrawableFundValue
+            );
     }
 
     function computeFinalizeAssetAmount(
