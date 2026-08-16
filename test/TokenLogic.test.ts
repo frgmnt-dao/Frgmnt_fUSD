@@ -731,6 +731,88 @@ describe('TokenLogic (fEURO)', () => {
         expect(await mockPoolLogic.accountedAssets()).to.equal(amount);
       });
     });
+
+    // FNA-04 follow-up: CertiK flagged that TokenLogic's pre-deposit checkpoint call
+    // (FNA-22) ignored its result entirely, so a deposit continued even when
+    // checkpointFeesForDeposit() had silently done nothing because the pool's NAV reading
+    // was incomplete — letting new fUSD enter (and later be staked) during an outage, then
+    // share in value that was earned but invisible before it arrived once the outage clears.
+    describe('incomplete NAV blocks the deposit checkpoint (FNA-04 follow-up)', () => {
+      async function setUpUsdcDeposit(fx: Awaited<ReturnType<typeof deployFixture>>) {
+        const { admin, user, usdc, usdcAddress, poolMgr, fusd } = fx;
+        await poolMgr.setSupportedAsset(usdcAddress, true, WAD, 6);
+        await fusd.connect(admin).configureAsset(usdcAddress, true, ethers.MaxUint256);
+        const amount = 1000n * 10n ** 6n;
+        await usdc.connect(user).approve(await fusd.getAddress(), amount);
+        return { amount };
+      }
+
+      it('reverts the whole deposit with IncompleteNAV when the checkpoint reports incomplete NAV', async () => {
+        const fx = await loadFixture(deployFixture);
+        const { fusd, user, usdcAddress, mockPoolLogic, usdc } = fx;
+        const { amount } = await setUpUsdcDeposit(fx);
+
+        await mockPoolLogic.setNavIncomplete(true);
+
+        const userBalBefore = await usdc.balanceOf(await user.getAddress());
+        const poolBalBefore = await usdc.balanceOf(await mockPoolLogic.getAddress());
+
+        await expect(
+          fusd.connect(user).deposit(usdcAddress, amount, await user.getAddress()),
+        ).to.be.revertedWithCustomError(
+          await ethers.getContractAt('IPoolLogic', await mockPoolLogic.getAddress()),
+          'IncompleteNAV',
+        );
+
+        // Atomic: no fUSD minted and no collateral pulled from the depositor.
+        expect(await fusd.balanceOf(await user.getAddress())).to.equal(0n);
+        expect(await usdc.balanceOf(await user.getAddress())).to.equal(userBalBefore);
+        expect(await usdc.balanceOf(await mockPoolLogic.getAddress())).to.equal(poolBalBefore);
+      });
+
+      it('proceeds normally, and calls the checkpoint, once the NAV reading is complete again', async () => {
+        const fx = await loadFixture(deployFixture);
+        const { fusd, user, usdcAddress, mockPoolLogic } = fx;
+        const { amount } = await setUpUsdcDeposit(fx);
+
+        await mockPoolLogic.setNavIncomplete(true);
+        await expect(fusd.connect(user).deposit(usdcAddress, amount, await user.getAddress())).to
+          .be.reverted;
+
+        await mockPoolLogic.setNavIncomplete(false);
+        await expect(fusd.connect(user).deposit(usdcAddress, amount, await user.getAddress())).to
+          .not.be.reverted;
+
+        // The reverted attempt above rolled back its own checkpointCallCount increment along
+        // with everything else in that call, so only the successful second attempt counts.
+        expect(await fusd.balanceOf(await user.getAddress())).to.equal(1000n * WAD);
+        expect(await mockPoolLogic.checkpointCallCount()).to.equal(1n);
+      });
+
+      it('still deposits normally when PoolLogic does not implement checkpointFeesForDeposit at all (fail-open preserved, e.g. cross-proxy upgrade ordering)', async () => {
+        // A real (but not-yet-upgraded) PoolLogic implementation: has incrementAccountedAssets
+        // (pre-dates FNA-22) but lacks checkpointFeesForDeposit (added by FNA-22, after this
+        // mock's shape) — the actual cross-proxy-upgrade-ordering case the low-level call is
+        // meant to stay fail-open for. A codeless EOA is not an accurate stand-in for this:
+        // TokenLogic._deposit()'s later incrementAccountedAssets() call is a pre-existing typed
+        // call unrelated to FNA-04, which would itself revert against a codeless target
+        // regardless of this fix.
+        const fx = await loadFixture(deployFixture);
+        const { fusd, admin, user, usdcAddress } = fx;
+        const MockPoolLogicNoCheckpoint = await ethers.getContractFactory(
+          'MockPoolLogicNoCheckpoint',
+        );
+        const oldPoolLogic = await MockPoolLogicNoCheckpoint.deploy();
+        await oldPoolLogic.waitForDeployment();
+        await fusd.connect(admin).setPoolLogic(await oldPoolLogic.getAddress());
+        const { amount } = await setUpUsdcDeposit(fx);
+
+        await expect(fusd.connect(user).deposit(usdcAddress, amount, await user.getAddress())).to
+          .not.be.reverted;
+        expect(await fusd.balanceOf(await user.getAddress())).to.equal(1000n * WAD);
+        expect(await oldPoolLogic.accountedAssets()).to.equal(1000n * WAD);
+      });
+    });
   });
 
   // ---------------------------------------------------------------------------

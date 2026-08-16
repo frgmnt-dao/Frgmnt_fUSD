@@ -1192,13 +1192,32 @@ contract PoolLogic is
     ///         incoming deposit's effects (minting new fUSD, crediting new collateral) — see
     ///         the FNA-13 design note above on _accrueYield() for why stake() already
     ///         checkpoints before minting new shares; deposit previously did not.
-    /// @dev Only callable by TokenLogic (fusd), exactly like incrementAccountedAssets. Reverts
-    ///      if autocompounding isn't initialized (_accrueYield()'s own precondition, e.g. an
-    ///      already-deployed pool that hasn't called initializeAutoCompounding() yet) —
-    ///      TokenLogic calls this via a fail-open low-level call specifically so that case
-    ///      leaves deposits unaffected rather than reverting them.
+    /// @dev Only callable by TokenLogic (fusd), exactly like incrementAccountedAssets.
+    /// @dev FNA-04 follow-up: fails closed (reverts IncompleteNAV) when the pool's active NAV
+    ///      reading is incomplete, unlike _accrueYield()'s other callers (stake/unstake/harvest),
+    ///      which deliberately stay fail-open — see the design note on computeYieldAccrual()
+    ///      for why reverting there would freeze withdrawal of EXISTING value over one guard's
+    ///      transient failure. A deposit is different: TokenLogic mints NEW fUSD and calls
+    ///      incrementAccountedAssets() unconditionally in the same transaction regardless of
+    ///      whether this checkpoint ran, so silently skipping accrual here doesn't just delay
+    ///      recognition — it lets that freshly-minted fUSD be staked into a share supply that,
+    ///      once the failing guard recovers, distributes value earned (but invisible) before
+    ///      this deposit pro rata across whoever holds shares at recognition time (see FNA-13's
+    ///      design note), including this new depositor at the incumbents' expense. Reverting
+    ///      here blocks the deposit outright while incomplete; the depositor can simply retry
+    ///      once the failing guard recovers.
+    /// @dev Still fails open (returns without reverting) if autocompounding was never
+    ///      initialized — matching this function's pre-existing behavior for that unrelated,
+    ///      cross-proxy-upgrade-ordering case (an already-deployed pool that hasn't called
+    ///      initializeAutoCompounding() yet): there is no reward index or accrual concept
+    ///      active yet, so an unrelated guard's transient failure has nothing to protect.
     function checkpointFeesForDeposit() external {
         if (msg.sender != fusd) revert OnlyTokenLogic();
+        if (compoundedRewardIndex == 0) return;
+
+        (, bool navComplete) = _activeTotalValueWithCompleteness();
+        if (!navComplete) revert IncompleteNAV();
+
         _accrueYield();
     }
 

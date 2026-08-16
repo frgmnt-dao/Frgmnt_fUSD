@@ -2270,4 +2270,86 @@ describe('PoolLogic', () => {
       expect(fee).to.be.gt(ethers.parseUnits('800', 18));
     });
   });
+
+  describe('FNA-04 follow-up: checkpointFeesForDeposit fails closed on incomplete NAV', () => {
+    // Self-locates compoundedRewardIndex's storage slot the same way the FNA-06 boundary test
+    // above does, so a test can zero it out to simulate an already-deployed pool that hasn't
+    // called initializeAutoCompounding() yet — checkpointFeesForDeposit()'s other, pre-existing
+    // fail-open case (unrelated to NAV completeness).
+    async function findCompoundedRewardIndexSlot(
+      pool: Awaited<ReturnType<typeof deployPoolFixture>>['pool'],
+      poolAddr: string,
+      marker: bigint,
+    ) {
+      for (let i = 0; i < 60; i++) {
+        const raw = await ethers.provider.getStorage(poolAddr, i);
+        if (BigInt(raw) !== marker) continue;
+
+        // Verified through the contract's own getter (not a raw re-read of the same slot,
+        // which would trivially "confirm" any candidate slot regardless of which one the
+        // getter actually reads from).
+        const sentinel = 123456789n;
+        await ethers.provider.send('hardhat_setStorageAt', [
+          poolAddr,
+          ethers.toBeHex(i),
+          ethers.toBeHex(sentinel, 32),
+        ]);
+        const reflects = (await pool.compoundedRewardIndex()) === sentinel;
+        await ethers.provider.send('hardhat_setStorageAt', [
+          poolAddr,
+          ethers.toBeHex(i),
+          ethers.toBeHex(marker, 32),
+        ]);
+        if (reflects) return i;
+      }
+      return -1;
+    }
+
+    it('reverts IncompleteNAV instead of silently skipping accrual', async () => {
+      const { pool, fusd, poolManager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+      await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
+      await poolManager.setValuationComplete(false);
+
+      await expect(
+        fusd.triggerCheckpointFeesForDepositRequired(poolAddr),
+      ).to.be.revertedWithCustomError(pool, 'IncompleteNAV');
+
+      // Confirms the low-level trigger used elsewhere in this file observes the same outcome
+      // (ok=false) — i.e. this is a genuine revert, not merely a different assertion style.
+      const ok = await fusd.triggerCheckpointFeesForDeposit.staticCall(poolAddr);
+      expect(ok).to.equal(false);
+    });
+
+    it('accrues normally (does not revert) once the NAV reading is complete', async () => {
+      const { pool, fusd, poolManager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+      await poolManager.setFees(1000n, 0n, 0n, 0n, 10_000n); // 10% perf fee
+      await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
+      await poolManager.setValuationComplete(true);
+
+      await expect(fusd.triggerCheckpointFeesForDepositRequired(poolAddr)).to.not.be.reverted;
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('1000', 18));
+    });
+
+    it('still returns without reverting when autocompounding is not yet initialized, even if NAV is also incomplete', async () => {
+      const { pool, fusd, poolManager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const marker = await pool.compoundedRewardIndex();
+      expect(marker).to.equal(ethers.parseUnits('1', 18)); // initialize()'s default
+      const slot = await findCompoundedRewardIndexSlot(pool, poolAddr, marker);
+      expect(slot).to.be.gte(0);
+      await ethers.provider.send('hardhat_setStorageAt', [
+        poolAddr,
+        ethers.toBeHex(slot),
+        ethers.toBeHex(0n, 32),
+      ]);
+      expect(await pool.compoundedRewardIndex()).to.equal(0n);
+
+      await poolManager.setValuationComplete(false); // unrelated failure, simultaneously true
+
+      await expect(fusd.triggerCheckpointFeesForDepositRequired(poolAddr)).to.not.be.reverted;
+    });
+  });
 });

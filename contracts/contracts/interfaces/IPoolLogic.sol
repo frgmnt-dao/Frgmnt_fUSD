@@ -20,4 +20,11 @@ interface IPoolLogic {
     function reservedAssetBalance(address asset) external view returns (uint256);
 
     function incrementAccountedAssets(uint256 amount) external;
+
+    /// @notice FNA-04 follow-up: reverted by checkpointFeesForDeposit() when the pool's active
+    ///         NAV reading is incomplete (see IPoolManagerLogic.totalFundValueWithCompleteness()),
+    ///         so a deposit cannot proceed while a position's true value is transiently unknown.
+    error IncompleteNAV();
+
+    function checkpointFeesForDeposit() external;
 }
