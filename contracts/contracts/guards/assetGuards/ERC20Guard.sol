@@ -32,6 +32,7 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
     error UnsupportedApproval();
     error NonZeroAssetBalance();
     error UsedAsset();
+    error ApprovalExceedsUnreservedBalance();
 
     // -------------------------------------------------------------------------
     // Events
@@ -57,15 +58,17 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
     // -------------------------------------------------------------------------
 
     /**
-     * @notice Guard ERC20 approve() actions — only allowed for spenders with a registered guard.
+     * @notice Guard ERC20 approve() actions — only allowed for spenders with a registered guard,
+     *         and only for amounts the pool can safely have pulled given its current reserves.
      * @param _poolManagerLogic Address of PoolManagerLogic
+     * @param to The ERC20 token this approve() call targets (the asset being approved)
      * @param data Calldata for the attempted transaction
      * @return txType 1 = approve, 0 = not handled
      * @return isPublic Always false (not a public tx)
      */
     function txGuard(
         address _poolManagerLogic,
-        address,
+        address to,
         bytes calldata data
     ) external override returns (uint16 txType, bool isPublic) {
         bytes4 method = getMethod(data);
@@ -84,13 +87,28 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
                 revert UnsupportedApproval();
             }
 
-            emit Approve(
-                managerLogic.poolLogic(),
-                IManaged(_poolManagerLogic).manager(),
-                spender,
-                amount,
-                block.timestamp
-            );
+            address pool = managerLogic.poolLogic();
+
+            // FNA-03 follow-up: approve() does not move balanceOf, so
+            // PoolTxExecutor._checkReservedBalancesIntact()'s post-call balance check can
+            // never catch an over-large approval here — once granted, the spender can call
+            // transferFrom() directly on `to` at any later time of their choosing, entirely
+            // outside this pool's own guarded transaction flow, draining liquidity reserved
+            // for a finalized cash withdrawal long after this approve() itself passed every
+            // check. Block it at the source instead: never let an approval grant the spender
+            // the ability to pull more than the currently-unreserved balance, unless doing so
+            // is a reduction (or no change) relative to what they could already pull under
+            // their existing allowance, which is never a new risk.
+            uint256 reserved = IPoolLogic(pool).reservedAssetBalance(to);
+            if (reserved > 0) {
+                uint256 balance = IERC20(to).balanceOf(pool);
+                uint256 unreserved = balance > reserved ? balance - reserved : 0;
+                if (amount > unreserved && amount > IERC20(to).allowance(pool, spender)) {
+                    revert ApprovalExceedsUnreservedBalance();
+                }
+            }
+
+            emit Approve(pool, IManaged(_poolManagerLogic).manager(), spender, amount, block.timestamp);
 
             txType = uint16(TransactionType.Approve);
         }
