@@ -284,76 +284,31 @@ describe('MorphoVaultV2AssetGuard', () => {
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
 
-  it('isWithdrawableBalanceGuard returns true (FNA-07)', async () => {
-    const { guard } = await deploy();
-    expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
-  });
+  // FNA-25: canonical Morpho Vault V2's maxRedeem() unconditionally returns 0 — not a genuine
+  // liquidity estimate, since the vault can't guarantee its dynamic gate/adapter simulation is
+  // revert-free from a view function. Treating it as a liquidity oracle (this guard's earlier
+  // IWithdrawableBalanceGuard implementation, FNA-07) made every Morpho Vault V2 position read
+  // as fully illiquid on every immediate withdrawal, unconditionally — silently excluding real,
+  // healthy positions from NAV available for immediate exit. This guard no longer implements
+  // IWithdrawableBalanceGuard at all, so FundCalculationLibrary's fallback now treats it as
+  // fully liquid, matching its pre-FNA-07 behavior.
+  it('getBalance() is unaffected by maxRedeem() always returning 0 (canonical Morpho Vault V2 behavior, FNA-25)', async () => {
+    const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+    const shares = ethers.parseUnits('1000', 18);
+    const assetsPerShare = 1_000_000n;
+    await vault.mintShares(poolAddr, shares);
+    await vault.setAssetsPerShare(assetsPerShare);
+    await poolManager.setAssetGuard(usdcAddr, true, 6n);
+    await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
 
-  // -----------------------------------------------------------------------
-  // getWithdrawableBalance (FNA-07: liquidity-capped counterpart to getBalance(), used by
-  // PoolLogic's immediate withdrawal NAV/portion sizing so one under-liquid vault position sizes
-  // its own share down instead of the whole withdrawal reverting)
-  // -----------------------------------------------------------------------
+    // The mock's default matches the real vault: maxRedeem() always reports 0, regardless of
+    // the pool's actual position.
+    expect(await vault.maxRedeem(poolAddr)).to.equal(0n);
 
-  describe('getWithdrawableBalance', () => {
-    it('returns 0 when the pool holds no shares', async () => {
-      const { guard, poolAddr, vaultAddr } = await deploy();
-      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
-    });
-
-    it('matches getBalance() when the vault is fully liquid (maxRedeem uncapped)', async () => {
-      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
-      const shares = ethers.parseUnits('1000', 18);
-      const assetsPerShare = 1_000_000n;
-      await vault.mintShares(poolAddr, shares);
-      await vault.setAssetsPerShare(assetsPerShare);
-      await poolManager.setAssetGuard(usdcAddr, true, 6n);
-      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
-
-      const full = await guard.getBalance(poolAddr, vaultAddr);
-      expect(full).to.be.gt(0n);
-      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(full);
-    });
-
-    it('is capped below getBalance() when maxRedeem is below the pool\'s share balance', async () => {
-      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
-      const shares = ethers.parseUnits('1000', 18);
-      const assetsPerShare = 1_000_000n; // 1e18 shares -> 1e6 raw USDC units
-      await vault.mintShares(poolAddr, shares);
-      await vault.setAssetsPerShare(assetsPerShare);
-      await poolManager.setAssetGuard(usdcAddr, true, 6n);
-      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
-
-      // Only 30% of the position is actually redeemable right now.
-      const cappedShares = (shares * 3n) / 10n;
-      await vault.setMaxRedeemCap(true, cappedShares);
-
-      const full = await guard.getBalance(poolAddr, vaultAddr);
-      const withdrawable = await guard.getWithdrawableBalance(poolAddr, vaultAddr);
-      const expectedWithdrawable = expectedBalanceUsd18(
-        cappedShares,
-        assetsPerShare,
-        ethers.parseUnits('1', 18),
-        6n,
-      );
-      expect(withdrawable).to.equal(expectedWithdrawable);
-      expect(withdrawable).to.be.lt(full);
-      expect(withdrawable).to.equal(full / 10n * 3n);
-    });
-
-    it('returns 0 (does not revert) when maxRedeem() itself reverts', async () => {
-      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
-      const shares = ethers.parseUnits('1000', 18);
-      await vault.mintShares(poolAddr, shares);
-      await poolManager.setAssetGuard(usdcAddr, true, 6n);
-      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
-
-      // Sanity: works before the vault starts reverting.
-      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.be.gt(0n);
-
-      await vault.setBrokenMaxRedeem(true);
-      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
-    });
+    const full = await guard.getBalance(poolAddr, vaultAddr);
+    const expected = expectedBalanceUsd18(shares, assetsPerShare, ethers.parseUnits('1', 18), 6n);
+    expect(full).to.equal(expected);
+    expect(full).to.be.gt(0n);
   });
 
   // -----------------------------------------------------------------------
@@ -472,18 +427,17 @@ describe('MorphoVaultV2AssetGuard', () => {
       expect(await usdc.balanceOf(poolAddr)).to.equal(ethers.parseUnits('1000', 6));
     });
 
-    // FNA-07: caps sharesToRedeem by maxRedeem(pool) so this call never asks the vault to
-    // redeem more than it can currently return.
-    it('caps sharesToRedeem by maxRedeem when the vault is not fully liquid', async () => {
+    // FNA-25: no longer capped by maxRedeem(pool) — real Morpho Vault V2's maxRedeem() always
+    // returns 0, so capping against it would zero out every redemption unconditionally (the bug
+    // this fix closes), not just genuinely under-liquid ones.
+    it('redeems the full requested portion of shares regardless of maxRedeem() (FNA-25)', async () => {
       const { guard, poolAddr, vault, vaultAddr } = await deploy();
       const shares = ethers.parseUnits('1000', 18);
       await vault.mintShares(poolAddr, shares);
+      // Matches real Morpho Vault V2: maxRedeem() always reports 0, regardless of position.
+      expect(await vault.maxRedeem(poolAddr)).to.equal(0n);
 
-      // Only 20% of the position is actually redeemable right now.
-      const cappedShares = (shares * 2n) / 10n;
-      await vault.setMaxRedeemCap(true, cappedShares);
-
-      const portion = ethers.parseUnits('1', 18); // 100% of the (liquidity-capped) NAV
+      const portion = ethers.parseUnits('1', 18); // 100%
       const [, , txs] = await guard.withdrawProcessing(poolAddr, vaultAddr, portion, poolAddr);
       expect(txs.length).to.equal(1);
 
@@ -491,37 +445,27 @@ describe('MorphoVaultV2AssetGuard', () => {
         'function redeem(uint256 shares, address receiver, address owner) returns (uint256)',
       ]);
       const decoded = vaultIface.decodeFunctionData('redeem', txs[0].txData);
-      // Not shares * 100% (1000) — capped to the redeemable amount instead.
-      expect(decoded[0]).to.equal(cappedShares);
+      // Full 1000 shares — not 0, what the old maxRedeem-capped formula would have produced
+      // against a vault whose maxRedeem() always returns 0.
+      expect(decoded[0]).to.equal(shares);
     });
 
-    it('reproduces and fixes FNA-07: a 100% redeem of the full share balance would revert on an under-liquid vault, but the guard-generated (capped) transaction succeeds', async () => {
-      const { deployer, poolAddr, vault, vaultAddr, usdc, usdcAddr, guard } = await deploy();
+    it('accepted risk: the whole withdrawal reverts if the vault genuinely lacks enough underlying — same risk class as an Aave/Morpho Blue market being fully utilized', async () => {
+      const { deployer, poolAddr, vault, vaultAddr, usdc, guard } = await deploy();
       const shares = ethers.parseUnits('1000', 18);
       const assetsPerShare = 1_000_000n; // 1e18 shares -> 1e6 raw USDC units
       await vault.mintShares(poolAddr, shares);
       await vault.setAssetsPerShare(assetsPerShare);
 
-      // The vault only actually holds enough underlying to honor 20% of the position — a real
-      // redeem() for the full 1000 shares would revert with insufficient underlying available.
-      const cappedShares = (shares * 2n) / 10n;
-      await vault.setMaxRedeemCap(true, cappedShares);
-      await usdc.mint(vaultAddr, ethers.parseUnits('200', 6)); // backs only the capped amount
+      // The vault only actually holds enough underlying to honor 20% of the position.
+      await usdc.mint(vaultAddr, ethers.parseUnits('200', 6));
 
-      // Confirm the *naive* full-balance redeem really would have failed (insufficient balance
-      // to transfer back), demonstrating the vulnerability this guard now avoids triggering.
-      await expect(vault.connect(deployer).redeem(shares, poolAddr, poolAddr)).to.be.reverted;
-
-      // The guard's own withdrawProcessing(), even at portion = 100%, must not attempt that.
-      const portion = ethers.parseUnits('1', 18);
+      const portion = ethers.parseUnits('1', 18); // 100%
       const [, , txs] = await guard.withdrawProcessing(poolAddr, vaultAddr, portion, poolAddr);
       expect(txs.length).to.equal(1);
 
-      await expect(deployer.sendTransaction({ to: txs[0].to, data: txs[0].txData })).to.not.be
+      await expect(deployer.sendTransaction({ to: txs[0].to, data: txs[0].txData })).to.be
         .reverted;
-
-      expect(await vault.balanceOf(poolAddr)).to.equal(shares - cappedShares);
-      expect(await usdc.balanceOf(poolAddr)).to.equal(ethers.parseUnits('200', 6));
     });
   });
 
