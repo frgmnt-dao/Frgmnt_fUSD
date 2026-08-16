@@ -1828,10 +1828,10 @@ describe('PoolLogic', () => {
   });
 
   // FNA-07: one under-liquid lending position must not block immediate withdrawals from the
-  // rest of the fund. Reproduces the finding with a real MorphoVaultV2AssetGuard position
-  // alongside a fully-liquid ERC20, where a naive full-portion redeem of the vault position
-  // would revert (insufficient underlying), and confirms the fix delivers a liquidity-capped,
-  // non-reverting withdrawal instead.
+  // rest of the fund — reproduced below with a real AaveV4SpokeAssetGuard position. The Morpho
+  // Vault V2 case is covered separately (FNA-25): that guard no longer implements the
+  // liquidity-capping interface at all, since canonical Morpho Vault V2's maxRedeem() always
+  // returns 0 and isn't a genuine liquidity signal — see the test right below.
   describe('FNA-07: liquidity-capped immediate withdrawal', () => {
     async function deployWithVaultPosition() {
       const fixture = await loadFixture(deployPoolFixture);
@@ -1868,7 +1868,11 @@ describe('PoolLogic', () => {
       return { ...fixture, pool, poolAddr, poolManager, user, vaultGuard, underlying, vault, vaultAddr };
     }
 
-    it('delivers a non-reverting, liquidity-capped withdrawal when the vault position is under-liquid', async () => {
+    // FNA-25: MorphoVaultV2AssetGuard no longer caps by maxRedeem(pool) — canonical Morpho Vault
+    // V2 implements that as a function that unconditionally returns 0, so trusting it as a
+    // liquidity signal (this test's pre-fix shape) would have silently excluded every Morpho
+    // Vault V2 position from immediate withdrawals, always, regardless of real liquidity.
+    it('includes a Morpho Vault V2 position at its full value, unaffected by maxRedeem() always returning 0', async () => {
       const { pool, poolAddr, poolManager, fusd, asset, user, underlying, vault, vaultAddr } =
         await deployWithVaultPosition();
 
@@ -1877,26 +1881,20 @@ describe('PoolLogic', () => {
       const liquidAmount = ethers.parseUnits('800', 18);
       await asset.mint(poolAddr, liquidAmount);
 
-      // Illiquid side: a 1000-share Morpho Vault V2 position (1:1 with underlying), but only 200
-      // shares are actually redeemable right now (maxRedeem-capped), and the vault only holds
-      // enough real underlying to back exactly that capped amount.
+      // Vault side: a fully-redeemable 1000-share Morpho Vault V2 position (1:1 with underlying)
+      // — the vault genuinely holds enough underlying to honor the whole thing.
       const fullShares = ethers.parseUnits('1000', 18);
-      const cappedShares = ethers.parseUnits('200', 18);
       await vault.mintShares(poolAddr, fullShares);
-      await vault.setMaxRedeemCap(true, cappedShares);
-      await underlying.mint(vaultAddr, cappedShares);
-
-      // Sanity: a naive redemption of the FULL position really would revert (proves this
-      // scenario would have bricked the old, uncapped code path).
-      await expect(vault.redeem(fullShares, poolAddr, poolAddr)).to.be.reverted;
+      await underlying.mint(vaultAddr, fullShares);
+      expect(await vault.maxRedeem(poolAddr)).to.equal(0n); // matches the real vault, always 0
 
       await fusd.triggerIncrementAccountedAssets(
         poolAddr,
         ethers.parseUnits('1800', 18), // 800 liquid + 1000 full vault claim
       );
 
-      // Withdrawable NAV = 800 (liquid) + 200 (liquidity-capped vault) = 1000.
-      const netFusd = ethers.parseUnits('500', 18); // 50% of the withdrawable NAV
+      // Withdrawable NAV = 800 (liquid) + 1000 (vault, at full value — not silently excluded).
+      const netFusd = ethers.parseUnits('900', 18); // 50% of the withdrawable NAV
       await mintAndApproveFUSD(fusd, pool, user, netFusd);
 
       const userAddr = await user.getAddress();
@@ -1908,14 +1906,10 @@ describe('PoolLogic', () => {
       const liquidAfter = await asset.balanceOf(userAddr);
       const underlyingAfter = await underlying.balanceOf(userAddr);
 
-      // 50% of the liquid asset's full 800.
+      // 50% of each side — proving the vault's full 1000 claim actually counted toward
+      // withdrawable NAV, rather than reading as 0 and being skipped entirely.
       expect(liquidAfter - liquidBefore).to.equal(ethers.parseUnits('400', 18));
-      // 50% of the vault's *capped* 200 (i.e. 100), not 50% of the full 1000 (which would be
-      // 500 and would have reverted).
-      expect(underlyingAfter - underlyingBefore).to.equal(ethers.parseUnits('100', 18));
-
-      // The vault position still holds its unredeemed remainder; nothing was lost or stuck.
-      expect(await vault.balanceOf(poolAddr)).to.equal(fullShares - ethers.parseUnits('100', 18));
+      expect(underlyingAfter - underlyingBefore).to.equal(ethers.parseUnits('500', 18));
     });
 
     it('regression: an immediate withdrawal touching only fully-liquid assets is unaffected (no vault position registered)', async () => {

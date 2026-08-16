@@ -19,14 +19,6 @@ contract MockMorphoVaultV2 is ERC20 {
     address[] public adapterList;
     mapping(address => uint256) public forceDeallocatePenalty;
 
-    /// @dev FNA-07: caps maxRedeem() below the owner's real share balance, simulating a vault
-    ///      whose underlying liquidity adapters can't currently return the full position. Unset
-    ///      (0) means "no override" — maxRedeem() falls back to the real ERC-4626 default
-    ///      (balanceOf(owner), i.e. fully liquid), matching a real vault with no constraint.
-    bool public maxRedeemCapped;
-    uint256 public maxRedeemCap;
-    bool public brokenMaxRedeem;
-
     constructor(address underlying_) ERC20("Mock Morpho Vault V2", "mMVV2") {
         underlying = underlying_;
     }
@@ -64,17 +56,6 @@ contract MockMorphoVaultV2 is ERC20 {
         forceDeallocatePenalty[adapter] = penalty;
     }
 
-    /// @dev Pass `capped = false` to clear the override and go back to the default
-    ///      (uncapped, balanceOf(owner)) maxRedeem() behavior.
-    function setMaxRedeemCap(bool capped, uint256 cap) external {
-        maxRedeemCapped = capped;
-        maxRedeemCap = cap;
-    }
-
-    function setBrokenMaxRedeem(bool broken) external {
-        brokenMaxRedeem = broken;
-    }
-
     function adaptersLength() external view returns (uint256) {
         return adapterList.length;
     }
@@ -99,13 +80,11 @@ contract MockMorphoVaultV2 is ERC20 {
         return (assets * 1e18) / assetsPerShare;
     }
 
-    function maxRedeem(address owner) external view returns (uint256) {
-        require(!brokenMaxRedeem, "MockMorphoVaultV2: maxRedeem() broken");
-        uint256 balance = balanceOf(owner);
-        if (maxRedeemCapped && maxRedeemCap < balance) {
-            return maxRedeemCap;
-        }
-        return balance;
+    /// @dev FNA-25: matches canonical Morpho Vault V2, which implements this as a function that
+    ///      unconditionally returns 0 — not a genuine liquidity estimate (see VaultV2.sol). The
+    ///      guard must never treat this as a liquidity oracle; see MorphoVaultV2AssetGuard's docs.
+    function maxRedeem(address) external pure returns (uint256) {
+        return 0;
     }
 
     function deposit(uint256 assets, address receiver) external returns (uint256 shares) {
