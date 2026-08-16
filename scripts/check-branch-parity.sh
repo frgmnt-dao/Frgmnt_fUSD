@@ -20,7 +20,10 @@ TEST_ALLOWLIST=(
   "test/TokenLogic.test.ts"
 )
 
-current_branch="${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}"
+# On a pull_request event, GITHUB_REF_NAME is "<pr-number>/merge", not the real branch
+# name — GITHUB_HEAD_REF carries the actual source branch there instead. On a push
+# event, GITHUB_HEAD_REF is unset and GITHUB_REF_NAME is the real branch name.
+current_branch="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-$(git rev-parse --abbrev-ref HEAD)}}"
 
 case "$current_branch" in
   "$EURO_BRANCH") other_branch="$USD_BRANCH" ;;
