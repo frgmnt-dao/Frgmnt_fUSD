@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { IPoolLogic } from "../interfaces/IPoolLogic.sol";
 
 /// @notice Test token that mimics ITokenLogic for PoolLogic tests.
 /// - Standard ERC20 with mint
@@ -66,5 +67,12 @@ contract TestTokenLogic is ERC20 {
     // ---- Test helper: simulate TokenLogic's FNA-22 pre-deposit fee checkpoint on pool ----
     function triggerCheckpointFeesForDeposit(address pool) external returns (bool ok) {
         (ok, ) = pool.call(abi.encodeWithSignature("checkpointFeesForDeposit()"));
+    }
+
+    // ---- Test helper: typed call that lets a revert reason (e.g. IncompleteNAV, FNA-04
+    //      follow-up) propagate and be asserted on directly, unlike the swallowed low-level
+    //      call above (which mirrors TokenLogic._deposit()'s own fail-open call). ----
+    function triggerCheckpointFeesForDepositRequired(address pool) external {
+        IPoolLogic(pool).checkpointFeesForDeposit();
     }
 }

@@ -524,11 +524,33 @@ contract TokenLogic is
         // after the collateral transfer (but before the fUSD mint) would already misread the
         // just-arrived collateral as unrecognized yield and wrongly charge performance fee on
         // it; checkpointing even later would let this deposit's new fUSD supply be retroactively
-        // taxed for the entire elapsed period since the last checkpoint. Fails open (tolerates
-        // revert — e.g. a not-yet-upgraded PoolLogic, or a pool that hasn't called
-        // initializeAutoCompounding() yet): same behavior as before this fix in that case, not a
-        // new revert surface for deposits.
-        poolLogic.call(abi.encodeWithSignature("checkpointFeesForDeposit()"));
+        // taxed for the entire elapsed period since the last checkpoint.
+        //
+        // FNA-04 follow-up: still a low-level call (NOT a typed try/catch — Solidity's
+        // generated wrapper for a typed external call inserts an extcodesize guard that
+        // reverts *before* the catch clause runs whenever the target has no code, e.g. a
+        // not-yet-upgraded PoolLogic proxy pointed at an old implementation without this
+        // selector; that guard sits outside what try/catch can intercept, so it would turn
+        // every deposit into an unconditional revert in exactly the case this call must stay
+        // fail-open for — cross-proxy upgrade ordering, since PoolLogic and TokenLogic are
+        // separately upgradeable). Inspecting the raw returndata keeps that fail-open behavior
+        // for every case except one: if the call failed AND the returndata is specifically
+        // IncompleteNAV (see IPoolLogic and PoolLogic.checkpointFeesForDeposit()'s own doc for
+        // the full mechanism), re-revert it here so this deposit is blocked outright — CertiK
+        // flagged that the previous version ignored the low-level call's result entirely,
+        // letting a deposit silently continue past a checkpoint that had (silently) done
+        // nothing. A pool that hasn't called initializeAutoCompounding() yet still returns
+        // (does not revert) from checkpointFeesForDeposit() itself, so it never reaches here.
+        (bool checkpointOk, bytes memory checkpointReturnData) = poolLogic.call(
+            abi.encodeWithSelector(IPoolLogic.checkpointFeesForDeposit.selector)
+        );
+        if (
+            !checkpointOk &&
+            checkpointReturnData.length >= 4 &&
+            bytes4(checkpointReturnData) == IPoolLogic.IncompleteNAV.selector
+        ) {
+            revert IPoolLogic.IncompleteNAV();
+        }
 
         // FNA-23: mint against what PoolLogic actually received, not the nominal `amount`
         // requested, so a fee-on-transfer (or otherwise nonstandard) collateral token can't mint
