@@ -1038,8 +1038,22 @@ contract PoolLogic is
         uint256 available = bal - reserved;
         if (available < assetAmount) revert InsufficientAssetBalance();
 
+        // FNA-26: reserving `assetAmount` (without transferring it) immediately removes that
+        // much value from active, reserved-excluding NAV — the same NAV _accrueYield() compares
+        // accountedAssets against. Measure the actual before/after delta around the reservation
+        // itself and apply it now, rather than deferring an approximation to
+        // claimCashWithdraw() (see that function's docs for why subtracting the claim's nominal,
+        // pre-haircut fusdNetForAsset there was wrong: releasing a reservation and transferring
+        // the same amount out leave active NAV exactly unchanged, so any further subtraction at
+        // claim time isn't backed by an actual NAV movement and understates accountedAssets).
+        (uint256 valueBefore, ) = _activeTotalValueWithCompleteness();
+
         // Reserve the amount for this request until it is claimed.
         reservedAssetBalance[asset] = reserved + assetAmount;
+
+        (uint256 valueAfter, ) = _activeTotalValueWithCompleteness();
+        uint256 valueDelta = valueBefore > valueAfter ? valueBefore - valueAfter : 0;
+        accountedAssets = accountedAssets > valueDelta ? accountedAssets - valueDelta : 0;
 
         r.assetAmount = assetAmount;
         r.status = RequestStatus.Finalized;
@@ -1078,17 +1092,16 @@ contract PoolLogic is
 
         IERC20(asset).safeTransfer(msg.sender, amount);
 
-        // FNA-17: saturates at 0 instead of reverting. `_accrueYield()` above (via
-        // updateFeesAndRewards) now correctly excludes this request's reservedAssetBalance —
-        // not fusdNetForAsset — from active NAV before ratcheting accountedAssets. For an
-        // underwater/haircut claim (FNA-05) those two differ by design: fusdNetForAsset is the
-        // claim's full pre-haircut FUSD amount, always fully burned, while reservedAssetBalance
-        // is only the smaller, haircut asset amount actually paid out. Reverting here on that
-        // gap would make an underwater pool's haircut-affected claim permanently unclaimable
-        // whenever accrual had not independently ratcheted accountedAssets high enough to also
-        // cover it — accountedAssets flooring at 0 correctly reflects that the shortfall was
-        // never backed by anything to begin with, rather than blocking the claim.
-        accountedAssets = accountedAssets > fusdNetForAsset ? accountedAssets - fusdNetForAsset : 0;
+        // FNA-26: accountedAssets is deliberately left untouched here. Releasing the reservation
+        // and transferring `amount` leave active, reserved-excluding NAV exactly unchanged —
+        // that value was already removed from the baseline back in finalizeCashWithdraw() when
+        // the reservation was created (see its own docs). This function previously subtracted
+        // the claim's full, pre-haircut fusdNetForAsset here too, on top of finalize's own
+        // (correct) adjustment — for an underwater/haircut claim (FNA-05), fusdNetForAsset can
+        // be materially larger than the reserved asset's actual value, and once accountedAssets
+        // had independently caught back up to active NAV (e.g. via later deposits), that extra
+        // subtraction understated accountedAssets below true NAV by the gap, which a later
+        // accrual call misread as yield and minted FUSD against — with nothing backing it.
 
         emit CashWithdrawClaimed(requestId, msg.sender, asset, amount);
     }
