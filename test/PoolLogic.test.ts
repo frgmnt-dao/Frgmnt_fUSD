@@ -1569,6 +1569,129 @@ describe('PoolLogic', () => {
     });
   });
 
+  // FNA-26: finalizeCashWithdraw() reserves (but does not transfer) a haircut-adjusted
+  // assetAmount, which immediately removes that value from active, reserved-excluding NAV —
+  // the same NAV _accrueYield() compares accountedAssets against. finalizeCashWithdraw() now
+  // measures that exact before/after NAV delta and applies it to accountedAssets at reservation
+  // time. claimCashWithdraw() later releases the reservation and transfers the same amount out,
+  // which leaves active NAV exactly unchanged (the outflow and the reservation release cancel),
+  // so it no longer makes any further accountedAssets adjustment — it previously subtracted the
+  // claim's full, pre-haircut fusdNetForAsset there too, which (once accountedAssets had
+  // independently caught up to active NAV via later, unrelated inflows) understated
+  // accountedAssets by the haircut gap and let a later accrual mint phantom FUSD against it.
+  describe('FNA-26: haircut queued-withdrawal accounting must not manufacture phantom yield', () => {
+    it("finalizeCashWithdraw immediately reduces accountedAssets by the reservation's own NAV impact", async () => {
+      const { pool, fusd, asset, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const assetAddr = await asset.getAddress();
+      const poolAddr = await pool.getAddress();
+
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+      await poolManager.setTotalFundValue(ethers.parseUnits('100', 18));
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('100', 18));
+
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
+      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('50', 18), assetAddr);
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      const requestId = event!.args.requestId;
+
+      // No haircut here (pool still fully collateralized at finalize time) — assetAmount = 50,
+      // so the reservation removes exactly 50 from active NAV: accountedAssets should drop by
+      // exactly that much, matching the pre-FNA-26 formula in this one (non-underwater) case.
+      await pool.connect(manager).finalizeCashWithdraw(requestId);
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('50', 18));
+    });
+
+    it('closes the phantom-yield gap: a synced, haircut-finalized claim leaves accountedAssets exactly aligned with active NAV, and harvest mints nothing', async () => {
+      const { pool, fusd, asset, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const assetAddr = await asset.getAddress();
+      const poolAddr = await pool.getAddress();
+
+      await poolManager.setFees(0n, 0n, 0n, 0n, 10_000n); // isolate the accounting bug from fees
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      // Aligned, fully-collateralized baseline: 100 accountedAssets backed by 100 of real value.
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+      await poolManager.setTotalFundValue(ethers.parseUnits('100', 18));
+
+      // Alice will queue-withdraw her 50; Bob stakes his 50 (effectiveSupply for the reward
+      // index) — both still count toward totalClaims (fUSD totalSupply), matching the PoC.
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
+      await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('50', 18));
+      await pool.connect(bob).stake(ethers.parseUnits('50', 18));
+
+      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('50', 18), assetAddr);
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      const requestId = event!.args.requestId;
+
+      // A 20% loss hits the pool before finalize. accountedAssets (a high-water mark) is
+      // untouched by a mere loss — that's by design, unrelated to this fix.
+      await asset.burnFromPool(poolAddr, ethers.parseUnits('20', 18));
+      await poolManager.setTotalFundValue(ethers.parseUnits('80', 18));
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('100', 18));
+
+      // Finalize: 80 backing / 100 total claims = 80% collateralized -> Alice's 50 haircuts to
+      // 40. finalizeCashWithdraw's own fix reduces accountedAssets by the reservation's NAV
+      // impact: 100 - 40 = 60.
+      await pool.connect(manager).finalizeCashWithdraw(requestId);
+      const stored = await pool.cashWithdrawRequests(requestId);
+      expect(stored.assetAmount).to.equal(ethers.parseUnits('40', 18));
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('60', 18));
+
+      // Unrelated, legitimate new value arrives and gets recognized (ratcheted up) — active NAV
+      // (190 gross - 40 reserved = 150) exceeds the current accountedAssets(60), so a dust stake
+      // triggers accrual that raises accountedAssets to match it exactly. This recognizes 90 of
+      // *legitimate* yield (150 - 60) from the new inflow itself — nothing to do with the claim
+      // that follows. Bob harvests it now (mirroring the CertiK PoC's own approach) so the
+      // post-claim check below isolates whatever the claim itself contributes, if anything.
+      await poolManager.setTotalFundValue(ethers.parseUnits('190', 18));
+      await mintAndApproveFUSD(fusd, pool, bob, 1n);
+      await pool.connect(bob).stake(1n);
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('150', 18));
+      if ((await pool.pendingReward(await bob.getAddress())) > 0n) {
+        await pool.connect(bob).harvest();
+      }
+      expect(await pool.pendingReward(await bob.getAddress())).to.equal(0n);
+      const bobFusdBeforeClaim = await fusd.balanceOf(await bob.getAddress());
+
+      // Claim: releases the 40 reservation and transfers it out. Active NAV is unchanged by this
+      // step (150 -> 150, matching the CertiK PoC's own logged result) — reflected here by
+      // updating the mock's gross NAV to the same real-world post-transfer total.
+      await pool.connect(alice).claimCashWithdraw(requestId);
+      await poolManager.setTotalFundValue(ethers.parseUnits('150', 18));
+
+      const reservedNow = await pool.reservedAssetBalance(assetAddr);
+      expect(reservedNow).to.equal(0n);
+      const activeNav =
+        (await poolManager.totalFundValue()) - (await poolManager.assetValue(assetAddr, reservedNow));
+
+      // The fix: accountedAssets stays exactly where it was (150), matching active NAV exactly —
+      // no gap for the next accrual to misread as yield. Pre-fix, this would have dropped to
+      // 150 - 50 (Alice's full pre-haircut fusdNetForAsset) = 100, leaving a 50 phantom gap.
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('150', 18));
+      expect(await pool.accountedAssets()).to.equal(activeNav);
+
+      // Bob has nothing NEW to harvest from the claim itself: with accountedAssets == active NAV,
+      // accrual recognizes zero additional net yield. Pre-fix, the 50 phantom gap left by the
+      // claim's over-decrement would have minted Bob ~50 more FUSD from nothing.
+      expect(await pool.pendingReward(await bob.getAddress())).to.equal(0n);
+      await expect(pool.connect(bob).harvest()).to.be.revertedWithCustomError(pool, 'NothingToHarvest');
+      expect(await fusd.balanceOf(await bob.getAddress())).to.equal(bobFusdBeforeClaim);
+    });
+  });
+
   // FNA-17: a finalized-but-unclaimed queued withdrawal's reservedAssetBalance sits inside
   // PoolLogic until claimed. claimCashWithdraw() runs accrual (via updateFeesAndRewards) before
   // releasing the reservation and transferring the asset out, so if accrual valued the pool
