@@ -486,10 +486,10 @@ contract PoolLogic is
         totalPerformanceFee += _performanceFee;
         accountedAssets = _newAccountedAssets;
 
-        // FNA-06: with no floor/ceiling, an attacker holding the pool's only (dust, e.g. 1 wei)
-        // effective sfUSD supply could donate an ordinary ERC20 transfer directly to PoolLogic
-        // (reads as "yield" here since it grows fund value without growing accountedAssets), then
-        // harvest, cheaply repeating this for huge multiplicative index growth per cycle until a
+        // FNA-06: with no floor, an attacker holding the pool's only (dust, e.g. 1 wei) effective
+        // sfUSD supply could donate an ordinary ERC20 transfer directly to PoolLogic (reads as
+        // "yield" here since it grows fund value without growing accountedAssets), then harvest,
+        // cheaply repeating this for huge multiplicative index growth per cycle until a
         // checkpoint's index exceeds type(uint256).max and Math.mulDiv panics — permanently
         // freezing every withdraw/stake/unstake/harvest, since all of them accrue yield first.
         // PoolLogic is already deployed and upgradeable on mainnet, so this can't rely on a fresh
@@ -501,10 +501,26 @@ contract PoolLogic is
         // effectiveSupply*1e6 (a ~1e6x growth-factor ceiling per checkpoint — unreachable via any
         // legitimate yield report, e.g. a lone staker's small unclaimed-rewards balance briefly
         // outpaced by fresh yield is nowhere close, but it still bounds a pathological/buggy
-        // totalValue reading) and the update stops once index reaches 1e30, so
-        // index * growthFactor < 1e30 * (1 + 1e6) always — comfortably under type(uint256).max.
+        // totalValue reading).
+        //
+        // CertiK follow-up: an earlier version of this fix also stopped updating the index at all
+        // once it reached 1e30, purely to keep a comfortable margin under type(uint256).max. That
+        // traded a rare, bounded-cost DoS for a worse failure: once crossed, EVERY future
+        // legitimate yield event — attacked or not, including a pool's own long-run organic
+        // compounding — stopped distributing rewards permanently and silently, with no revert to
+        // signal it. Removed: this per-checkpoint growth cap alone already bounds the WORST-CASE
+        // number of checkpoints needed to approach type(uint256).max to roughly ten, and each of
+        // those ten must independently inject appliedNetYield ~= effectiveSupply * 1e6 in real
+        // recognized yield — cost that scales directly with the pool's actual staked supply, not
+        // a fixed or shrinking quantity, and is economically irrational once effectiveSupply is
+        // healthy (not sitting at the 1e18 floor). Residual, accepted risk, same tradeoff CertiK
+        // recommended: an attacker willing to burn an amount of capital that scales with (and
+        // ordinarily dwarfs) the pool's own liquidity could still force a Math.mulDiv revert here
+        // on some future checkpoint — mitigated operationally by seeding real initial liquidity
+        // at deploy and keeping effectiveSupply away from the 1e18 floor, not by a second code-
+        // level ceiling that reintroduces a permanent, silent reward freeze of its own.
         uint256 effectiveSupply = totalSupply() + _unclaimedRewards();
-        if (_netYield > 0 && effectiveSupply >= 1e18 && index < 1e30) {
+        if (_netYield > 0 && effectiveSupply >= 1e18) {
             uint256 appliedNetYield = effectiveSupply * 1e6;
             if (_netYield < appliedNetYield) {
                 appliedNetYield = _netYield;
