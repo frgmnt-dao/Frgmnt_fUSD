@@ -6,7 +6,23 @@ import path from 'path';
 // USER CONFIG
 // ============================================================
 
-const POOL_FACTORY = '0x704c56974e0CA4BF8ff8fe8acc51FBF1E053878E';
+// Auditor-flagged bug (CertiK, confirmed live on the USD deployment — see
+// feature/06-aave-v4): this constant must be this deployment's own PoolManagerLogic
+// proxy address, never PoolLogic's. NftTrackerStorage.checkContractGuard() and
+// SlippageAccumulator's onlyContractGuard/assetValue() both call
+// IHasGuardInfo(poolFactory).getContractGuard(...) / IHasAssetInfo(poolFactory)
+// .getAssetPrice(...) — functions only PoolManagerLogic implements (factory() returns
+// address(this) there, forwarding to Governance/AssetHandler). PoolLogic implements
+// neither, so pointing this at a PoolLogic address makes every guard-authenticated
+// call on both contracts revert, exactly as it did on the live USD pool before that
+// was fixed.
+//
+// Left blank deliberately (assertAddress below will refuse to proceed with a blank
+// value): unlike UNISWAP_ROUTER/AAVE_DATA_PROVIDER below, which are shared,
+// product-independent Base-chain infrastructure, this is this specific deployment's
+// own PoolManagerLogic proxy — it does not exist until deploy_core_contracts.ts has
+// been run for this product. Fill in with that address before running this script.
+const POOL_FACTORY = ''; // set to this deployment's PoolManagerLogic proxy address
 const UNISWAP_ROUTER = '0x2626664c2603336E57B271c5C0b26F421741e481';
 const UNI_POSITION_MANAGER = '0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1';
 const AAVE_DATA_PROVIDER = '0x0F43731EB8d45A581f4a36DD74F5f358bc90C73A';
