@@ -861,6 +861,9 @@ contract PoolLogic is
         // see FundCalculationLibrary.computeImmediateWithdrawPortion and FNA-05.
         uint256 fundValue = _withdrawableFundValue();
         if (fundValue == 0) revert EmptyFund();
+        // FNA-07 follow-up: computeImmediateWithdrawPortion now internally derives a separate,
+        // non-liquidity-capped NAV for its solvency haircut, so a temporary under-liquid lending
+        // position is never misread as permanent insolvency — see its own docs.
         uint256 portion = FundCalculationLibrary.computeImmediateWithdrawPortion(
             address(this),
             netFusd,
