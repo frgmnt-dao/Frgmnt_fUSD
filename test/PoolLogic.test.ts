@@ -1755,6 +1755,105 @@ describe('PoolLogic', () => {
       // FundCalculationLibrary.computeFinalizeAssetAmount's "KNOWN LIMITATION" doc comment).
       expect(await pool.accountedAssets()).to.be.lt(ethers.parseUnits('100150', 18));
     });
+
+    // CertiK follow-up: excluding reserved balance from accrual NAV (the test above) stops a
+    // reserved-leg price move from being credited as yield, but by itself doesn't stop a
+    // different problem — finalizing a request drops active NAV (the reservation) without
+    // lowering accountedAssets to match, so genuine organic yield earned while the request sits
+    // finalized-but-unclaimed gets suppressed behind that artificial overhang. A late, dominant
+    // staker who enters before the overhang finally clears (at claim) could then capture most of
+    // that yield, at the expense of the incumbent who was actually staked while it was earned.
+    // Fixed as part of FNA-26 (finalizeCashWithdraw syncing accountedAssets to active NAV
+    // immediately, rather than deferring an approximation to claim) — this test proves that same
+    // fix also closes this distinct "late staker snipes yield" angle, reproducing CertiK's own
+    // PoC scenario and asserting the opposite of its demonstrated outcome.
+    it("CertiK follow-up: finalizing a request does not suppress organic yield behind an artificial overhang, so a late dominant staker cannot snipe an incumbent's yield", async () => {
+      const { pool, fusd, asset, poolManager, manager, user, user2, other } =
+        await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const tom = other;
+      const assetAddr = await asset.getAddress();
+      const poolAddr = await pool.getAddress();
+
+      await poolManager.setFees(0n, 0n, 0n, 0n, 10_000n); // isolate the accrual bug from fees
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      // Aligned, fully-collateralized baseline: Bob (staked) and Alice (about to queue-withdraw)
+      // jointly back a 50,000-value pool.
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('50000', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('50000', 18));
+      await poolManager.setTotalFundValue(ethers.parseUnits('50000', 18));
+
+      await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('10000', 18));
+      await pool.connect(bob).stake(ethers.parseUnits('10000', 18));
+
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('40000', 18));
+      const tx = await pool.connect(alice).requestCashWithdraw(
+        ethers.parseUnits('40000', 18),
+        assetAddr,
+      );
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      const requestId = event!.args.requestId;
+
+      // Finalize: fully collateralized (50,000 NAV / 50,000 total claims), so no FNA-05 haircut —
+      // Alice's full 40,000 is reserved. The fix: accountedAssets syncs immediately to the new,
+      // reservation-excluding active NAV (10,000) instead of staying frozen at 50,000 — no
+      // artificial overhang, unlike CertiK's demonstrated pre-fix behavior.
+      await pool.connect(manager).finalizeCashWithdraw(requestId);
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('10000', 18));
+
+      // Organic yield arrives while Alice's claim sits unclaimed (e.g. a donation or real trading
+      // profit) — active NAV rises to 15,000.
+      await poolManager.setTotalFundValue(ethers.parseUnits('55000', 18));
+
+      // Bob (the sole incumbent staker throughout) triggers accrual via a dust stake. With no
+      // artificial overhang blocking it, this 5,000 of real yield is recognized right now.
+      await mintAndApproveFUSD(fusd, pool, bob, 1n);
+      await pool.connect(bob).stake(1n);
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('15000', 18));
+      const bobPendingBeforeTom = await pool.pendingReward(await bob.getAddress());
+      expect(bobPendingBeforeTom).to.be.approximately(
+        ethers.parseUnits('5000', 18),
+        ethers.parseUnits('1', 18),
+      );
+
+      // Tom now stakes a dominant amount — well AFTER the 5,000 yield was already recognized and
+      // credited to Bob. Nothing left over for Tom to snipe from this checkpoint.
+      await mintAndApproveFUSD(fusd, pool, tom, ethers.parseUnits('200000', 18));
+      await pool.connect(tom).stake(ethers.parseUnits('200000', 18));
+      expect(await pool.pendingReward(await tom.getAddress())).to.equal(0n);
+      // Tom's stake is itself a no-yield checkpoint (active NAV unchanged) — Bob's already-earned
+      // pending reward is untouched by it.
+      expect(await pool.pendingReward(await bob.getAddress())).to.equal(bobPendingBeforeTom);
+
+      // Claim: releases the reservation and transfers the 40,000 out. accountedAssets is
+      // untouched (FNA-26) and active NAV is unchanged by the claim itself, so nothing new is
+      // exposed here either.
+      await pool.connect(alice).claimCashWithdraw(requestId);
+      await poolManager.setTotalFundValue(ethers.parseUnits('15000', 18)); // 55000 - 40000 paid out
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('15000', 18));
+
+      const bobFusdBefore = await fusd.balanceOf(await bob.getAddress());
+      const tomFusdBefore = await fusd.balanceOf(await tom.getAddress());
+
+      await pool.connect(bob).harvest();
+      if ((await pool.pendingReward(await tom.getAddress())) > 0n) {
+        await pool.connect(tom).harvest();
+      }
+
+      const bobHarvested = (await fusd.balanceOf(await bob.getAddress())) - bobFusdBefore;
+      const tomHarvested = (await fusd.balanceOf(await tom.getAddress())) - tomFusdBefore;
+
+      // The opposite of CertiK's demonstrated pre-fix outcome (there: Tom captured >80%, Bob was
+      // diluted below 20%): Bob, the sole incumbent while the yield was earned, gets essentially
+      // all of it, and Tom — who staked only after it was already recognized — gets none.
+      expect(bobHarvested).to.be.approximately(ethers.parseUnits('5000', 18), ethers.parseUnits('1', 18));
+      expect(tomHarvested).to.equal(0n);
+    });
   });
 
   // FNA-06: compoundedRewardIndex must never grow unbounded. An attacker holding the pool's only
