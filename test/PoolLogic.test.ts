@@ -1930,6 +1930,150 @@ describe('PoolLogic', () => {
     });
   });
 
+  // FNA-23 follow-up: claimCashWithdraw() previously trusted the reserved nominal `amount` to
+  // be exactly what moved on both sides of the transfer. A recipient-fee settlement asset
+  // delivers less than `amount` to the claimant while still burning the full fusdNetForAsset; a
+  // sender-fee/burn-on-transfer asset drains more than `amount` from the pool's own balance,
+  // which — if reservedAssetBalance were only decremented by the nominal `amount` — would leave
+  // it overstated relative to the real on-chain balance, tripping the FNA-03 invariant
+  // (balanceOf >= reserved) on every later guarded transaction and finalization. Fixed via
+  // FundCalculationLibrary.claimCashWithdrawTransfer(), which measures the actual balance delta
+  // on both the pool's own side and the recipient's side.
+  describe('FNA-23 follow-up: claimCashWithdraw must not trust the nominal transfer amount', () => {
+    async function setUpFeeTokenWithdraw(
+      fx: Awaited<ReturnType<typeof deployPoolFixture>>,
+      feeBps: number,
+      senderExtraBurnBps: number,
+    ) {
+      const { pool, fusd, poolManager, manager, user } = fx;
+      const alice = user;
+
+      const FeeToken = await ethers.getContractFactory('MockFeeOnTransferERC20');
+      const feeToken = await FeeToken.deploy('Fee Asset', 'FEE', 0);
+      await feeToken.waitForDeployment();
+      const feeTokenAddr = await feeToken.getAddress();
+
+      const TestAssetGuard = await ethers.getContractFactory('TestAssetGuard');
+      const assetGuard = await TestAssetGuard.deploy();
+      await assetGuard.waitForDeployment();
+      await poolManager.setAssetGuard(feeTokenAddr, await assetGuard.getAddress());
+      await poolManager.setSupportedAsset(feeTokenAddr, true, ethers.parseUnits('1', 18), 18);
+
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('1000', 18));
+      // Extra headroom beyond the 1000 that gets reserved/withdrawn: a sender-fee/burn-on-transfer
+      // token needs the pool to actually hold enough spare balance to cover the extra burn on top
+      // of the transferred amount, exactly like a real deflationary token's supply mechanics would.
+      await feeToken.mint(await pool.getAddress(), ethers.parseUnits('2000', 18));
+
+      const tx = await pool.connect(alice).requestCashWithdraw(
+        ethers.parseUnits('1000', 18),
+        feeTokenAddr,
+      );
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      const requestId = event!.args.requestId;
+
+      await pool.connect(manager).finalizeCashWithdraw(requestId);
+      const reservedBefore = await pool.reservedAssetBalance(feeTokenAddr);
+      expect(reservedBefore).to.equal(ethers.parseUnits('1000', 18));
+
+      // Enable the fee only now, after finalize has already fixed the nominal reserved amount —
+      // matching the real scenario CertiK described (the asset's own fee mechanics are entirely
+      // independent of, and invisible to, the pool's earlier reservation math.
+      await feeToken.setFeeBps(feeBps);
+      await feeToken.setSenderExtraBurnBps(senderExtraBurnBps);
+
+      return { alice, feeToken, feeTokenAddr, requestId, reservedBefore };
+    }
+
+    it('recipient-fee: the claimant receives less than the reserved amount, but the full fusdNetForAsset is still burned', async () => {
+      const fx = await loadFixture(deployPoolFixture);
+      const { fusd } = fx;
+      const { alice, feeToken, feeTokenAddr, requestId } = await setUpFeeTokenWithdraw(fx, 500, 0); // 5% recipient fee
+
+      const supplyBefore = await fusd.totalSupply();
+      const aliceBalBefore = await feeToken.balanceOf(await alice.getAddress());
+
+      await fx.pool.connect(alice).claimCashWithdraw(requestId);
+
+      const delivered = (await feeToken.balanceOf(await alice.getAddress())) - aliceBalBefore;
+      // 5% fee on 1000 -> exactly 950 delivered, strictly less than the reserved 1000.
+      expect(delivered).to.equal(ethers.parseUnits('950', 18));
+
+      // The full fusdNetForAsset (1000, zero exit fee in this fixture) was burned regardless of
+      // the shortfall the claimant actually received — the reserved value genuinely left the
+      // pool's own balance in full either way.
+      expect(supplyBefore - (await fusd.totalSupply())).to.equal(ethers.parseUnits('1000', 18));
+
+      // Since the pool's own balance dropped by exactly the nominal amount (only the recipient
+      // side was reduced), the reservation still clears exactly, with nothing left overstated.
+      expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(0n);
+    });
+
+    it("the claimed event reports what the claimant actually received, not the reserved nominal amount", async () => {
+      const fx = await loadFixture(deployPoolFixture);
+      const { alice, feeTokenAddr, requestId } = await setUpFeeTokenWithdraw(fx, 500, 0);
+
+      await expect(fx.pool.connect(alice).claimCashWithdraw(requestId))
+        .to.emit(fx.pool, 'CashWithdrawClaimed')
+        .withArgs(requestId, await alice.getAddress(), feeTokenAddr, ethers.parseUnits('950', 18));
+    });
+
+    it('sender-fee/burn-on-transfer: a coexisting second reservation proves reservedAssetBalance is reduced by the real outflow, not the nominal amount, and remains fully claimable', async () => {
+      const fx = await loadFixture(deployPoolFixture);
+      const { fusd, manager, user2 } = fx;
+      const bob = user2;
+
+      const { alice, feeToken, feeTokenAddr, requestId: aliceRequestId, reservedBefore } =
+        await setUpFeeTokenWithdraw(fx, 0, 1000); // 10% extra burn beyond the transferred amount
+
+      // Bob independently requests and finalizes a second, coexisting reservation in the same
+      // fee token *before* Alice claims, so reservedAssetBalance (1500) exceeds Alice's own
+      // 1000 at claim time — the only way to actually distinguish "decrement by the nominal
+      // amount" from "decrement by the real outflow": with only Alice's own 1000 reserved,
+      // both a 1000 and a 1100 decrement floor to the same 0 and can't tell the fix apart.
+      await mintAndApproveFUSD(fusd, fx.pool, bob, ethers.parseUnits('500', 18));
+      await feeToken.mint(await fx.pool.getAddress(), ethers.parseUnits('500', 18));
+      const bobTx = await fx.pool.connect(bob).requestCashWithdraw(
+        ethers.parseUnits('500', 18),
+        feeTokenAddr,
+      );
+      const bobReceipt = await bobTx.wait();
+      const bobEvent = bobReceipt!.logs
+        .map((log: any) => { try { return fx.pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      const bobRequestId = bobEvent!.args.requestId;
+      await fx.pool.connect(manager).finalizeCashWithdraw(bobRequestId);
+      expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(ethers.parseUnits('1500', 18));
+
+      const poolBalBefore = await feeToken.balanceOf(await fx.pool.getAddress());
+      await fx.pool.connect(alice).claimCashWithdraw(aliceRequestId);
+      const actualOutflow = poolBalBefore - (await feeToken.balanceOf(await fx.pool.getAddress()));
+      // 1000 transferred + 10% of that burned extra from the pool's own balance = 1100 total outflow.
+      expect(actualOutflow).to.equal(ethers.parseUnits('1100', 18));
+      expect(reservedBefore).to.equal(ethers.parseUnits('1000', 18));
+
+      // 1500 - 1100 (real outflow) = 400 — NOT 1500 - 1000 (nominal amount) = 500, which is what
+      // the pre-fix code would have left behind, overstating reservedAssetBalance relative to
+      // the pool's real on-chain balance by exactly the 100 extra that was actually burned.
+      expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(ethers.parseUnits('400', 18));
+
+      // The FNA-03 invariant (balanceOf >= reservedAssetBalance) still holds, and Bob's own,
+      // still-Finalized reservation remains fully backed and claimable in full.
+      expect(await feeToken.balanceOf(await fx.pool.getAddress())).to.be.gte(
+        await fx.pool.reservedAssetBalance(feeTokenAddr),
+      );
+      const bobBalBefore = await feeToken.balanceOf(await bob.getAddress());
+      await expect(fx.pool.connect(bob).claimCashWithdraw(bobRequestId)).to.not.be.reverted;
+      expect((await feeToken.balanceOf(await bob.getAddress())) - bobBalBefore).to.equal(
+        ethers.parseUnits('500', 18),
+      );
+    });
+  });
+
   // FNA-06: compoundedRewardIndex must never grow unbounded. An attacker holding the pool's only
   // (dust) effective sfUSD supply could previously donate directly to the pool (reads as "yield"
   // since it grows fund value without growing accountedAssets) and harvest repeatedly, compounding

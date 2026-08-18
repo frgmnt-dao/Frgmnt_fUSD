@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
 import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
 import { IPoolLogic } from "../interfaces/IPoolLogic.sol";
@@ -12,6 +13,8 @@ import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
  * @dev Stateless utility library extracted from PoolLogic.
  */
 library FundCalculationLibrary {
+    using SafeERC20 for IERC20;
+
     error InvalidReservedBalance();
 
     function calculatePerformanceFee(
@@ -453,5 +456,43 @@ library FundCalculationLibrary {
         } else {
             assetAmount = assetAmount18 * (10 ** (decimals - 18));
         }
+    }
+
+    /// @notice FNA-23 follow-up: transfers `amount` of `asset` from `pool` (the caller,
+    ///         via delegatecall) to `recipient`, and measures what actually moved rather
+    ///         than trusting the nominal `amount` — a sender-fee/burn-on-transfer asset can
+    ///         drain more than `amount` from the pool's own balance, and a recipient-fee
+    ///         asset can deliver less than `amount` to the recipient. Extracted out of
+    ///         PoolLogic.claimCashWithdraw() purely to keep that contract's own deployed
+    ///         bytecode under the EIP-170 size limit — this function's logic runs against
+    ///         the caller's own storage/balance via delegatecall exactly as if it were
+    ///         inlined there.
+    /// @param pool The pool (delegatecall caller) whose balance the asset is transferred from.
+    /// @param asset The ERC20 being transferred.
+    /// @param recipient The transfer recipient.
+    /// @param amount The nominal amount to transfer.
+    /// @param reserved The pool's current reservedAssetBalance[asset] before this transfer.
+    /// @return newReserved `reserved` reduced by what actually left the pool's own balance
+    ///         (floored at 0), for the caller to write back to reservedAssetBalance[asset] —
+    ///         keeps that invariant (balanceOf >= reserved) intact even when more than
+    ///         `amount` left the pool's balance.
+    /// @return delivered What the recipient's own balance actually increased by, for the
+    ///         caller to report accurately (e.g. in an event) instead of the nominal `amount`.
+    function claimCashWithdrawTransfer(
+        address pool,
+        address asset,
+        address recipient,
+        uint256 amount,
+        uint256 reserved
+    ) external returns (uint256 newReserved, uint256 delivered) {
+        uint256 poolBalanceBefore = IERC20(asset).balanceOf(pool);
+        uint256 recipientBalanceBefore = IERC20(asset).balanceOf(recipient);
+
+        IERC20(asset).safeTransfer(recipient, amount);
+
+        uint256 actualOutflow = poolBalanceBefore - IERC20(asset).balanceOf(pool);
+        delivered = IERC20(asset).balanceOf(recipient) - recipientBalanceBefore;
+
+        newReserved = reserved > actualOutflow ? reserved - actualOutflow : 0;
     }
 }
