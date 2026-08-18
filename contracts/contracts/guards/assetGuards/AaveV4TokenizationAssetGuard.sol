@@ -263,10 +263,24 @@ contract AaveV4TokenizationAssetGuard is
     /// @dev ClosedAssetGuard's inherited default always returns true (permissive), which would
     ///      let `token`'s own removeAssetCheck succeed even while the pool holds real, indirect
     ///      exposure to it via vault shares — see addAssetCheck above for the matching
-    ///      onboarding-side protection. Fails safe if the vault's own `asset()` call reverts
-    ///      (an already-broken vault, unrelated to whichever token is being checked) by falling
-    ///      through to "not used" rather than permanently blocking removal of every other token
-    ///      in the pool for as long as that one vault stays broken.
+    ///      onboarding-side protection.
+    ///
+    ///      FNA-20 follow-up: when `asset` (the vault) holds nonzero shares but its `asset()`
+    ///      call reverts, this now fails CLOSED (blocks removal) rather than open. An earlier
+    ///      revision fell through to "not used" here specifically to avoid one broken vault
+    ///      permanently blocking removal of every OTHER supported asset in the pool — but that
+    ///      let a live underlying be removed from supportedAssets while a vault that might still
+    ///      recover continued wrapping it; a later successful redeem() through that vault would
+    ///      then land funds outside any tracked/valued asset, silently understating NAV until
+    ///      governance manually re-adds the token. `asset()` is a trivial, near-always-immutable
+    ///      view getter on a correctly-implemented ERC-4626 vault — a revert here is a strong
+    ///      signal of a genuinely broken vault, not routine transient failure (unlike, say, a
+    ///      Chainlink staleness revert). The DoS this reopens is narrow and bounded: it can only
+    ///      block removing OTHER assets from THIS specific pool, only while THIS specific vault
+    ///      both holds a stuck nonzero balance and stays broken — not withdrawals, not deposits,
+    ///      not other pools — and is resolved as soon as the vault is fixed, drained, or its
+    ///      stuck shares are otherwise dealt with. That bounded cost is preferable to silently
+    ///      corrupting NAV accounting for every depositor.
     function removeTokenCheck(
         address pool,
         address asset,
@@ -277,7 +291,7 @@ contract AaveV4TokenizationAssetGuard is
         try IERC4626(asset).asset() returns (address underlying) {
             return token != underlying;
         } catch {
-            return true;
+            return false;
         }
     }
 
