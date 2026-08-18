@@ -1080,17 +1080,35 @@ contract PoolLogic is
         address asset = r.asset;
         uint256 fusdNetForAsset = r.fusdNetForAsset;
 
-        // Release the reserved amount for this request.
-        // If safeTransfer reverts, the whole tx reverts and the reservation remains intact.
-        reservedAssetBalance[asset] -= amount;
-
         r.status = RequestStatus.Claimed;
         r.assetAmount = 0;
 
         // burn the FUSD locked in contract
         ITokenLogic(fusd).burn(fusdNetForAsset);
 
-        IERC20(asset).safeTransfer(msg.sender, amount);
+        // FNA-23 follow-up: release exactly what actually left this contract's own balance,
+        // not the reserved nominal `amount`. A sender-fee/burn-on-transfer settlement asset
+        // can drain more than `amount` from the pool's own balance; decrementing
+        // reservedAssetBalance by only the nominal `amount` would then leave it overstated
+        // relative to the real on-chain balance, tripping the FNA-03 invariant
+        // (balanceOf >= reserved) on every later guarded transaction and finalization for as
+        // long as that overstatement persists. If safeTransfer reverts, the whole tx reverts
+        // and the reservation remains intact. The claimant's own delivered amount — which a
+        // recipient-fee token can separately reduce below `amount` — is reported in the event
+        // for transparency, but fusdNetForAsset above is still burned in full: the reserved
+        // value genuinely left the pool's balance either way, whether it landed with the
+        // claimant or was consumed by the asset's own fee mechanism en route; see
+        // docs/security.md for why this isn't compensated further. Delegated to
+        // FundCalculationLibrary purely to keep this contract's own bytecode under the
+        // EIP-170 size limit.
+        (uint256 newReserved, uint256 delivered) = FundCalculationLibrary.claimCashWithdrawTransfer(
+            address(this),
+            asset,
+            msg.sender,
+            amount,
+            reservedAssetBalance[asset]
+        );
+        reservedAssetBalance[asset] = newReserved;
 
         // FNA-26: accountedAssets is deliberately left untouched here. Releasing the reservation
         // and transferring `amount` leave active, reserved-excluding NAV exactly unchanged —
@@ -1103,7 +1121,7 @@ contract PoolLogic is
         // subtraction understated accountedAssets below true NAV by the gap, which a later
         // accrual call misread as yield and minted FUSD against — with nothing backing it.
 
-        emit CashWithdrawClaimed(requestId, msg.sender, asset, amount);
+        emit CashWithdrawClaimed(requestId, msg.sender, asset, delivered);
     }
 
     // ============================================================
