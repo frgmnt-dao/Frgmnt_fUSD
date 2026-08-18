@@ -568,6 +568,30 @@ describe('Utility libraries', () => {
         ).to.equal(0n);
       });
 
+      // FNA-32: sizing an immediate withdrawal (and specifically its solvency haircut) against
+      // an understated NAV during a fault-isolated position's transient valuation failure could
+      // misread that as insolvency and haircut a genuinely solvent user for no real reason — and
+      // unlike stake/unstake/harvest's deferred yield *recognition*, a withdrawal's payout is
+      // delivered right now and can't be corrected once the failing guard recovers.
+      it('reverts IncompleteNAV rather than sizing the withdrawal against an understated NAV', async () => {
+        const { fund, fundCalcPool, poolManager, assetGuard18, token18, manager } =
+          await setupPool();
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18));
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18));
+        await poolManager.setValuationComplete(false);
+
+        await expect(
+          fund.computeImmediateWithdrawPortion(
+            await fundCalcPool.getAddress(),
+            ethers.parseUnits('50', 18),
+            ethers.parseUnits('100', 18),
+          ),
+        ).to.be.revertedWithCustomError(
+          await ethers.getContractAt('IPoolLogic', await fund.getAddress()),
+          'IncompleteNAV',
+        );
+      });
+
       // CertiK follow-up: a temporary liquidity shortfall (one under-liquid lending position)
       // must not be misread as insolvency. A fully solvent pool (complete NAV covers total
       // claims) whose currently-liquid value is smaller must still pay Alice her FULL fair share
@@ -669,6 +693,27 @@ describe('Utility libraries', () => {
           ethers.parseUnits('50', 18),
         );
         expect(assetAmount).to.equal(ethers.parseUnits('40', 18)); // 80% of the nominal 50
+      });
+
+      // FNA-32: a queued request's assetAmount is fixed once here and never recalculated even
+      // after the failing guard recovers, so sizing it against an understated NAV during a
+      // transient valuation failure is materially worse than the same risk for an immediate
+      // withdrawal — the wrong payout is permanently baked in, not just this one transaction's.
+      it('reverts IncompleteNAV rather than permanently fixing the payout against an understated NAV', async () => {
+        const { fund, fundCalcPool, poolManager, assetGuard18, assetAddr } = await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18));
+        await poolManager.setValuationComplete(false);
+
+        await expect(
+          fund.computeFinalizeAssetAmount(
+            await fundCalcPool.getAddress(),
+            assetAddr,
+            ethers.parseUnits('50', 18),
+          ),
+        ).to.be.revertedWithCustomError(
+          await ethers.getContractAt('IPoolLogic', await fund.getAddress()),
+          'IncompleteNAV',
+        );
       });
 
       it('nets out already-reserved (finalized-but-unclaimed) balance before applying the haircut', async () => {

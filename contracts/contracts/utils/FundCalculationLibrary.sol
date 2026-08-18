@@ -266,6 +266,21 @@ library FundCalculationLibrary {
     ///        the returned fair share. Passed in rather than recomputed here since the caller
     ///        (PoolLogic._withdrawProRata) already needs it independently for its own EmptyFund
     ///        check and post-withdrawal accounting.
+    /// @dev FNA-32: `_withdrawableFundValue()` below (unlike totalValueWithCompleteness()) returns
+    ///      only a scalar — each per-asset guard that fails open to a balance of 0 (see FNA-04)
+    ///      silently understates this function's NAV rather than signaling it. Sizing an
+    ///      immediate withdrawal's payout, and specifically the solvency haircut, against that
+    ///      understated figure could misread a fault-isolated position's transient valuation
+    ///      failure as insolvency and haircut a genuinely solvent user's withdrawal for no real
+    ///      reason. Unlike stake/unstake/harvest's yield *recognition* (which only defers, and
+    ///      whose fail-open behavior is an intentional, accepted design tradeoff — see the
+    ///      FNA-13 design note on _accrueYield()), a withdrawal's payout is computed and
+    ///      delivered right now and can't be corrected retroactively once the failing guard
+    ///      recovers — the same reasoning that makes checkpointFeesForDeposit() (FNA-04 follow-up)
+    ///      fail closed on deposits applies here. Checked via the same totalValueWithCompleteness()
+    ///      this function already effectively duplicates (see below), so this costs one extra call
+    ///      rather than plumbing a completeness flag through _withdrawableFundValue()'s two
+    ///      differently-capped call sites.
     function computeImmediateWithdrawPortion(
         address pool,
         uint256 netFusd,
@@ -273,6 +288,8 @@ library FundCalculationLibrary {
     ) external view returns (uint256 portion) {
         if (withdrawableFundValue == 0) return 0;
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
+        (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
+        if (!navComplete) revert IPoolLogic.IncompleteNAV();
         uint256 completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
         uint256 totalClaims = IERC20(IPoolLogic(pool).fusd()).totalSupply() + netFusd;
         uint256 fairFusd = _applyClaimsHaircut(netFusd, completeFundValue, totalClaims);
@@ -325,12 +342,19 @@ library FundCalculationLibrary {
     ///        reservedAssetBalance()).
     /// @param asset The asset this queued withdrawal will pay out in.
     /// @param grossFusd The FUSD amount (net of fees) this withdrawal is nominally sized against.
+    /// @dev FNA-32: reverts IncompleteNAV rather than sizing (and then permanently fixing, in
+    ///      r.assetAmount) this request's payout against an understated NAV — see the identical
+    ///      reasoning on computeImmediateWithdrawPortion above. This is a materially bigger risk
+    ///      here than for immediate withdrawal: a queued request's assetAmount is fixed once at
+    ///      finalize and is never recalculated even after the failing guard recovers.
     function computeFinalizeAssetAmount(
         address pool,
         address asset,
         uint256 grossFusd
     ) external view returns (uint256 assetAmount) {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
+        (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
+        if (!navComplete) revert IPoolLogic.IncompleteNAV();
         uint256 effectiveFusd = _applyClaimsHaircut(
             grossFusd,
             _withdrawableFundValue(pool, poolManagerLogic, false),
