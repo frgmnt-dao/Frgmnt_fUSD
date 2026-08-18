@@ -1023,4 +1023,195 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     expect(callbackTxs.some((tx: any) => tx.to === aavePoolAddress)).to.equal(true);
     expect(callbackTxs.some((tx: any) => tx.to === swapRouterAddress)).to.equal(true);
   });
+
+  // -----------------------------------------------------------------------
+  // FNA-29: multi-hop swap bounds must derive from the route actually
+  // selected, not an unrelated fallback single-hop fee
+  // -----------------------------------------------------------------------
+  describe('FNA-29: route-derived swap bounds', () => {
+    const FEE_DENOM = 1_000_000n;
+    const BPS_DENOM = 10_000n;
+
+    // Combined fee across two 0.3% hops, computed the same way the fix does:
+    // fees compound multiplicatively (1 - fee), not by summing.
+    function combinedFee(hopFeesPpm: bigint[]): bigint {
+      let surviving = FEE_DENOM;
+      for (const f of hopFeesPpm) surviving = (surviving * (FEE_DENOM - f)) / FEE_DENOM;
+      return FEE_DENOM - surviving;
+    }
+
+    function minSlippageBps(feePpm: bigint): bigint {
+      return (feePpm * BPS_DENOM) / (FEE_DENOM - feePpm);
+    }
+
+    const exactInputIface = new ethers.Interface([
+      'function exactInput(tuple(bytes path,address recipient,uint256 amountIn,uint256 amountOutMinimum) params) returns (uint256)',
+    ]);
+    const exactOutputIface = new ethers.Interface([
+      'function exactOutput(tuple(bytes path,address recipient,uint256 amountOut,uint256 amountInMaximum) params) returns (uint256)',
+    ]);
+
+    function findDecoded(txs: any[], iface: any, name: string) {
+      for (const t of txs) {
+        try {
+          return iface.decodeFunctionData(name, t.txData);
+        } catch {
+          continue;
+        }
+      }
+      return undefined;
+    }
+
+    it('collateral->settlement exact-input bound uses the configured multi-hop route fee, not the unrelated fallback fee', async () => {
+      const { guard, dataProvider, usdc, weth } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const plAddr = await pl.getAddress();
+      const usdcAddress = await usdc.getAddress();
+      const wethAddress = await weth.getAddress();
+
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      const Token = await ethers.getContractFactory('MockERC20Custom');
+      const wethAToken = await Token.deploy('aWETH', 'aWETH', 18);
+      await wethAToken.waitForDeployment();
+      await dataProvider.setReserveTokens(
+        wethAddress,
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
+      const amountIn = ethers.parseEther('0.25');
+      await wethAToken.mint(plAddr, amountIn);
+
+      const intermediate = ethers.Wallet.createRandom().address;
+      const multiHopPath = ethers.solidityPacked(
+        ['address', 'uint24', 'address', 'uint24', 'address'],
+        [wethAddress, 3000, intermediate, 3000, usdcAddress],
+      );
+      await guard.setUniV3Fee(wethAddress, usdcAddress, 100); // deliberately unrelated fallback
+      await guard.setUniV3PathExactIn(wethAddress, usdcAddress, multiHopPath);
+
+      const params = encodeFlashloanParams(ethers.parseUnits('1', 18), usdcAddress, 0n, []);
+      const txs = await guard.flashloanProcessing.staticCall(plAddr, usdcAddress, 0n, 0n, params);
+
+      const decoded = findDecoded(txs, exactInputIface, 'exactInput');
+      expect(decoded).to.not.equal(undefined);
+
+      const routeFee = combinedFee([3000n, 3000n]);
+      const routeSlippageBps = minSlippageBps(routeFee);
+      const expectedOut = (amountIn * ethers.parseUnits('2000', 18) * 10n ** 6n) / (10n ** 18n * ethers.parseUnits('1', 18));
+      const expectedMinOut = (expectedOut * (BPS_DENOM - routeSlippageBps)) / BPS_DENOM;
+
+      expect(decoded!.params.amountOutMinimum).to.equal(expectedMinOut);
+
+      // The buggy fallback-fee (100 ppm) bound would have been strictly tighter than
+      // what a real, zero-price-impact swap along the actual 2-hop route delivers —
+      // guaranteeing a revert even with no price impact at all.
+      const buggySlippageBps = minSlippageBps(100n);
+      const buggyMinOut = (expectedOut * (BPS_DENOM - buggySlippageBps)) / BPS_DENOM;
+      expect(decoded!.params.amountOutMinimum).to.be.lessThan(buggyMinOut);
+    });
+
+    it('settlement->debt exact-output bound uses the configured multi-hop route fee, not the unrelated fallback fee', async () => {
+      const { guard, usdc, weth } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const plAddr = await pl.getAddress();
+      const usdcAddress = await usdc.getAddress();
+      const wethAddress = await weth.getAddress();
+
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      const intermediate = ethers.Wallet.createRandom().address;
+      // ExactOutput paths are reversed: first token = actual output (debtToken),
+      // last token = actual input (settlementToken).
+      const reversedMultiHopPath = ethers.solidityPacked(
+        ['address', 'uint24', 'address', 'uint24', 'address'],
+        [wethAddress, 3000, intermediate, 3000, usdcAddress],
+      );
+      await guard.setUniV3Fee(usdcAddress, wethAddress, 100); // deliberately unrelated fallback
+      await guard.setUniV3PathExactOut(usdcAddress, wethAddress, reversedMultiHopPath);
+
+      const desiredDebtOut = ethers.parseEther('0.1');
+      const params = encodeFlashloanParams(ethers.parseUnits('1', 18), usdcAddress, 0n, [
+        [wethAddress, 0n, desiredDebtOut],
+      ]);
+
+      const txs = await guard.flashloanProcessing.staticCall(plAddr, usdcAddress, 0n, 0n, params);
+
+      const decoded = findDecoded(txs, exactOutputIface, 'exactOutput');
+      expect(decoded).to.not.equal(undefined);
+
+      const routeFee = combinedFee([3000n, 3000n]);
+      const routeSlippageBps = minSlippageBps(routeFee);
+      const expectedIn = (desiredDebtOut * ethers.parseUnits('2000', 18) * 10n ** 6n) / (10n ** 18n * ethers.parseUnits('1', 18));
+      const expectedMaxIn = (expectedIn * (BPS_DENOM + routeSlippageBps)) / BPS_DENOM;
+
+      expect(decoded!.params.amountInMaximum).to.equal(expectedMaxIn);
+
+      // The buggy fallback-fee (100 ppm) bound would have been strictly tighter than
+      // what a real, zero-price-impact swap along the actual 2-hop route actually costs —
+      // guaranteeing a revert even with no price impact at all.
+      const buggySlippageBps = minSlippageBps(100n);
+      const buggyMaxIn = (expectedIn * (BPS_DENOM + buggySlippageBps)) / BPS_DENOM;
+      expect(decoded!.params.amountInMaximum).to.be.greaterThan(buggyMaxIn);
+    });
+
+    it('reverts if a configured exact-input path does not actually start/end at its own mapped tokens', async () => {
+      const { guard, dataProvider, usdc, weth } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const plAddr = await pl.getAddress();
+      const usdcAddress = await usdc.getAddress();
+      const wethAddress = await weth.getAddress();
+
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      const Token = await ethers.getContractFactory('MockERC20Custom');
+      const wethAToken = await Token.deploy('aWETH', 'aWETH', 18);
+      await wethAToken.waitForDeployment();
+      await dataProvider.setReserveTokens(
+        wethAddress,
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
+      await wethAToken.mint(plAddr, ethers.parseEther('0.25'));
+
+      const wrongToken = ethers.Wallet.createRandom().address;
+      const mismatchedPath = uniV3Path(wrongToken, 3000, usdcAddress); // doesn't start with weth
+      await guard.setUniV3PathExactIn(wethAddress, usdcAddress, mismatchedPath);
+
+      const params = encodeFlashloanParams(ethers.parseUnits('1', 18), usdcAddress, 0n, []);
+      await expect(
+        guard.flashloanProcessing.staticCall(plAddr, usdcAddress, 0n, 0n, params),
+      ).to.be.revertedWith('Frgmnt: path endpoints mismatch');
+    });
+
+    it('reverts if a configured exact-output reversed path does not actually start/end at its own mapped tokens', async () => {
+      const { guard, usdc, weth } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const plAddr = await pl.getAddress();
+      const usdcAddress = await usdc.getAddress();
+      const wethAddress = await weth.getAddress();
+
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      const wrongToken = ethers.Wallet.createRandom().address;
+      const mismatchedReversedPath = uniV3Path(wrongToken, 3000, usdcAddress); // doesn't start with weth (debtToken)
+      await guard.setUniV3PathExactOut(usdcAddress, wethAddress, mismatchedReversedPath);
+
+      const desiredDebtOut = ethers.parseEther('0.1');
+      const params = encodeFlashloanParams(ethers.parseUnits('1', 18), usdcAddress, 0n, [
+        [wethAddress, 0n, desiredDebtOut],
+      ]);
+      await expect(
+        guard.flashloanProcessing.staticCall(plAddr, usdcAddress, 0n, 0n, params),
+      ).to.be.revertedWith('Frgmnt: path endpoints mismatch');
+    });
+  });
 });

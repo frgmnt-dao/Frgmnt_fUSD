@@ -542,9 +542,15 @@ contract AaveV3LendingPoolAssetGuard is
                 continue;
             }
 
-            // get swap fee
-            uint24 fee = uniV3Fee[settlementToken][repayPlans[i].underlyingAsset];
-            require(fee != 0, "Frgmnt: missing fee");
+            // FNA-29: size the flash loan against the same fee assumption the actual
+            // settlement->debt swap will be bound by (see _buildOneSettlementToDebtSwapTx),
+            // not always the unrelated single-hop fallback fee — otherwise a configured
+            // multi-hop route's true cost can exceed this estimate, under-sizing the flash
+            // loan needed to cover the swap that same route will later require.
+            uint24 fee = _routeFeeSettlementToDebt(
+                settlementToken,
+                repayPlans[i].underlyingAsset
+            );
 
             totalMaxIn += _oracleMaxIn(
                 factory,
@@ -625,8 +631,9 @@ contract AaveV3LendingPoolAssetGuard is
 
         address factory = IPoolLogic(pool).factory();
 
-        uint24 fee = uniV3Fee[settlementToken][debtToken];
-        require(fee != 0, "Frgmnt: missing fee/path settle->debt");
+        // FNA-29: derive the bound from the route actually selected below, not an
+        // unrelated single-hop fallback fee — see _routeFeeSettlementToDebt.
+        uint24 fee = _routeFeeSettlementToDebt(settlementToken, debtToken);
 
         uint256 maxSettlementIn = _oracleMaxIn(
             factory,
@@ -830,8 +837,9 @@ contract AaveV3LendingPoolAssetGuard is
         if (tokenIn == settlementToken) return (false, t);
 
         address factory = IPoolLogic(pool).factory();
-        uint24 fee = uniV3Fee[tokenIn][settlementToken];
-        require(fee != 0, "Frgmnt: missing fee/path collateral->settle");
+        // FNA-29: derive the bound from the route actually selected below, not an
+        // unrelated single-hop fallback fee — see _routeFeeCollateralToSettlement.
+        uint24 fee = _routeFeeCollateralToSettlement(tokenIn, settlementToken);
         uint256 minOut = _oracleMinOut(
             factory,
             tokenIn,
@@ -933,6 +941,100 @@ contract AaveV3LendingPoolAssetGuard is
                 aaveLendingPool,
                 approveAmount
             );
+        }
+    }
+
+    // ============================================================
+    // FNA-29: route-derived swap-bound fees
+    // ============================================================
+
+    /// @dev Resolves the fee that should actually bound a collateral->settlement
+    ///      exact-input swap: if a multi-hop uniV3PathExactIn route is configured for
+    ///      this pair, decodes it (reverting unless its endpoints really are
+    ///      tokenIn -> settlementToken) and returns the route's own aggregate fee;
+    ///      otherwise falls back to the single-hop uniV3Fee. Previously the fallback
+    ///      fee was used unconditionally to size amountOutMinimum even when a
+    ///      materially different multi-hop route was the one actually executed,
+    ///      so a route with zero price impact could still violate its own bound (or,
+    ///      the other direction, the bound could permit more loss than the route
+    ///      actually risks).
+    function _routeFeeCollateralToSettlement(
+        address tokenIn,
+        address settlementToken
+    ) internal view returns (uint24 fee) {
+        bytes memory forwardPath = uniV3PathExactIn[tokenIn][settlementToken];
+        if (forwardPath.length > 0) {
+            (address pathIn, address pathOut, uint24 routeFee) = _decodeUniV3Path(forwardPath);
+            require(
+                pathIn == tokenIn && pathOut == settlementToken,
+                "Frgmnt: path endpoints mismatch"
+            );
+            return routeFee;
+        }
+
+        fee = uniV3Fee[tokenIn][settlementToken];
+        require(fee != 0, "Frgmnt: missing fee/path collateral->settle");
+    }
+
+    /// @dev Same as _routeFeeCollateralToSettlement, for the reversed settlement->debt
+    ///      exactOutput route (an exactOutput path is encoded in reverse: first token =
+    ///      the actual output/debtToken, last token = the actual input/settlementToken).
+    ///      Shared by both the flash-amount estimate and the actual swap builder so the
+    ///      loan is always sized against the same fee the swap it funds will be bound by.
+    function _routeFeeSettlementToDebt(
+        address settlementToken,
+        address debtToken
+    ) internal view returns (uint24 fee) {
+        bytes memory reversedPath = uniV3PathExactOut[settlementToken][debtToken];
+        if (reversedPath.length > 0) {
+            (address pathOut, address pathIn, uint24 routeFee) = _decodeUniV3Path(reversedPath);
+            require(
+                pathOut == debtToken && pathIn == settlementToken,
+                "Frgmnt: path endpoints mismatch"
+            );
+            return routeFee;
+        }
+
+        fee = uniV3Fee[settlementToken][debtToken];
+        require(fee != 0, "Frgmnt: missing fee");
+    }
+
+    /// @dev Decodes a Uniswap V3 path (token0(20) | fee0(3) | token1(20) | fee1(3) | ... |
+    ///      tokenM(20), already length-validated by _validateUniV3Path at setter time)
+    ///      into its first and last token and the aggregate fee across every hop. Hop
+    ///      fees compound multiplicatively, not additively — after M hops each taking
+    ///      fee_i, the fraction of value surviving is the PRODUCT of (1 - fee_i) — so
+    ///      this exactly matches what a real, zero-price-impact swap along the route
+    ///      loses to LP fees. For a single-hop path (M=1) this reduces to that hop's own
+    ///      fee, identical to the pre-fix single-hop behavior.
+    function _decodeUniV3Path(
+        bytes memory path
+    ) internal pure returns (address firstToken, address lastToken, uint24 combinedFeePpm) {
+        firstToken = _pathTokenAt(path, 0);
+        lastToken = firstToken;
+
+        uint256 survivingPpm = FEE_DENOMINATOR;
+        uint256 offset = 20;
+        while (offset + 23 <= path.length) {
+            uint24 hopFee = _pathFeeAt(path, offset);
+            survivingPpm = (survivingPpm * (FEE_DENOMINATOR - hopFee)) / FEE_DENOMINATOR;
+            offset += 3;
+            lastToken = _pathTokenAt(path, offset);
+            offset += 20;
+        }
+
+        combinedFeePpm = uint24(FEE_DENOMINATOR - survivingPpm);
+    }
+
+    function _pathTokenAt(bytes memory path, uint256 offset) internal pure returns (address token) {
+        assembly {
+            token := shr(96, mload(add(add(path, 0x20), offset)))
+        }
+    }
+
+    function _pathFeeAt(bytes memory path, uint256 offset) internal pure returns (uint24 fee) {
+        assembly {
+            fee := shr(232, mload(add(add(path, 0x20), offset)))
         }
     }
 
