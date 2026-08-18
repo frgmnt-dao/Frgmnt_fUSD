@@ -24,12 +24,19 @@
 
 ### Asset Guards
 
+<!-- FNA-33: the Asset Type column previously did not match the live registry (confirmed via
+     Governance.assetGuards(uint16) on Base at block 49894684) — every guard address below was
+     already correct; only the type each was registered under was wrong. Corrected to match
+     on-chain state. Types 1-3 match AssetHandler.sol's own top-of-file numbering (0 = ERC20 with
+     Chainlink direct USD price feed, 1 = Morpho, 2 = Aave V3, 3 = Uniswap V3 NFT, 4 = Lending/
+     borrow Enable Asset); ERC20Guard is registered under Type 4, not Type 0 as previously
+     documented — Type 0 is unset on-chain. -->
 | Contract | Asset Type | Address | Explorer |
 |----------|-----------|---------|---------|
-| ERC20Guard | Type 0 | `0x26E11DC5C05ee07Cb14A2Fd475C71aAEd2F0A98C` | [Basescan](https://basescan.org/address/0x26E11DC5C05ee07Cb14A2Fd475C71aAEd2F0A98C) |
-| AaveV3LendingPoolAssetGuard | Type 4 | `0xE5bc2963f3fdE832d798caC2024343C83aDD2A38` | [Basescan](https://basescan.org/address/0xE5bc2963f3fdE832d798caC2024343C83aDD2A38) |
-| MorphoBlueAssetGuard | Type 5 | `0x27BeceFb6CF59b26CD73dac227Ae3597065E2850` | [Basescan](https://basescan.org/address/0x27BeceFb6CF59b26CD73dac227Ae3597065E2850) |
-| UniswapV3AssetGuard | Type 7 | `0xB186BA1634d4F99798ed663319aF6ac328086DF1` | [Basescan](https://basescan.org/address/0xB186BA1634d4F99798ed663319aF6ac328086DF1) |
+| MorphoBlueAssetGuard | Type 1 | `0x27BeceFb6CF59b26CD73dac227Ae3597065E2850` | [Basescan](https://basescan.org/address/0x27BeceFb6CF59b26CD73dac227Ae3597065E2850) |
+| AaveV3LendingPoolAssetGuard | Type 2 | `0xE5bc2963f3fdE832d798caC2024343C83aDD2A38` | [Basescan](https://basescan.org/address/0xE5bc2963f3fdE832d798caC2024343C83aDD2A38) |
+| UniswapV3AssetGuard | Type 3 | `0xB186BA1634d4F99798ed663319aF6ac328086DF1` | [Basescan](https://basescan.org/address/0xB186BA1634d4F99798ed663319aF6ac328086DF1) |
+| ERC20Guard | Type 4 | `0x26E11DC5C05ee07Cb14A2Fd475C71aAEd2F0A98C` | [Basescan](https://basescan.org/address/0x26E11DC5C05ee07Cb14A2Fd475C71aAEd2F0A98C) |
 
 ### Contract Guards
 
