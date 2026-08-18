@@ -470,11 +470,17 @@ describe('AaveV4TokenizationAssetGuard', () => {
       expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(true);
     });
 
-    it('fails safe (returns true) rather than blocking every token when the vault\'s own asset() reverts', async () => {
-      // A broken vault must not permanently block removal of every OTHER token in the pool for
-      // as long as it stays broken — see the function's own documentation for why.
+    it('FNA-20 follow-up: fails closed (returns false, blocking removal) when the vault holds shares but its own asset() reverts', async () => {
+      // A revert here can no longer be trusted as proof the vault isn't wrapping `token` — see
+      // the function's own documentation for why this now fails closed rather than open.
       const { guard, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
       await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      await vault.setBrokenAsset(true);
+      expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(false);
+    });
+
+    it('still returns true when asset() reverts but the vault holds no shares', async () => {
+      const { guard, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
       await vault.setBrokenAsset(true);
       expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(true);
     });
