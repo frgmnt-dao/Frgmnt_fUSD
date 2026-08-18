@@ -41,6 +41,11 @@ contract NftTrackerStorage is OwnableUpgradeable {
     //                              INITIALIZER
     // -------------------------------------------------------------------------
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     /**
      * @notice Initializes the contract with the poolFactory address
      * @dev Uses OpenZeppelin OwnableUpgradeable initializer (OZ v5 style)

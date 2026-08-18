@@ -1,6 +1,6 @@
 import '@nomicfoundation/hardhat-chai-matchers';
 import { expect } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 import { loadFixture, time } from '@nomicfoundation/hardhat-toolbox/network-helpers';
 import type { Contract } from 'ethers';
 
@@ -8,6 +8,14 @@ type Asset = { asset: string; isDeposit: boolean };
 
 // Dummy aggregator address for validateAsset checks (non-zero)
 const DUMMY_AGGREGATOR = '0x0000000000000000000000000000000000000001';
+
+async function deployPoolManagerLogic(): Promise<Contract> {
+  const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic');
+  return (await upgrades.deployProxy(PoolManagerLogic, [], {
+    initializer: false,
+    kind: 'transparent',
+  })) as unknown as Contract;
+}
 
 describe('PoolManagerLogic', () => {
   async function setupFixture() {
@@ -28,8 +36,7 @@ describe('PoolManagerLogic', () => {
     const MockGovernance = await ethers.getContractFactory('MockGovernance');
     const mockGovernance: Contract = await MockGovernance.deploy();
 
-    const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic');
-    const contract: Contract = await PoolManagerLogic.deploy();
+    const contract: Contract = await deployPoolManagerLogic();
 
     // pseudo assets
     const tokenA = ethers.Wallet.createRandom().address;
@@ -102,7 +109,7 @@ describe('PoolManagerLogic', () => {
     expect(denom).to.equal(10000n);
   });
 
-    it('reverts initialize with invalid inputs', async () => {
+  it('FNA-28: blocks initialize() called directly on the raw implementation (proxy bypass)', async () => {
     const [deployer, manager] = await ethers.getSigners();
     const MockPoolLogic = await ethers.getContractFactory('MockPoolLogic');
     const poolLogic = await MockPoolLogic.deploy();
@@ -111,7 +118,31 @@ describe('PoolManagerLogic', () => {
     const MockGovernance = await ethers.getContractFactory('MockGovernance');
     const mockGovernance = await MockGovernance.deploy();
     const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic');
-    const contract = await PoolManagerLogic.deploy();
+    const implementation = await PoolManagerLogic.deploy();
+
+    await expect(
+      implementation.initialize(
+        await deployer.getAddress(),
+        await manager.getAddress(),
+        'm',
+        await poolLogic.getAddress(),
+        await mockAssetHandler.getAddress(),
+        await mockGovernance.getAddress(),
+        0,
+        0,
+      ),
+    ).to.be.revertedWithCustomError(implementation, 'InvalidInitialization');
+  });
+
+    it('reverts initialize with invalid inputs', async () => {
+    const [deployer, manager] = await ethers.getSigners();
+    const MockPoolLogic = await ethers.getContractFactory('MockPoolLogic');
+    const poolLogic = await MockPoolLogic.deploy();
+    const MockAssetHandler = await ethers.getContractFactory('MockAssetHandler');
+    const mockAssetHandler = await MockAssetHandler.deploy();
+    const MockGovernance = await ethers.getContractFactory('MockGovernance');
+    const mockGovernance = await MockGovernance.deploy();
+    const contract = await deployPoolManagerLogic();
 
     const validPoolLogic = await poolLogic.getAddress();
     const validAssetHandler = await mockAssetHandler.getAddress();
@@ -159,8 +190,7 @@ describe('PoolManagerLogic', () => {
     const mockAssetHandler = await MockAssetHandler.deploy();
     const MockGovernance = await ethers.getContractFactory('MockGovernance');
     const mockGovernance = await MockGovernance.deploy();
-    const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic');
-    const contract = await PoolManagerLogic.deploy();
+    const contract = await deployPoolManagerLogic();
 
     await contract.initialize(
       await deployer.getAddress(),

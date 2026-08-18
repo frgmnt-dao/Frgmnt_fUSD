@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 
 describe('UniswapV3NonfungiblePositionGuard', () => {
   let owner: any;
@@ -81,7 +81,10 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     guardInfo = await MockGuardInfo.deploy();
 
     const NftTrackerStorage = await ethers.getContractFactory('NftTrackerStorage');
-    nftTracker = await NftTrackerStorage.deploy();
+    nftTracker = await upgrades.deployProxy(NftTrackerStorage, [], {
+      initializer: false,
+      kind: 'transparent',
+    });
     await nftTracker.initialize(await guardInfo.getAddress());
 
     //------------------------------------------------------------------
