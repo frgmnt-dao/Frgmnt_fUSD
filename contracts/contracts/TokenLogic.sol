@@ -647,6 +647,27 @@ contract TokenLogic is
         return (newPrincipal, newTimestamp);
     }
 
+    /// @dev FNA-27: whether `user` currently holds a staked (sfUSD) position in PoolLogic —
+    ///      value that was cooldown-bearing fUSD before staking and will become cooldown-bearing
+    ///      fUSD again on unstake. PoolLogic is the only address this contract ever marks
+    ///      cooldown-exempt automatically (see initialize()/setPoolLogic()); a governance-added
+    ///      exempt address via setCooldownExemptSender/Recipient is a separate, deliberate admin
+    ///      decision outside this check's scope. A low-level staticcall with a permissive
+    ///      fallback (treat as "nothing staked", preserving today's clearing behavior) is used
+    ///      rather than a typed call, since poolLogic can legitimately be unset (address(0)) at
+    ///      deploy time (FNA-09) — a typed call would revert this hot-path token transfer/burn
+    ///      entirely in that case instead of just skipping the extra protection.
+    function _hasStakedBalance(address user) internal view returns (bool) {
+        address pool = poolLogic;
+        if (pool == address(0)) return false;
+
+        (bool ok, bytes memory data) = pool.staticcall(
+            abi.encodeWithSelector(IERC20.balanceOf.selector, user)
+        );
+        if (!ok || data.length != 32) return false;
+        return abi.decode(data, (uint256)) > 0;
+    }
+
     /**
      * @notice Returns the remaining cooldown (in seconds) before the user
      *         is allowed to cash-withdraw FUSD (as enforced by PoolLogic).
@@ -789,7 +810,20 @@ contract TokenLogic is
                 uint256 remaining = fromBal > amount ? fromBal - amount : 0;
                 cooldownPrincipal[from] = remaining;
 
-                if ((remaining == 0) && (!exemptRecipient)) {
+                // FNA-27: cooldownPrincipal[from] hitting 0 does not prove `from`'s
+                // cooldown-bearing principal has actually left the protocol — some of it can be
+                // parked as a staked (sfUSD) position inside PoolLogic, a cooldown-exempt
+                // recipient, awaiting unstake. The `!exemptRecipient` guard above already
+                // protects the direct "stake 100%, timestamp untouched" path, but a user can
+                // route around it: stake all but a dust amount (principal > 0, guard never
+                // fires), then separately burn() that dust — burn's implicit recipient is
+                // address(0), never exempt, so the guard's condition is satisfied and the
+                // timestamp clears even though the bulk of the principal is still sitting in
+                // PoolLogic. Ordinary transfers-in (unstaking included) never re-set
+                // cooldownTimestamp[to] — only _updateCooldownTimestamp (mint) does — so that
+                // returning principal then arrives with cooldownTimestamp == 0, i.e. no
+                // cooldown at all. Only actually clear once `from` also holds nothing staked.
+                if (remaining == 0 && !exemptRecipient && !_hasStakedBalance(from)) {
                     cooldownTimestamp[from] = 0;
                 }
             }
