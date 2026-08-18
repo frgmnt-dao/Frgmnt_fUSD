@@ -1854,6 +1854,80 @@ describe('PoolLogic', () => {
       expect(bobHarvested).to.be.approximately(ethers.parseUnits('5000', 18), ethers.parseUnits('1', 18));
       expect(tomHarvested).to.equal(0n);
     });
+
+    // CertiK's original FNA-17 impact section also flagged manager fees minted against reserved
+    // value that leaves the pool later in the same transaction. Performance fee is derived from
+    // the exact same (active NAV - accountedAssets) quantity the reward-distribution test above
+    // already proves is correctly tracked, so this is expected to hold too — verified directly
+    // rather than left as an inference from the shared mechanism.
+    it('performance fee is not minted against the artificial overhang, and is correctly sized against the real organic yield at the right time', async () => {
+      const { pool, fusd, asset, poolManager, manager, user, user2, other } =
+        await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const tom = other;
+      const assetAddr = await asset.getAddress();
+      const poolAddr = await pool.getAddress();
+
+      // 10% performance fee, 0% management/entry/exit — isolate performance fee alone.
+      await poolManager.setFees(1000n, 0n, 0n, 0n, 10_000n);
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('50000', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('50000', 18));
+      await poolManager.setTotalFundValue(ethers.parseUnits('50000', 18));
+
+      await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('10000', 18));
+      await pool.connect(bob).stake(ethers.parseUnits('10000', 18));
+
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('40000', 18));
+      const tx = await pool.connect(alice).requestCashWithdraw(
+        ethers.parseUnits('40000', 18),
+        assetAddr,
+      );
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      const requestId = event!.args.requestId;
+
+      const managerAddr = await manager.getAddress();
+      const managerFusdBeforeFinalize = await fusd.balanceOf(managerAddr);
+
+      await pool.connect(manager).finalizeCashWithdraw(requestId);
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('10000', 18));
+      // No performance fee minted merely from finalizing (no yield here, just a reservation).
+      expect(await fusd.balanceOf(managerAddr)).to.equal(managerFusdBeforeFinalize);
+
+      // Organic yield: active NAV rises to 15,000 (5,000 of real yield).
+      await poolManager.setTotalFundValue(ethers.parseUnits('55000', 18));
+
+      const managerFusdBeforeDust = await fusd.balanceOf(managerAddr);
+      await mintAndApproveFUSD(fusd, pool, bob, 1n);
+      await pool.connect(bob).stake(1n);
+      const managerFeeFromDustStake = (await fusd.balanceOf(managerAddr)) - managerFusdBeforeDust;
+
+      // 10% of the real 5,000 yield = 500, minted to the manager right now — not suppressed, not
+      // deferred to claim time.
+      expect(managerFeeFromDustStake).to.be.approximately(
+        ethers.parseUnits('500', 18),
+        ethers.parseUnits('1', 18),
+      );
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('15000', 18));
+
+      // Tom stakes a dominant amount after the fee was already minted — must not trigger any
+      // further fee (no new yield at this checkpoint).
+      const managerFusdBeforeTom = await fusd.balanceOf(managerAddr);
+      await mintAndApproveFUSD(fusd, pool, tom, ethers.parseUnits('200000', 18));
+      await pool.connect(tom).stake(ethers.parseUnits('200000', 18));
+      expect(await fusd.balanceOf(managerAddr)).to.equal(managerFusdBeforeTom);
+
+      // Claim: must not mint any further fee either (accountedAssets untouched, active NAV
+      // unchanged by the claim itself).
+      const managerFusdBeforeClaim = await fusd.balanceOf(managerAddr);
+      await pool.connect(alice).claimCashWithdraw(requestId);
+      expect(await fusd.balanceOf(managerAddr)).to.equal(managerFusdBeforeClaim);
+    });
   });
 
   // FNA-06: compoundedRewardIndex must never grow unbounded. An attacker holding the pool's only
