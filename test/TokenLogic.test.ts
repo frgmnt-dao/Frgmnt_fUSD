@@ -929,6 +929,183 @@ describe('TokenLogic (fEURO)', () => {
     });
   });
 
+  // FNA-27: PoolLogic is cooldown-exempt as both sender and recipient, so staking/unstaking
+  // moves fUSD in and out without the ordinary cooldown-transfer check ever running. Staking the
+  // user's FULL balance leaves cooldownTimestamp untouched (the `!exemptRecipient` guard on the
+  // zero-principal clear already protects that path) — but staking all-but-1-wei and separately
+  // burn()-ing the dust reaches zero cooldownPrincipal through a path where the recipient
+  // (address(0), for the burn) is never exempt, so the existing guard doesn't stop the clear.
+  // Since a plain transfer-in (unstaking) never re-sets cooldownTimestamp[to] — only a mint
+  // does — the returned principal then arrives with cooldownTimestamp == 0, bypassing the
+  // cooldown entirely. Fixed by also checking the user's staked (sfUSD) balance in PoolLogic
+  // before clearing cooldownTimestamp to 0. This needs a real, wired-up PoolLogic (not the
+  // shared fixture's minimal mock) to exercise actual stake()/unstake(), so it uses its own
+  // local fixture, mirroring FrgmntUserActions.test.ts's setup.
+  describe('FNA-27: staking must not let a burned-dust trick clear the cooldown timestamp', () => {
+    async function deployStakingFixture() {
+      const [admin, emergency, manager, trader, user, other] = await ethers.getSigners();
+
+      const TestPoolManagerLogic = await ethers.getContractFactory('TestPoolManagerLogic');
+      const poolManager = await TestPoolManagerLogic.deploy(
+        await manager.getAddress(),
+        await trader.getAddress(),
+        'Test Manager',
+        ethers.ZeroAddress,
+      );
+      await poolManager.waitForDeployment();
+      await poolManager.setFees(0n, 0n, 0n, 0n, 10_000n);
+
+      const MockERC20 = await ethers.getContractFactory('MockERC20Custom');
+      const usdc = await MockERC20.deploy('USD Coin', 'USDC', 6);
+      await usdc.waitForDeployment();
+      await usdc.mint(await user.getAddress(), 1_000_000n * 10n ** 6n);
+
+      const cooldown = 7 * 24 * 60 * 60;
+      const TokenLogicFactory = await ethers.getContractFactory('TokenLogic');
+      const fusd = await upgrades.deployProxy(
+        TokenLogicFactory,
+        [
+          await admin.getAddress(),
+          await emergency.getAddress(),
+          ethers.ZeroAddress,
+          await poolManager.getAddress(),
+          cooldown,
+          'Frgmnt USD',
+          'fUSD',
+        ],
+        { initializer: 'initialize', kind: 'uups' },
+      );
+      await fusd.waitForDeployment();
+
+      const CallResultChecker = await ethers.getContractFactory('CallResultChecker');
+      const callResultChecker = await CallResultChecker.deploy();
+      await callResultChecker.waitForDeployment();
+
+      const FundCalculationLibrary = await ethers.getContractFactory('FundCalculationLibrary');
+      const fundCalculationLibrary = await FundCalculationLibrary.deploy();
+      await fundCalculationLibrary.waitForDeployment();
+
+      const PoolTxExecutor = await ethers.getContractFactory('PoolTxExecutor', {
+        libraries: { CallResultChecker: await callResultChecker.getAddress() },
+      });
+      const poolTxExecutor = await PoolTxExecutor.deploy();
+      await poolTxExecutor.waitForDeployment();
+
+      const PoolLogicFactory = await ethers.getContractFactory('PoolLogic', {
+        libraries: {
+          CallResultChecker: await callResultChecker.getAddress(),
+          FundCalculationLibrary: await fundCalculationLibrary.getAddress(),
+          PoolTxExecutor: await poolTxExecutor.getAddress(),
+        },
+      });
+      const poolImpl = await PoolLogicFactory.deploy();
+      await poolImpl.waitForDeployment();
+
+      const PoolLogicTestProxy = await ethers.getContractFactory('PoolLogicTestProxy');
+      const initData = PoolLogicFactory.interface.encodeFunctionData('initialize', [
+        await fusd.getAddress(),
+        await poolManager.getAddress(),
+        await admin.getAddress(),
+        'Staked Frgmnt USD',
+        'sfUSD',
+      ]);
+      const poolProxy = await PoolLogicTestProxy.deploy(await poolImpl.getAddress(), initData);
+      await poolProxy.waitForDeployment();
+      const pool = PoolLogicFactory.attach(await poolProxy.getAddress());
+
+      await fusd.connect(admin).setPoolLogic(await pool.getAddress());
+      await fusd.connect(admin).setMaxDepositFusdSupply(ethers.MaxUint256);
+
+      const TestAssetGuardFactory = await ethers.getContractFactory('TestAssetGuard');
+      const assetGuard = await TestAssetGuardFactory.deploy();
+      await assetGuard.waitForDeployment();
+      await poolManager.setAssetGuard(await usdc.getAddress(), await assetGuard.getAddress());
+      await poolManager.setSupportedAsset(await usdc.getAddress(), true, WAD, 6);
+      await fusd.connect(admin).configureAsset(await usdc.getAddress(), true, ethers.MaxUint256);
+
+      return { admin, manager, user, other, poolManager, fusd, pool, usdc, cooldown };
+    }
+
+    it('preserves the cooldown across a stake(all-but-1-wei) -> burn(dust) -> unstake cycle', async () => {
+      const { fusd, user, pool, usdc } = await loadFixture(deployStakingFixture);
+      const userAddr = await user.getAddress();
+
+      const depositAmount = 100n * 10n ** 6n;
+      await usdc.connect(user).approve(await fusd.getAddress(), depositAmount);
+      await fusd.connect(user).deposit(await usdc.getAddress(), depositAmount, userAddr);
+
+      const fusdBal = await fusd.balanceOf(userAddr);
+      const cooldownAfterDeposit = await fusd.getExitRemainingCooldown(userAddr);
+      expect(cooldownAfterDeposit).to.be.gt(0n);
+
+      // Stake all but 1 raw unit — cooldownPrincipal stays nonzero (1), so the pre-existing
+      // `!exemptRecipient` guard never even gets a chance to fire here.
+      await fusd.connect(user).approve(await pool.getAddress(), fusdBal - 1n);
+      await pool.connect(user).stake(fusdBal - 1n);
+      expect(await fusd.cooldownPrincipal(userAddr)).to.equal(1n);
+      expect(await fusd.getExitRemainingCooldown(userAddr)).to.be.gt(0n);
+
+      // Burn the dust: cooldownPrincipal now hits exactly 0. Without the fix, this would clear
+      // cooldownTimestamp even though ~100 fUSD worth of principal is still staked.
+      await fusd.connect(user).burn(1n);
+      expect(await fusd.cooldownPrincipal(userAddr)).to.equal(0n);
+      expect(await fusd.getExitRemainingCooldown(userAddr)).to.be.gt(0n);
+      expect(await fusd.cooldownTimestamp(userAddr)).to.be.gt(0n);
+
+      // Unstake everything back. A plain transfer-in never re-sets cooldownTimestamp, so this
+      // only works if the timestamp was correctly preserved through the burn above.
+      const sfusdBal = await pool.balanceOf(userAddr);
+      await pool.connect(user).unstake(sfusdBal);
+
+      const cooldownAfterUnstake = await fusd.getExitRemainingCooldown(userAddr);
+      expect(cooldownAfterUnstake).to.be.gt(0n);
+      // Approximately the original 7 days minus whatever block time elapsed across this test.
+      expect(cooldownAfterUnstake).to.be.approximately(cooldownAfterDeposit, 60n);
+    });
+
+    it('still clears the cooldown normally for a user who genuinely holds nothing staked', async () => {
+      const { fusd, user, usdc } = await loadFixture(deployStakingFixture);
+      const userAddr = await user.getAddress();
+
+      const depositAmount = 100n * 10n ** 6n;
+      await usdc.connect(user).approve(await fusd.getAddress(), depositAmount);
+      await fusd.connect(user).deposit(await usdc.getAddress(), depositAmount, userAddr);
+      expect(await fusd.getExitRemainingCooldown(userAddr)).to.be.gt(0n);
+
+      // Burns everything directly — never staked anything, so there is genuinely nothing left
+      // anywhere in the protocol backing this principal.
+      const fusdBal = await fusd.balanceOf(userAddr);
+      await fusd.connect(user).burn(fusdBal);
+
+      expect(await fusd.cooldownPrincipal(userAddr)).to.equal(0n);
+      expect(await fusd.cooldownTimestamp(userAddr)).to.equal(0n);
+      expect(await fusd.getExitRemainingCooldown(userAddr)).to.equal(0n);
+    });
+
+    it('regression: staking the full balance in one shot still preserves the cooldown (pre-existing guard, unaffected by the fix)', async () => {
+      const { fusd, user, pool, usdc } = await loadFixture(deployStakingFixture);
+      const userAddr = await user.getAddress();
+
+      const depositAmount = 100n * 10n ** 6n;
+      await usdc.connect(user).approve(await fusd.getAddress(), depositAmount);
+      await fusd.connect(user).deposit(await usdc.getAddress(), depositAmount, userAddr);
+      const fusdBal = await fusd.balanceOf(userAddr);
+      const cooldownAfterDeposit = await fusd.getExitRemainingCooldown(userAddr);
+
+      await fusd.connect(user).approve(await pool.getAddress(), fusdBal);
+      await pool.connect(user).stake(fusdBal);
+      expect(await fusd.cooldownPrincipal(userAddr)).to.equal(0n);
+      expect(await fusd.getExitRemainingCooldown(userAddr)).to.be.gt(0n);
+
+      const sfusdBal = await pool.balanceOf(userAddr);
+      await pool.connect(user).unstake(sfusdBal);
+
+      const cooldownAfterUnstake = await fusd.getExitRemainingCooldown(userAddr);
+      expect(cooldownAfterUnstake).to.be.gt(0n);
+      expect(cooldownAfterUnstake).to.be.approximately(cooldownAfterDeposit, 60n);
+    });
+  });
+
   describe('Pool minting', () => {
     it('allows only poolLogic to mint and validates recipient and amount', async () => {
       const { fusd, admin, poolLogicEOA, user, other } = await loadFixture(deployFixture);
