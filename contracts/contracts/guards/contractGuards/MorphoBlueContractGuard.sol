@@ -313,6 +313,21 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
         );
 
         require(mgr.isSupportedAsset(mp.loanToken), "MorphoGuard: unsupported loanToken");
+        // FNA-31: every other collateral-touching handler here (_handleSupplyCollateral,
+        // _handleWithdrawCollateral, _handleLiquidate) already requires the collateral token be
+        // pool-supported; borrow was the one omission. Morpho Blue's supplyCollateral() is
+        // permissionlessly callable by anyone for an arbitrary onBehalf, entirely outside this
+        // guard (no execTransaction involved), so an approved market's collateral leg can carry
+        // real balance without ever having passed a pool-level support check here. Without this,
+        // a manager/trader could still borrow a supported loanToken against that unsupported
+        // collateral: MorphoCollectLib omits unsupported collateral from NAV and withdrawal
+        // planning while continuing to account for the (supported) debt, and afterTxGuard's
+        // health-factor check reads the collateral's price from the protocol-wide AssetHandler
+        // registry regardless of pool-level support, so it would not catch this either.
+        require(
+            mgr.isSupportedAsset(mp.collateralToken),
+            "MorphoGuard: unsupported collateralToken"
+        );
         require(onBehalf == poolLogic, "MorphoGuard: onBehalf != pool");
         require(receiver == poolLogic, "MorphoGuard: receiver != pool");
 

@@ -404,6 +404,29 @@ describe('MorphoBlueContractGuard', () => {
     ).to.be.revertedWith('MorphoGuard: receiver != pool');
   });
 
+  // FNA-31: Morpho Blue's supplyCollateral() is permissionlessly callable by anyone for an
+  // arbitrary onBehalf, entirely outside this guard — so an approved market's collateral leg
+  // can carry real balance without that token ever having passed a pool-level support check.
+  // borrow() must independently verify the collateral token is still pool-supported before
+  // letting a manager/trader extract a supported loanToken against it, matching the check every
+  // other collateral-touching handler (supplyCollateral, withdrawCollateral, liquidate) already
+  // has.
+  it('borrow reverts on unsupported collateralToken even when loanToken remains supported', async () => {
+    const ctx = await setup();
+
+    await ctx.poolManager.setSupportedAsset(ctx.collToken, false);
+    const data = ctx.morphoIface.encodeFunctionData('borrow', [
+      ctx.marketParams,
+      300n,
+      10n,
+      ctx.poolLogicAddr,
+      ctx.poolLogicAddr,
+    ]);
+    await expect(
+      ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, data),
+    ).to.be.revertedWith('MorphoGuard: unsupported collateralToken');
+  });
+
   it('handles repay correctly', async () => {
     const ctx = await setup();
 
