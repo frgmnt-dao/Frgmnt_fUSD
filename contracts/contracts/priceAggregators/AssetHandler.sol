@@ -51,6 +51,11 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
     event SetEurUsdAggregator(address indexed feed, uint256 timeout);
     event ClearedEurUsdAggregator(address indexed oldFeed);
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
     /// @notice Initializer (upgradeable pattern).
     /// @param assets Array of assets to add on deploy.
     function initialize(Asset[] memory assets) external initializer {

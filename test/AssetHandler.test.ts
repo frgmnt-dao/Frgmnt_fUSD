@@ -1,5 +1,5 @@
 import { expect } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
 import '@nomicfoundation/hardhat-chai-matchers';
 import { time } from '@nomicfoundation/hardhat-toolbox/network-helpers';
 import type { AssetHandler, MockAggregator } from '../typechain-types';
@@ -16,7 +16,10 @@ describe('AssetHandler', () => {
 
   async function deployAssetHandler(): Promise<AssetHandler> {
     const AssetHandler = await ethers.getContractFactory('AssetHandler');
-    const handler = (await AssetHandler.deploy()) as AssetHandler;
+    const handler = (await upgrades.deployProxy(AssetHandler, [], {
+      initializer: false,
+      kind: 'transparent',
+    })) as unknown as AssetHandler;
     await handler.waitForDeployment();
     return handler;
   }
@@ -45,6 +48,16 @@ describe('AssetHandler', () => {
     const handler = await deployAssetHandler();
     await handler.initialize([]);
     await expect(handler.initialize([])).to.be.reverted;
+  });
+
+  it('FNA-28: blocks initialize() called directly on the raw implementation (proxy bypass)', async () => {
+    const AssetHandler = await ethers.getContractFactory('AssetHandler');
+    const implementation = (await AssetHandler.deploy()) as AssetHandler;
+    await implementation.waitForDeployment();
+    await expect(implementation.initialize([])).to.be.revertedWithCustomError(
+      implementation,
+      'InvalidInitialization',
+    );
   });
 
   describe('getUSDPrice', () => {

@@ -1,5 +1,13 @@
 import { expect } from 'chai';
-import { ethers } from 'hardhat';
+import { ethers, upgrades } from 'hardhat';
+
+async function deployNftTrackerStorage() {
+  const NftTrackerStorage = await ethers.getContractFactory('NftTrackerStorage');
+  return upgrades.deployProxy(NftTrackerStorage, [], {
+    initializer: false,
+    kind: 'transparent',
+  });
+}
 
 describe('NftTrackerStorage', function () {
   let deployer: any;
@@ -35,8 +43,7 @@ describe('NftTrackerStorage', function () {
     await mockGuardInfo.setContractGuard(anotherGuardedContract, anotherGuard.address);
 
     // Deploy NftTrackerStorage
-    const NftTrackerStorage = await ethers.getContractFactory('NftTrackerStorage');
-    nftTracker = await NftTrackerStorage.deploy();
+    nftTracker = await deployNftTrackerStorage();
 
     // Initialize with poolFactory = mockGuardInfo
     await nftTracker.initialize(mockGuardInfo.target);
@@ -55,9 +62,17 @@ describe('NftTrackerStorage', function () {
     await expect(nftTracker.initialize(mockGuardInfo.target)).to.be.reverted; // OZ Initializable revert
   });
 
-  it('reverts when initialized with a zero poolFactory (FNA-09)', async function () {
+  it('FNA-28: blocks initialize() called directly on the raw implementation (proxy bypass)', async function () {
     const NftTrackerStorage = await ethers.getContractFactory('NftTrackerStorage');
-    const fresh = await NftTrackerStorage.deploy();
+    const implementation = await NftTrackerStorage.deploy();
+    await expect(implementation.initialize(mockGuardInfo.target)).to.be.revertedWithCustomError(
+      implementation,
+      'InvalidInitialization',
+    );
+  });
+
+  it('reverts when initialized with a zero poolFactory (FNA-09)', async function () {
+    const fresh = await deployNftTrackerStorage();
     await expect(fresh.initialize(ethers.ZeroAddress)).to.be.revertedWith(
       'NftTrackerStorage: poolFactory=0',
     );
@@ -88,8 +103,7 @@ describe('NftTrackerStorage', function () {
     const NotAFactory = await ethers.getContractFactory('MockERC20'); // any contract lacking getContractGuard
     const notAFactory = await NotAFactory.deploy(18);
 
-    const NftTrackerStorage = await ethers.getContractFactory('NftTrackerStorage');
-    const broken = await NftTrackerStorage.deploy();
+    const broken = await deployNftTrackerStorage();
     await broken.initialize(notAFactory.target);
 
     const nftType = makeType('BROKEN_FACTORY');
