@@ -93,6 +93,32 @@ contract MockAssetGuard {
     ) external view returns (uint256) {
         return withdrawableBalance;
     }
+    // FundCalculationLibrary._withdrawableFundValue()'s non-liquidity-capped branch checks for
+    // this via low-level call, mirroring isWithdrawableBalanceGuard() above (FNA-35). Defaults to
+    // false so existing tests that don't call setUnwindCostAwareGuard() keep going through the
+    // plain getBalance() path unchanged.
+    bool public unwindCostAwareGuard;
+    uint256 public netRealizableBalance;
+
+    function setUnwindCostAwareGuard(bool _isGuard) external {
+        unwindCostAwareGuard = _isGuard;
+    }
+
+    function isUnwindCostAwareGuard() external view returns (bool) {
+        return unwindCostAwareGuard;
+    }
+
+    function setNetRealizableBalance(uint256 _balance) external {
+        netRealizableBalance = _balance;
+    }
+
+    function getNetRealizableBalance(
+        address /*pool*/,
+        address /*asset*/
+    ) external view returns (uint256) {
+        return netRealizableBalance;
+    }
+
     function getDecimals(address /*asset*/) external view returns (uint256) {
         return dec;
     }

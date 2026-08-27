@@ -191,4 +191,9 @@ interface IAaveV3Pool {
 
     /// @notice Get a user's eMode id.
     function getUserEMode(address user) external view returns (uint256);
+
+    /// @notice Total flashloan premium, in basis points (Aave's PercentageMath factor is
+    ///         10_000), charged on top of the borrowed amount for every flashLoan/flashLoanSimple
+    ///         call — see FNA-35 (unwind-cost estimation for leveraged position valuation).
+    function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint128);
 }
