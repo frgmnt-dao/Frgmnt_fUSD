@@ -7,6 +7,7 @@ import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
 import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
 import { IPoolLogic } from "../interfaces/IPoolLogic.sol";
 import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
+import { IWithdrawalEscrow } from "../interfaces/IWithdrawalEscrow.sol";
 
 /**
  * @title FundCalculationLibrary
@@ -16,6 +17,7 @@ library FundCalculationLibrary {
     using SafeERC20 for IERC20;
 
     error InvalidReservedBalance();
+    error EscrowNotSet();
 
     function calculatePerformanceFee(
         uint256 _totalValue,
@@ -482,41 +484,79 @@ library FundCalculationLibrary {
         }
     }
 
-    /// @notice FNA-23 follow-up: transfers `amount` of `asset` from `pool` (the caller,
-    ///         via delegatecall) to `recipient`, and measures what actually moved rather
-    ///         than trusting the nominal `amount` — a sender-fee/burn-on-transfer asset can
-    ///         drain more than `amount` from the pool's own balance, and a recipient-fee
-    ///         asset can deliver less than `amount` to the recipient. Extracted out of
-    ///         PoolLogic.claimCashWithdraw() purely to keep that contract's own deployed
-    ///         bytecode under the EIP-170 size limit — this function's logic runs against
-    ///         the caller's own storage/balance via delegatecall exactly as if it were
-    ///         inlined there.
-    /// @param pool The pool (delegatecall caller) whose balance the asset is transferred from.
-    /// @param asset The ERC20 being transferred.
-    /// @param recipient The transfer recipient.
-    /// @param amount The nominal amount to transfer.
-    /// @param reserved The pool's current reservedAssetBalance[asset] before this transfer.
-    /// @return newReserved `reserved` reduced by what actually left the pool's own balance
-    ///         (floored at 0), for the caller to write back to reservedAssetBalance[asset] —
-    ///         keeps that invariant (balanceOf >= reserved) intact even when more than
-    ///         `amount` left the pool's balance.
-    /// @return delivered What the recipient's own balance actually increased by, for the
-    ///         caller to report accurately (e.g. in an event) instead of the nominal `amount`.
-    function claimCashWithdrawTransfer(
-        address pool,
+    /// @notice FNA-03: releases a finalized queued withdrawal to its claimant, from whichever
+    ///         of the two places it actually lives. `escrowed` is true for any request
+    ///         finalized after WithdrawalEscrow was wired in (the normal case going forward);
+    ///         false only for a request finalized before that (still part of the pool's own
+    ///         balance under the pre-FNA-03 reservedAssetBalance-only bookkeeping) — see
+    ///         PoolLogic's own RequestStatus.FinalizedEscrowed and claimCashWithdraw()'s docs.
+    /// @dev Called via delegatecall from claimCashWithdraw(), so address(this) and msg.sender
+    ///      here are already the pool and the claimant respectively — passing them as separate
+    ///      parameters would be redundant; PoolLogic has essentially no bytecode headroom left
+    ///      (see FNA-03/FNA-04 history) so every parameter here has a real size cost. The
+    ///      escrowed branch calls into `escrow`, which for the same delegatecall reason sees
+    ///      msg.sender == the pool, matching WithdrawalEscrow's onlyPool access control exactly
+    ///      as if PoolLogic had called it directly. The non-escrowed (legacy) branch measures
+    ///      what actually left the pool's own balance rather than trusting the nominal
+    ///      `amount` (FNA-23 follow-up): a sender-fee/burn-on-transfer asset can drain more
+    ///      than `amount`, and decrementing reservedAssetBalance by only the nominal amount
+    ///      would leave it overstated relative to the real on-chain balance.
+    function claimCashWithdrawRelease(
+        address escrow,
+        bool escrowed,
         address asset,
-        address recipient,
         uint256 amount,
         uint256 reserved
     ) external returns (uint256 newReserved, uint256 delivered) {
-        uint256 poolBalanceBefore = IERC20(asset).balanceOf(pool);
-        uint256 recipientBalanceBefore = IERC20(asset).balanceOf(recipient);
+        if (escrowed) {
+            delivered = IWithdrawalEscrow(escrow).release(asset, amount, msg.sender);
+            return (reserved, delivered);
+        }
 
-        IERC20(asset).safeTransfer(recipient, amount);
+        uint256 poolBalanceBefore = IERC20(asset).balanceOf(address(this));
+        uint256 recipientBalanceBefore = IERC20(asset).balanceOf(msg.sender);
 
-        uint256 actualOutflow = poolBalanceBefore - IERC20(asset).balanceOf(pool);
-        delivered = IERC20(asset).balanceOf(recipient) - recipientBalanceBefore;
+        IERC20(asset).safeTransfer(msg.sender, amount);
+
+        uint256 actualOutflow = poolBalanceBefore - IERC20(asset).balanceOf(address(this));
+        delivered = IERC20(asset).balanceOf(msg.sender) - recipientBalanceBefore;
 
         newReserved = reserved > actualOutflow ? reserved - actualOutflow : 0;
+    }
+
+    /// @notice FNA-03/FNA-26: does finalizeCashWithdraw()'s entire escrow-move-and-baseline
+    ///         step in one library call — physically moves `assetAmount` of `asset` into
+    ///         `escrow` and returns the correctly-adjusted accountedAssets — to minimize this
+    ///         call site's own bytecode footprint in PoolLogic, which has essentially no
+    ///         headroom left (see FNA-03/FNA-04 history).
+    /// @dev Moving `assetAmount` out of the pool's own balance immediately removes that much
+    ///      value from active NAV — the same NAV _accrueYield() compares accountedAssets
+    ///      against — so that value is subtracted from accountedAssets now, exactly as
+    ///      finalizeCashWithdraw() always has (see its own docs for why deferring this to
+    ///      claimCashWithdraw() was wrong). Priced directly via assetValue(asset, assetAmount)
+    ///      rather than by diffing activeTotalValueWithCompleteness() before/after the move:
+    ///      that function's own reservation-netting only reacts to reservedAssetBalance (see its
+    ///      docs), which an escrowed reservation deliberately never touches, and a
+    ///      poolManagerLogic's totalFundValue is not guaranteed to be freshly re-derived from
+    ///      this exact balance change either — pricing the known, fixed `assetAmount` directly
+    ///      is both simpler and exact, mirroring how activeTotalValueWithCompleteness() itself
+    ///      prices a legacy (non-escrowed) reservedAssetBalance amount. Reverts if the escrow
+    ///      hasn't been wired yet, rather than silently no-op'ing through a call to an unset
+    ///      address and recording a claim nothing actually backs.
+    function finalizeReserveAndUpdateBaseline(
+        address poolManagerLogic,
+        address escrow,
+        address asset,
+        uint256 assetAmount,
+        uint256 accountedAssetsBefore
+    ) external returns (uint256 newAccountedAssets) {
+        if (escrow == address(0)) revert EscrowNotSet();
+
+        uint256 valueDelta = IPoolManagerLogic(poolManagerLogic).assetValue(asset, assetAmount);
+
+        IERC20(asset).forceApprove(escrow, assetAmount);
+        IWithdrawalEscrow(escrow).reserve(asset, assetAmount);
+
+        newAccountedAssets = accountedAssetsBefore > valueDelta ? accountedAssetsBefore - valueDelta : 0;
     }
 }
