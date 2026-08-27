@@ -54,6 +54,49 @@ library UniswapV3PriceLibrary {
         require(isPriceInRange, "Uni v3 LP price mismatch");
     }
 
+    /// @notice FNA-37: non-reverting counterpart to assertFairPrice(), for a valuation path that
+    ///         must degrade a single out-of-band position rather than reverting the whole NAV
+    ///         read. Deliberately a separate function rather than a shared internal with a
+    ///         "revert or not" flag: assertFairPrice() guards manager transactions (minting/
+    ///         increasing liquidity at a manipulated price), where reverting is exactly the
+    ///         intended behavior and must not change.
+    /// @return inRange Whether the pool's current spot price is within the Chainlink-derived fair
+    ///         band for `fee`.
+    /// @return sqrtPriceX96 The pool's current spot price, returned regardless of `inRange` so a
+    ///         caller that wants it anyway (e.g. for logging) doesn't need a second slot0() call;
+    ///         callers valuing a position MUST NOT use it unless `inRange` is true.
+    function isFairPrice(
+        address dhedgeFactory,
+        address uniswapV3Factory,
+        address token0,
+        address token1,
+        uint24 fee
+    ) internal view returns (bool inRange, uint160 sqrtPriceX96) {
+        return
+            isFairPrice(
+                dhedgeFactory,
+                IUniswapV3Factory(uniswapV3Factory).getPool(token0, token1, fee),
+                fee
+            );
+    }
+
+    function isFairPrice(
+        address dhedgeFactory,
+        address uniswapV3Pool,
+        uint24 fee
+    ) internal view returns (bool inRange, uint160 sqrtPriceX96) {
+        IUniswapV3Pool uniPool = IUniswapV3Pool(uniswapV3Pool);
+        (sqrtPriceX96, , , , , , ) = uniPool.slot0();
+
+        uint160 fairSqrtPriceX96 = getFairSqrtPriceX96(
+            dhedgeFactory,
+            uniPool.token0(),
+            uniPool.token1()
+        );
+
+        inRange = CLPriceLibrary.isSqrtPriceDeviationInRange(fee, sqrtPriceX96, fairSqrtPriceX96);
+    }
+
     /// @notice Returns the Uni pool square root price based on underlying oracle prices
     /// @dev note token0 and token1 must be in the same order as the uni pool we're comparing too
     /// @param factory dHEDGE Factory address
