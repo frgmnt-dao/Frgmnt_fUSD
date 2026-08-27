@@ -79,7 +79,13 @@ contract PoolLogic is
         None,
         Pending,
         Finalized,
-        Claimed
+        Claimed,
+        // FNA-03: appended at the end, not inserted, so the existing numeric values above
+        // (Pending=1, Finalized=2, Claimed=3) never shift for any request already stored
+        // on-chain before this upgrade. Same as Finalized, except assetAmount was moved into
+        // withdrawalEscrow rather than left bookkept via reservedAssetBalance — see
+        // finalizeCashWithdraw()/claimCashWithdraw().
+        FinalizedEscrowed
     }
 
     struct CashWithdrawRequest {
@@ -174,6 +180,11 @@ contract PoolLogic is
     /// @notice Tracks users already migrated from rewardDebt accounting to index snapshots.
     mapping(address => bool) public rewardIndexInitialized;
 
+    /// @notice FNA-03: dedicated escrow holding finalized-but-unclaimed queued-withdrawal
+    ///         assets, physically segregated from this pool's own balance. Wired once via
+    ///         initializeWithdrawalEscrow() below.
+    address public withdrawalEscrow;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -209,6 +220,7 @@ contract PoolLogic is
     error WithdrawAmountTooSmall();
     error AutoCompoundingAlreadyInitialized();
     error AutoCompoundingNotInitialized();
+    error EscrowAlreadySet();
     /// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
     error ComplexWithdrawFailed(address asset, address guard);
     error OnlyTokenLogic();
@@ -324,6 +336,20 @@ contract PoolLogic is
         if (compoundedRewardIndex != 0) revert AutoCompoundingAlreadyInitialized();
         compoundedRewardIndex = 1e18;
         autoCompoundStartRewardPerShare = rewardPerShare;
+    }
+
+    /// @notice FNA-03: one-time wiring of the dedicated WithdrawalEscrow deployed for this
+    ///         pool, callable exactly once by this pool's own owner, any time after
+    ///         deployment (the escrow itself is immutable-bound to this pool's address at its
+    ///         own construction, so deploy order is escrow-after-pool). A plain
+    ///         already-set guard is used here instead of a new reinitializer version (as
+    ///         initializeAutoCompounding() uses) purely to avoid inlining another copy of
+    ///         OpenZeppelin's Initializable version-check machinery — PoolLogic has
+    ///         essentially no bytecode headroom left (see FNA-03/FNA-04 history).
+    function initializeWithdrawalEscrow(address escrow) external onlyOwner {
+        if (withdrawalEscrow != address(0)) revert EscrowAlreadySet();
+        if (escrow == address(0)) revert ZeroAddress();
+        withdrawalEscrow = escrow;
     }
 
     // ============================================================
@@ -1038,25 +1064,31 @@ contract PoolLogic is
         uint256 available = bal - reserved;
         if (available < assetAmount) revert InsufficientAssetBalance();
 
-        // FNA-26: reserving `assetAmount` (without transferring it) immediately removes that
-        // much value from active, reserved-excluding NAV — the same NAV _accrueYield() compares
-        // accountedAssets against. Measure the actual before/after delta around the reservation
-        // itself and apply it now, rather than deferring an approximation to
-        // claimCashWithdraw() (see that function's docs for why subtracting the claim's nominal,
-        // pre-haircut fusdNetForAsset there was wrong: releasing a reservation and transferring
-        // the same amount out leave active NAV exactly unchanged, so any further subtraction at
-        // claim time isn't backed by an actual NAV movement and understates accountedAssets).
-        (uint256 valueBefore, ) = _activeTotalValueWithCompleteness();
-
-        // Reserve the amount for this request until it is claimed.
-        reservedAssetBalance[asset] = reserved + assetAmount;
-
-        (uint256 valueAfter, ) = _activeTotalValueWithCompleteness();
-        uint256 valueDelta = valueBefore > valueAfter ? valueBefore - valueAfter : 0;
-        accountedAssets = accountedAssets > valueDelta ? accountedAssets - valueDelta : 0;
+        // FNA-03/FNA-26: physically move the finalized amount into this pool's dedicated
+        // escrow instead of only bookkeeping it as "reserved" while it remains part of this
+        // contract's own balance — CertiK's follow-up showed that capping individual or
+        // aggregate spender approvals against a bookkept reservation still sitting in the
+        // pool's own balanceOf() could not fully close the drain this was meant to prevent;
+        // physically removing the asset from that balance closes it structurally instead.
+        // reservedAssetBalance is deliberately left untouched: nothing is "reserved" in the
+        // old sense anymore, the asset simply is not part of this pool's own balance once it
+        // leaves for escrow. The move itself removes that much value from active NAV — the
+        // same NAV _accrueYield() compares accountedAssets against — so the library also
+        // measures the before/after delta around the move and returns the adjusted baseline
+        // directly, rather than this deferring an approximation to claimCashWithdraw() (see
+        // that function's docs for why that was wrong). Delegated entirely to
+        // FundCalculationLibrary purely to keep this call site's own bytecode under the
+        // EIP-170 size limit.
+        accountedAssets = FundCalculationLibrary.finalizeReserveAndUpdateBaseline(
+            poolManagerLogic,
+            withdrawalEscrow,
+            asset,
+            assetAmount,
+            accountedAssets
+        );
 
         r.assetAmount = assetAmount;
-        r.status = RequestStatus.Finalized;
+        r.status = RequestStatus.FinalizedEscrowed;
 
         emit CashWithdrawFinalized(
             requestId,
@@ -1072,7 +1104,13 @@ contract PoolLogic is
     ) external nonReentrant updateFeesAndRewards(msg.sender) {
         CashWithdrawRequest storage r = cashWithdrawRequests[requestId];
         if (r.user != msg.sender) revert InvalidWithdrawRequest();
-        if (r.status != RequestStatus.Finalized) revert InvalidWithdrawRequest();
+        // FNA-03: FinalizedEscrowed is the normal case going forward (assetAmount already
+        // moved into withdrawalEscrow); plain Finalized only remains reachable for a request
+        // finalized before the escrow was wired in, whose assetAmount is still part of this
+        // pool's own balance under the pre-FNA-03 reservedAssetBalance-only bookkeeping — see
+        // claimCashWithdrawRelease's own docs.
+        bool escrowed = r.status == RequestStatus.FinalizedEscrowed;
+        if (!escrowed && r.status != RequestStatus.Finalized) revert InvalidWithdrawRequest();
 
         uint256 amount = r.assetAmount;
         if (amount == 0) revert ZeroAmount();
@@ -1086,25 +1124,16 @@ contract PoolLogic is
         // burn the FUSD locked in contract
         ITokenLogic(fusd).burn(fusdNetForAsset);
 
-        // FNA-23 follow-up: release exactly what actually left this contract's own balance,
-        // not the reserved nominal `amount`. A sender-fee/burn-on-transfer settlement asset
-        // can drain more than `amount` from the pool's own balance; decrementing
-        // reservedAssetBalance by only the nominal `amount` would then leave it overstated
-        // relative to the real on-chain balance, tripping the FNA-03 invariant
-        // (balanceOf >= reserved) on every later guarded transaction and finalization for as
-        // long as that overstatement persists. If safeTransfer reverts, the whole tx reverts
-        // and the reservation remains intact. The claimant's own delivered amount — which a
-        // recipient-fee token can separately reduce below `amount` — is reported in the event
-        // for transparency, but fusdNetForAsset above is still burned in full: the reserved
-        // value genuinely left the pool's balance either way, whether it landed with the
-        // claimant or was consumed by the asset's own fee mechanism en route; see
-        // docs/security.md for why this isn't compensated further. Delegated to
-        // FundCalculationLibrary purely to keep this contract's own bytecode under the
+        // FNA-03: releases from this pool's dedicated escrow when `escrowed` (the normal case
+        // going forward — see finalizeCashWithdraw()), or from this pool's own balance under
+        // the pre-FNA-03 reservedAssetBalance-only bookkeeping otherwise (a request finalized
+        // before the escrow was wired in) — see claimCashWithdrawRelease's own docs. Delegated
+        // to FundCalculationLibrary purely to keep this contract's own bytecode under the
         // EIP-170 size limit.
-        (uint256 newReserved, uint256 delivered) = FundCalculationLibrary.claimCashWithdrawTransfer(
-            address(this),
+        (uint256 newReserved, uint256 delivered) = FundCalculationLibrary.claimCashWithdrawRelease(
+            withdrawalEscrow,
+            escrowed,
             asset,
-            msg.sender,
             amount,
             reservedAssetBalance[asset]
         );

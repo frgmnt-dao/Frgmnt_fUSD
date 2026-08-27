@@ -90,6 +90,12 @@ async function deployPoolFixture() {
 
   const pool = PoolLogic.attach(await poolProxy.getAddress());
 
+  // ----------------- FNA-03: WithdrawalEscrow -----------------
+  const WithdrawalEscrow = await ethers.getContractFactory('WithdrawalEscrow');
+  const withdrawalEscrow = await WithdrawalEscrow.deploy(await pool.getAddress());
+  await withdrawalEscrow.waitForDeployment();
+  await pool.connect(owner).initializeWithdrawalEscrow(await withdrawalEscrow.getAddress());
+
   // ----------------- Asset + AssetGuard -----------------
   const asset = await TestTokenLogic.deploy('Mock Asset', 'MA', 18);
   await asset.waitForDeployment();
@@ -127,6 +133,7 @@ async function deployPoolFixture() {
     fusd,
     poolManager,
     pool,
+    withdrawalEscrow,
     asset,
     assetGuard,
     txGuard,
@@ -526,7 +533,7 @@ describe('PoolLogic', () => {
 
     await pool.connect(manager).finalizeCashWithdraw(requestId);
     const stored2 = await pool.cashWithdrawRequests(requestId);
-    expect(stored2.status).to.equal(2n); // Finalized
+    expect(stored2.status).to.equal(4n); // FinalizedEscrowed (FNA-03)
 
     const before = await asset.balanceOf(userAddr);
     await pool.connect(user).claimCashWithdraw(requestId);
@@ -1067,7 +1074,8 @@ describe('PoolLogic', () => {
   });
 
   it('excludes finalized queued reserves from immediate withdrawable value', async () => {
-    const { pool, fusd, asset, assetGuard, manager, user, user2 } = await loadFixture(deployPoolFixture);
+    const { pool, fusd, asset, assetGuard, manager, user, user2, withdrawalEscrow } =
+      await loadFixture(deployPoolFixture);
     const requestAmount = ethers.parseUnits('100', 18);
     const immediateAmount = ethers.parseUnits('50', 18);
     const poolAsset = ethers.parseUnits('1000', 18);
@@ -1083,7 +1091,10 @@ describe('PoolLogic', () => {
     await asset.mint(await pool.getAddress(), poolAsset);
     await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
     await pool.connect(manager).finalizeCashWithdraw(event!.args.requestId);
-    expect(await pool.reservedAssetBalance(await asset.getAddress())).to.equal(requestAmount);
+    // FNA-03: the finalized amount is physically escrowed now, not bookkept via
+    // reservedAssetBalance (which stays 0 for any post-escrow finalization).
+    expect(await pool.reservedAssetBalance(await asset.getAddress())).to.equal(0n);
+    expect(await asset.balanceOf(await withdrawalEscrow.getAddress())).to.equal(requestAmount);
 
     await pool.connect(manager).setImmediateWithdrawEnabled(true);
     await mintAndApproveFUSD(fusd, pool, user2, immediateAmount);
@@ -1091,7 +1102,14 @@ describe('PoolLogic', () => {
     const before = await asset.balanceOf(await user2.getAddress());
     await pool.connect(user2).withdrawCashImmediate(immediateAmount);
     const after = await asset.balanceOf(await user2.getAddress());
-    expect(after - before).to.be.closeTo(immediateAmount, 1_000n);
+    // FNA-03: TestAssetGuard.withdrawProcessing() reads the pool's raw balanceOf() directly,
+    // with no reservedAssetBalance-awareness of its own — under the old bookkeeping-only
+    // reservation, that raw balance still included the (never-physically-moved) reserved
+    // 100 units, so the guard's own 90% (amountBps=9_000) scaling happened to land back on
+    // exactly `immediateAmount` by coincidence of that specific arithmetic. Now that the
+    // reserved amount has actually left the pool's balance, the guard's raw-balance read is
+    // correctly smaller, so the fair 90%-scaled share is 90% of immediateAmount instead.
+    expect(after - before).to.be.closeTo((immediateAmount * 9_000n) / 10_000n, 1_000n);
   });
 
   it('checks guard-supplied withdraw transaction returndata in PoolLogic', async () => {
@@ -1305,8 +1323,8 @@ describe('PoolLogic', () => {
     await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'TxFailed');
   });
 
-  it('detects reserved asset balances that exceed corrupted mock balances', async () => {
-    const { pool, fusd, asset, manager, user, user2 } = await loadFixture(deployPoolFixture);
+  it('detects a corrupted mock balance on immediate withdraw, and finalizes the genuinely-available remainder', async () => {
+    const { pool, fusd, asset, manager, user, user2, withdrawalEscrow } = await loadFixture(deployPoolFixture);
     const firstAmount = ethers.parseUnits('100', 18);
     const secondAmount = ethers.parseUnits('50', 18);
     const poolAsset = ethers.parseUnits('1000', 18);
@@ -1328,19 +1346,41 @@ describe('PoolLogic', () => {
 
     await asset.mint(await pool.getAddress(), poolAsset);
     await pool.connect(manager).finalizeCashWithdraw(firstEvent!.args.requestId);
-    await asset.burnFromPool(await pool.getAddress(), poolAsset - secondAmount);
+    // FNA-03: the first finalize already physically moved `firstAmount` out of the pool's own
+    // balance (into escrow), so only `poolAsset - firstAmount` remains here to begin with —
+    // burn down to exactly `secondAmount` from that, not from the original `poolAsset`.
+    const poolBalanceAfterFirstFinalize = await asset.balanceOf(await pool.getAddress());
+    await asset.burnFromPool(await pool.getAddress(), poolBalanceAfterFirstFinalize - secondAmount);
 
+    // FNA-03: reservedAssetBalance is no longer incremented for an escrowed reservation (the
+    // first request's 100 already left the pool's own balance physically, not via bookkeeping),
+    // so the old "reserved balance exceeds actual balance" defensive check in _withdrawProcessing
+    // can no longer fire here — there is nothing left in reservedAssetBalance to be inconsistent
+    // with. The pro-rata immediate-withdraw path still safely rejects this corrupted balance, via
+    // its own independent NAV-consistency check (valueDelta vs netFusd) instead.
     await pool.connect(manager).setImmediateWithdrawEnabled(true);
-    await expectRevert(pool.connect(user2).withdrawCashImmediate(secondAmount), 'InvalidReservedBalance');
+    await expectRevert(pool.connect(user2).withdrawCashImmediate(secondAmount), 'InvalidFundValue');
 
-    await expectRevert(
-      pool.connect(manager).finalizeCashWithdraw(secondEvent!.args.requestId),
-      'InvalidReservedBalance',
+    // Unlike the old bookkeeping-only design, nothing about the first (already-escrowed)
+    // request's reservation is inconsistent with this corrupted balance (reservedAssetBalance
+    // was never incremented for it), so finalizing the second request now correctly succeeds —
+    // computeFinalizeAssetAmount independently haircuts the payout against outstanding FUSD
+    // claims (FNA-05), so the escrowed amount is a fraction of `secondAmount`, not the full
+    // nominal amount. What matters here is that the request is escrowed for exactly what the
+    // pool actually parts with, and no more than the corrupted balance available.
+    const poolBalanceBeforeSecondFinalize = await asset.balanceOf(await pool.getAddress());
+    await pool.connect(manager).finalizeCashWithdraw(secondEvent!.args.requestId);
+    const stored = await pool.cashWithdrawRequests(secondEvent!.args.requestId);
+    expect(stored.status).to.equal(4n); // FinalizedEscrowed (FNA-03)
+    expect(stored.assetAmount).to.be.gt(0n);
+    expect(stored.assetAmount).to.be.lte(poolBalanceBeforeSecondFinalize);
+    expect(await asset.balanceOf(await withdrawalEscrow.getAddress())).to.equal(
+      firstAmount + stored.assetAmount,
     );
   });
 
   it('reverts a guarded execTransaction that would leave a finalized withdrawal reservation unbacked', async () => {
-    const { pool, fusd, poolManager, asset, txGuard, manager, user, other } =
+    const { pool, fusd, poolManager, asset, txGuard, manager, user, other, withdrawalEscrow } =
       await loadFixture(deployPoolFixture);
 
     await pool.connect(manager).setImmediateWithdrawEnabled(false);
@@ -1356,7 +1396,11 @@ describe('PoolLogic', () => {
 
     await asset.mint(await pool.getAddress(), amount);
     await pool.connect(manager).finalizeCashWithdraw(requestId);
-    expect(await pool.reservedAssetBalance(await asset.getAddress())).to.equal(amount);
+    // FNA-03: the finalized amount is physically in escrow now, not bookkept via
+    // reservedAssetBalance — there is nothing left in the pool's own balance for a guarded
+    // execTransaction to reach in the first place.
+    expect(await pool.reservedAssetBalance(await asset.getAddress())).to.equal(0n);
+    expect(await asset.balanceOf(await pool.getAddress())).to.equal(0n);
 
     // Reassign the asset's guard to one that permits an arbitrary guarded call, mirroring how a
     // real AssetGuard would let a manager deploy the asset elsewhere (e.g. supplying it to a
@@ -1364,18 +1408,20 @@ describe('PoolLogic', () => {
     await poolManager.setAssetGuard(await asset.getAddress(), await txGuard.getAddress());
     await txGuard.setTxType(1, true);
 
+    // The escrowed amount is structurally gone from the pool's own balance, so attempting to
+    // move it via a guarded execTransaction fails on the plain ERC20 transfer itself — the
+    // reservation can no longer be left unbacked because it was never left backed-by-balance
+    // in the first place (this is the FNA-03 fix's actual guarantee, stronger than the old
+    // after-the-fact InvalidReservedBalance bookkeeping check it replaces).
     const data = asset.interface.encodeFunctionData('transfer', [await other.getAddress(), amount]);
-    await expectRevert(
-      pool.connect(user).execTransaction(await asset.getAddress(), data),
-      'InvalidReservedBalance',
-    );
+    await expect(pool.connect(user).execTransaction(await asset.getAddress(), data)).to.be.reverted;
 
-    // The reservation must still be fully backed: the transfer must not have gone through.
-    expect(await asset.balanceOf(await pool.getAddress())).to.equal(amount);
+    expect(await asset.balanceOf(await pool.getAddress())).to.equal(0n);
+    expect(await asset.balanceOf(await withdrawalEscrow.getAddress())).to.equal(amount);
   });
 
   it('allows a guarded execTransaction that leaves a finalized withdrawal reservation intact', async () => {
-    const { pool, fusd, poolManager, asset, txGuard, manager, user, other } =
+    const { pool, fusd, poolManager, asset, txGuard, manager, user, other, withdrawalEscrow } =
       await loadFixture(deployPoolFixture);
 
     await pool.connect(manager).setImmediateWithdrawEnabled(false);
@@ -1392,16 +1438,22 @@ describe('PoolLogic', () => {
     const extra = ethers.parseUnits('50', 18);
     await asset.mint(await pool.getAddress(), amount + extra);
     await pool.connect(manager).finalizeCashWithdraw(requestId);
+    // FNA-03: `amount` already physically left for escrow; only the unreserved surplus remains
+    // in the pool's own balance.
+    expect(await asset.balanceOf(await pool.getAddress())).to.equal(extra);
+    expect(await asset.balanceOf(await withdrawalEscrow.getAddress())).to.equal(amount);
 
     await poolManager.setAssetGuard(await asset.getAddress(), await txGuard.getAddress());
     await txGuard.setTxType(1, true);
 
-    // Only moves the unreserved surplus above the reservation; the reservation stays fully backed.
+    // Only moves the unreserved surplus above the reservation; the escrowed reservation itself
+    // (already outside the pool's own balance) is untouched.
     const data = asset.interface.encodeFunctionData('transfer', [await other.getAddress(), extra]);
     await pool.connect(user).execTransaction(await asset.getAddress(), data);
 
-    expect(await asset.balanceOf(await pool.getAddress())).to.equal(amount);
+    expect(await asset.balanceOf(await pool.getAddress())).to.equal(0n);
     expect(await asset.balanceOf(await other.getAddress())).to.equal(extra);
+    expect(await asset.balanceOf(await withdrawalEscrow.getAddress())).to.equal(amount);
   });
 
   // FNA-05: claims-pro-rata loss-socialized sizing — an underwater pool must haircut every
@@ -1496,9 +1548,9 @@ describe('PoolLogic', () => {
       // Old vulnerable formula would finalize at full par (50); the haircut instead reserves
       // exactly Alice's 80%-collateralized share.
       expect(stored.assetAmount).to.equal(ethers.parseUnits('40', 18));
-      expect(await pool.reservedAssetBalance(await asset.getAddress())).to.equal(
-        ethers.parseUnits('40', 18),
-      );
+      // FNA-03: the haircut share is physically escrowed now, not bookkept via
+      // reservedAssetBalance (which stays 0 for an escrowed finalization).
+      expect(await pool.reservedAssetBalance(await asset.getAddress())).to.equal(0n);
 
       const before = await asset.balanceOf(await alice.getAddress());
       await pool.connect(alice).claimCashWithdraw(requestId);
@@ -1519,7 +1571,7 @@ describe('PoolLogic', () => {
     // non-urgent follow-up rather than fixed immediately, since closing it precisely requires a
     // new PoolLogic storage slot on a contract with only a few bytes of bytecode headroom left.
     it('[KNOWN LIMITATION] under-pays a later finalize while an earlier finalized-but-unclaimed reservation is outstanding', async () => {
-      const { pool, fusd, asset, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, asset, poolManager, manager, user, user2, withdrawalEscrow } = await loadFixture(deployPoolFixture);
       const alice = user;
       const bob = user2;
 
@@ -1561,11 +1613,15 @@ describe('PoolLogic', () => {
       expect(bobStored.assetAmount).to.equal(ethers.parseUnits('25', 18));
 
       // Critically: Bob is never over-paid relative to his true share, and the sum of both
-      // reservations never exceeds the pool's actual balance — the core FNA-05 safety property
-      // (no over-extraction) holds even in this degraded-fairness scenario.
+      // reservations never exceeds what the pool ever actually had — the core FNA-05 safety
+      // property (no over-extraction) holds even in this degraded-fairness scenario. FNA-03:
+      // both reservations are physically escrowed now (not left sitting in the pool's own
+      // balance), so the conservation check compares against the escrow's balance instead of
+      // the pool's own.
       expect(bobStored.assetAmount).to.be.lte(ethers.parseUnits('50', 18));
       const totalReserved = aliceStored.assetAmount + bobStored.assetAmount;
-      expect(totalReserved).to.be.lte(await asset.balanceOf(await pool.getAddress()));
+      expect(totalReserved).to.equal(await asset.balanceOf(await withdrawalEscrow.getAddress()));
+      expect(totalReserved).to.be.lte(ethers.parseUnits('100', 18)); // never exceeds the pool's original balance
     });
   });
 
@@ -1651,12 +1707,18 @@ describe('PoolLogic', () => {
       expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('60', 18));
 
       // Unrelated, legitimate new value arrives and gets recognized (ratcheted up) — active NAV
-      // (190 gross - 40 reserved = 150) exceeds the current accountedAssets(60), so a dust stake
-      // triggers accrual that raises accountedAssets to match it exactly. This recognizes 90 of
-      // *legitimate* yield (150 - 60) from the new inflow itself — nothing to do with the claim
-      // that follows. Bob harvests it now (mirroring the CertiK PoC's own approach) so the
-      // post-claim check below isolates whatever the claim itself contributes, if anything.
-      await poolManager.setTotalFundValue(ethers.parseUnits('190', 18));
+      // exceeds the current accountedAssets(60), so a dust stake triggers accrual that raises
+      // accountedAssets to match it exactly. This recognizes 90 of *legitimate* yield (150 - 60)
+      // from the new inflow itself — nothing to do with the claim that follows. Bob harvests it
+      // now (mirroring the CertiK PoC's own approach) so the post-claim check below isolates
+      // whatever the claim itself contributes, if anything.
+      // FNA-03: the mock's totalFundValue represents the pool's own real, remaining balance —
+      // the escrowed 40 already physically left it, so unlike the old bookkeeping-only design
+      // (where "gross" still nominally included the reserved-but-present 40, requiring
+      // activeTotalValueWithCompleteness() to subtract it back out via reservedAssetBalance),
+      // active NAV here is simply this mock value directly (reservedAssetBalance is 0, nothing
+      // left to net out).
+      await poolManager.setTotalFundValue(ethers.parseUnits('150', 18));
       await mintAndApproveFUSD(fusd, pool, bob, 1n);
       await pool.connect(bob).stake(1n);
       expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('150', 18));
@@ -1730,12 +1792,19 @@ describe('PoolLogic', () => {
       // the real per-asset guard balance — not this mock's totalFundValue shortcut), so Alice's
       // claim finalizes at full par with no FNA-05 haircut.
       await pool.connect(manager).finalizeCashWithdraw(requestId);
-      expect(await pool.reservedAssetBalance(assetAddr)).to.equal(ethers.parseUnits('100000', 18));
+      // FNA-03: Alice's 100,000 is physically escrowed now, not bookkept via
+      // reservedAssetBalance — it structurally cannot appear in the pool's own NAV reading any
+      // more (a real poolManagerLogic prices only what the pool's own asset guards still hold),
+      // rather than needing to be netted back out of a gross figure that still nominally
+      // includes it.
+      expect(await pool.reservedAssetBalance(assetAddr)).to.equal(0n);
 
       // Price rises +10bps between finalize and claim ($1.0000 -> $1.0010), mirroring the
-      // auditor's PoC. totalFundValue is bumped by the matching 0.1% to reflect it for accrual.
+      // auditor's PoC. Only Bob's still-pool-held 100,000 units are affected by this for the
+      // pool's own NAV — Alice's 100,000 already left for escrow before the price moved, so a
+      // real totalFundValue() would only ever reflect Bob's leg: 100,000 * 1.001 = 100,100.
       await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1.001', 18), 18);
-      await poolManager.setTotalFundValue(ethers.parseUnits('200200', 18)); // 200000 * 1.001
+      await poolManager.setTotalFundValue(ethers.parseUnits('100100', 18));
 
       const before = await asset.balanceOf(await alice.getAddress());
       await pool.connect(alice).claimCashWithdraw(requestId);
@@ -1746,13 +1815,11 @@ describe('PoolLogic', () => {
       expect(aliceOut).to.equal(ethers.parseUnits('100000', 18));
       expect(await pool.reservedAssetBalance(assetAddr)).to.equal(0n);
 
-      // Without the fix, accrual would have ratcheted accountedAssets to the gross,
-      // reserved-inclusive NAV (200,200) before subtracting Alice's 100,000 claim, landing at
-      // 100,200 — crediting her reserved leg's +100 appreciation as if it were pool yield. With
-      // the fix, that leg is excluded from the NAV accrual sees, so the result stays well below
-      // that (bounded here rather than pinned to an exact figure, since the residual also
-      // interacts with the pre-existing, separately-tracked finalize-claims precision gap — see
-      // FundCalculationLibrary.computeFinalizeAssetAmount's "KNOWN LIMITATION" doc comment).
+      // Without the fix (or without physical escrow), accrual would have ratcheted
+      // accountedAssets to a gross, reserved-inclusive NAV that still credited Alice's escrowed
+      // leg's +100 appreciation as if it were pool yield (~100,200). With the fix, that leg is
+      // structurally invisible to the pool's own NAV, so accrual only ever sees Bob's genuine
+      // 100,100 — well below that vulnerable figure.
       expect(await pool.accountedAssets()).to.be.lt(ethers.parseUnits('100150', 18));
     });
 
@@ -1800,15 +1867,17 @@ describe('PoolLogic', () => {
       const requestId = event!.args.requestId;
 
       // Finalize: fully collateralized (50,000 NAV / 50,000 total claims), so no FNA-05 haircut —
-      // Alice's full 40,000 is reserved. The fix: accountedAssets syncs immediately to the new,
-      // reservation-excluding active NAV (10,000) instead of staying frozen at 50,000 — no
-      // artificial overhang, unlike CertiK's demonstrated pre-fix behavior.
+      // Alice's full 40,000 is physically escrowed. The fix: accountedAssets syncs immediately to
+      // the new active NAV (10,000, Bob's remaining backing) instead of staying frozen at 50,000
+      // — no artificial overhang, unlike CertiK's demonstrated pre-fix behavior.
       await pool.connect(manager).finalizeCashWithdraw(requestId);
       expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('10000', 18));
 
       // Organic yield arrives while Alice's claim sits unclaimed (e.g. a donation or real trading
-      // profit) — active NAV rises to 15,000.
-      await poolManager.setTotalFundValue(ethers.parseUnits('55000', 18));
+      // profit) — active NAV rises to 15,000. FNA-03: Alice's 40,000 already physically left for
+      // escrow, so a real totalFundValue() reflects only the pool's own remaining (Bob's) backing
+      // plus the new yield, not a gross figure that still nominally includes the escrowed leg.
+      await poolManager.setTotalFundValue(ethers.parseUnits('15000', 18));
 
       // Bob (the sole incumbent staker throughout) triggers accrual via a dust stake. With no
       // artificial overhang blocking it, this 5,000 of real yield is recognized right now.
@@ -1830,11 +1899,10 @@ describe('PoolLogic', () => {
       // pending reward is untouched by it.
       expect(await pool.pendingReward(await bob.getAddress())).to.equal(bobPendingBeforeTom);
 
-      // Claim: releases the reservation and transfers the 40,000 out. accountedAssets is
-      // untouched (FNA-26) and active NAV is unchanged by the claim itself, so nothing new is
-      // exposed here either.
+      // Claim: releases the escrowed 40,000 to Alice. accountedAssets is untouched (FNA-26) and
+      // the pool's own active NAV is unchanged by the claim itself (escrow, not the pool's own
+      // balance, funded the payout), so nothing new is exposed here either.
       await pool.connect(alice).claimCashWithdraw(requestId);
-      await poolManager.setTotalFundValue(ethers.parseUnits('15000', 18)); // 55000 - 40000 paid out
       expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('15000', 18));
 
       const bobFusdBefore = await fusd.balanceOf(await bob.getAddress());
@@ -1899,8 +1967,10 @@ describe('PoolLogic', () => {
       // No performance fee minted merely from finalizing (no yield here, just a reservation).
       expect(await fusd.balanceOf(managerAddr)).to.equal(managerFusdBeforeFinalize);
 
-      // Organic yield: active NAV rises to 15,000 (5,000 of real yield).
-      await poolManager.setTotalFundValue(ethers.parseUnits('55000', 18));
+      // Organic yield: active NAV rises to 15,000 (5,000 of real yield). FNA-03: Alice's 40,000
+      // already physically left for escrow, so a real totalFundValue() reflects only the pool's
+      // own remaining (Bob's) backing plus the new yield.
+      await poolManager.setTotalFundValue(ethers.parseUnits('15000', 18));
 
       const managerFusdBeforeDust = await fusd.balanceOf(managerAddr);
       await mintAndApproveFUSD(fusd, pool, bob, 1n);
@@ -1933,12 +2003,12 @@ describe('PoolLogic', () => {
   // FNA-23 follow-up: claimCashWithdraw() previously trusted the reserved nominal `amount` to
   // be exactly what moved on both sides of the transfer. A recipient-fee settlement asset
   // delivers less than `amount` to the claimant while still burning the full fusdNetForAsset; a
-  // sender-fee/burn-on-transfer asset drains more than `amount` from the pool's own balance,
-  // which — if reservedAssetBalance were only decremented by the nominal `amount` — would leave
-  // it overstated relative to the real on-chain balance, tripping the FNA-03 invariant
-  // (balanceOf >= reserved) on every later guarded transaction and finalization. Fixed via
-  // FundCalculationLibrary.claimCashWithdrawTransfer(), which measures the actual balance delta
-  // on both the pool's own side and the recipient's side.
+  // sender-fee/burn-on-transfer asset drains more than `amount` from wherever it's released
+  // from, which — for a legacy (pre-FNA-03-escrow) reservation still decremented via
+  // reservedAssetBalance by only the nominal `amount` — would leave it overstated relative to
+  // the real on-chain balance. Fixed via FundCalculationLibrary.claimCashWithdrawRelease(),
+  // which measures the actual balance delta on both the sending and recipient sides (delegating
+  // to WithdrawalEscrow.release()'s own delta measurement for the normal, escrowed case).
   describe('FNA-23 follow-up: claimCashWithdraw must not trust the nominal transfer amount', () => {
     async function setUpFeeTokenWithdraw(
       fx: Awaited<ReturnType<typeof deployPoolFixture>>,
@@ -1977,16 +2047,17 @@ describe('PoolLogic', () => {
       const requestId = event!.args.requestId;
 
       await pool.connect(manager).finalizeCashWithdraw(requestId);
-      const reservedBefore = await pool.reservedAssetBalance(feeTokenAddr);
-      expect(reservedBefore).to.equal(ethers.parseUnits('1000', 18));
+      // FNA-03: the finalized amount is physically escrowed now, not bookkept via
+      // reservedAssetBalance (which stays 0 for an escrowed finalization) — see WithdrawalEscrow.
+      expect(await pool.reservedAssetBalance(feeTokenAddr)).to.equal(0n);
 
-      // Enable the fee only now, after finalize has already fixed the nominal reserved amount —
-      // matching the real scenario CertiK described (the asset's own fee mechanics are entirely
-      // independent of, and invisible to, the pool's earlier reservation math.
+      // Enable the fee only now, after finalize has already moved the nominal amount into
+      // escrow — matching the real scenario CertiK described (the asset's own fee mechanics are
+      // entirely independent of, and invisible to, the pool's earlier reservation math).
       await feeToken.setFeeBps(feeBps);
       await feeToken.setSenderExtraBurnBps(senderExtraBurnBps);
 
-      return { alice, feeToken, feeTokenAddr, requestId, reservedBefore };
+      return { alice, feeToken, feeTokenAddr, requestId };
     }
 
     it('recipient-fee: the claimant receives less than the reserved amount, but the full fusdNetForAsset is still burned', async () => {
@@ -2008,8 +2079,8 @@ describe('PoolLogic', () => {
       // pool's own balance in full either way.
       expect(supplyBefore - (await fusd.totalSupply())).to.equal(ethers.parseUnits('1000', 18));
 
-      // Since the pool's own balance dropped by exactly the nominal amount (only the recipient
-      // side was reduced), the reservation still clears exactly, with nothing left overstated.
+      // FNA-03: reservedAssetBalance plays no role for an escrowed reservation either way — it
+      // stays 0 before and after the claim.
       expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(0n);
     });
 
@@ -2022,19 +2093,20 @@ describe('PoolLogic', () => {
         .withArgs(requestId, await alice.getAddress(), feeTokenAddr, ethers.parseUnits('950', 18));
     });
 
-    it('sender-fee/burn-on-transfer: a coexisting second reservation proves reservedAssetBalance is reduced by the real outflow, not the nominal amount, and remains fully claimable', async () => {
+    it('sender-fee/burn-on-transfer: a coexisting second reservation in the same escrow is unaffected by another claim\'s extra burn, and remains fully claimable', async () => {
       const fx = await loadFixture(deployPoolFixture);
-      const { fusd, manager, user2 } = fx;
+      const { fusd, manager, user2, withdrawalEscrow } = fx;
       const bob = user2;
+      const escrowAddr = await withdrawalEscrow.getAddress();
 
-      const { alice, feeToken, feeTokenAddr, requestId: aliceRequestId, reservedBefore } =
+      const { alice, feeToken, feeTokenAddr, requestId: aliceRequestId } =
         await setUpFeeTokenWithdraw(fx, 0, 1000); // 10% extra burn beyond the transferred amount
 
       // Bob independently requests and finalizes a second, coexisting reservation in the same
-      // fee token *before* Alice claims, so reservedAssetBalance (1500) exceeds Alice's own
-      // 1000 at claim time — the only way to actually distinguish "decrement by the nominal
-      // amount" from "decrement by the real outflow": with only Alice's own 1000 reserved,
-      // both a 1000 and a 1100 decrement floor to the same 0 and can't tell the fix apart.
+      // fee token *before* Alice claims — both reservations' full nominal amounts (1000 + 500)
+      // are physically escrowed, backing each claim independently rather than through a shared
+      // pool-balance/reservedAssetBalance ledger (reservedAssetBalance plays no role for either
+      // reservation now — see FNA-03).
       await mintAndApproveFUSD(fusd, fx.pool, bob, ethers.parseUnits('500', 18));
       await feeToken.mint(await fx.pool.getAddress(), ethers.parseUnits('500', 18));
       const bobTx = await fx.pool.connect(bob).requestCashWithdraw(
@@ -2047,30 +2119,38 @@ describe('PoolLogic', () => {
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const bobRequestId = bobEvent!.args.requestId;
       await fx.pool.connect(manager).finalizeCashWithdraw(bobRequestId);
-      expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(ethers.parseUnits('1500', 18));
+      expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(0n);
+      expect(await feeToken.balanceOf(escrowAddr)).to.equal(ethers.parseUnits('1500', 18));
 
-      const poolBalBefore = await feeToken.balanceOf(await fx.pool.getAddress());
+      // A minimal, no-internal-ledger escrow only ever physically holds the sum of nominal
+      // amounts moved in at finalize time — it has no spare margin of its own to absorb a
+      // sender-side fee/burn enabled only afterwards (unlike the old commingled pool balance,
+      // which always had headroom well beyond any single reservation). Topping it up here by
+      // exactly what both claims' 10% extra burns will need isolates the property this test
+      // actually cares about — that one claim's extra burn cannot corrupt or block a *different*,
+      // coexisting reservation's claim — from that separate, already-documented headroom
+      // characteristic of physical segregation.
+      await feeToken.mint(escrowAddr, ethers.parseUnits('150', 18)); // 10% of (1000 + 500)
+
+      const aliceBalBefore = await feeToken.balanceOf(await alice.getAddress());
+      const escrowBalBeforeAlice = await feeToken.balanceOf(escrowAddr);
       await fx.pool.connect(alice).claimCashWithdraw(aliceRequestId);
-      const actualOutflow = poolBalBefore - (await feeToken.balanceOf(await fx.pool.getAddress()));
-      // 1000 transferred + 10% of that burned extra from the pool's own balance = 1100 total outflow.
-      expect(actualOutflow).to.equal(ethers.parseUnits('1100', 18));
-      expect(reservedBefore).to.equal(ethers.parseUnits('1000', 18));
+      const aliceDelivered = (await feeToken.balanceOf(await alice.getAddress())) - aliceBalBefore;
+      const escrowOutflowForAlice = escrowBalBeforeAlice - (await feeToken.balanceOf(escrowAddr));
+      // feeBps=0, so Alice receives the full nominal 1000; the escrow's own balance drops by
+      // 1000 + 10% extra burn = 1100.
+      expect(aliceDelivered).to.equal(ethers.parseUnits('1000', 18));
+      expect(escrowOutflowForAlice).to.equal(ethers.parseUnits('1100', 18));
+      expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(0n);
 
-      // 1500 - 1100 (real outflow) = 400 — NOT 1500 - 1000 (nominal amount) = 500, which is what
-      // the pre-fix code would have left behind, overstating reservedAssetBalance relative to
-      // the pool's real on-chain balance by exactly the 100 extra that was actually burned.
-      expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(ethers.parseUnits('400', 18));
-
-      // The FNA-03 invariant (balanceOf >= reservedAssetBalance) still holds, and Bob's own,
-      // still-Finalized reservation remains fully backed and claimable in full.
-      expect(await feeToken.balanceOf(await fx.pool.getAddress())).to.be.gte(
-        await fx.pool.reservedAssetBalance(feeTokenAddr),
-      );
+      // Bob's own, still-Finalized (now FinalizedEscrowed) reservation is entirely unaffected by
+      // Alice's claim and its extra burn — it remains fully claimable in full.
       const bobBalBefore = await feeToken.balanceOf(await bob.getAddress());
       await expect(fx.pool.connect(bob).claimCashWithdraw(bobRequestId)).to.not.be.reverted;
       expect((await feeToken.balanceOf(await bob.getAddress())) - bobBalBefore).to.equal(
         ethers.parseUnits('500', 18),
       );
+      expect(await feeToken.balanceOf(escrowAddr)).to.equal(0n);
     });
   });
 
