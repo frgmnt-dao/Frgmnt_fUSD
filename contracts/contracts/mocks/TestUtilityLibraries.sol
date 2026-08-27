@@ -59,6 +59,10 @@ contract TestPoolLogicForFundCalc {
     address public fusd;
     address public poolManagerLogic;
     mapping(address => uint256) public reservedAssetBalance;
+    // FNA-34: lets a test simulate outstanding, unharvested staking rewards that
+    // computeImmediateWithdrawPortion/computeFinalizeAssetAmount must add to totalClaims.
+    uint256 public totalRewardAccrued;
+    uint256 public totalRewardHarvested;
 
     function setFusd(address _fusd) external {
         fusd = _fusd;
@@ -70,6 +74,14 @@ contract TestPoolLogicForFundCalc {
 
     function setReservedAssetBalance(address asset, uint256 amount) external {
         reservedAssetBalance[asset] = amount;
+    }
+
+    function setTotalRewardAccrued(uint256 amount) external {
+        totalRewardAccrued = amount;
+    }
+
+    function setTotalRewardHarvested(uint256 amount) external {
+        totalRewardHarvested = amount;
     }
 }
 

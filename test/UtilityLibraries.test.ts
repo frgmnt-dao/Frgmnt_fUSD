@@ -654,6 +654,35 @@ describe('Utility libraries', () => {
         );
         expect(portion).to.equal(ethers.parseUnits('0.24', 18)); // 120 * 1e18 / 500
       });
+
+      // FNA-34: totalClaims previously omitted totalRewardAccrued - totalRewardHarvested — reward
+      // fUSD the protocol is already committed to minting via harvest() but hasn't minted yet, a
+      // real outstanding claim just like any already-minted balance.
+      it('includes the pool\'s unharvested reward claim in totalClaims, haircutting a withdrawal the old formula would have paid at par', async () => {
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18)); // Bob's remaining claim
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18)); // fundValue == old totalClaims (100)
+        await fundCalcPool.setTotalRewardAccrued(ethers.parseUnits('20', 18));
+        await fundCalcPool.setTotalRewardHarvested(0n);
+
+        const netFusd = ethers.parseUnits('50', 18); // Alice's withdrawal
+        const withdrawableFundValue = ethers.parseUnits('100', 18);
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          withdrawableFundValue,
+        );
+        // Old (buggy) formula: totalClaims = 50 + 50 = 100 = fundValue -> no haircut, portion =
+        // 0.5e18. Fixed: totalClaims = 50 + 50 + 20 = 120 -> fairFusd = 50*100/120 = 41.666...,
+        // portion = fairFusd * 1e18 / 100.
+        const expectedFairFusd = (ethers.parseUnits('50', 18) * ethers.parseUnits('100', 18)) /
+          ethers.parseUnits('120', 18);
+        const expectedPortion = (expectedFairFusd * ethers.parseUnits('1', 18)) /
+          ethers.parseUnits('100', 18);
+        expect(portion).to.equal(expectedPortion);
+        expect(portion).to.be.lt(ethers.parseUnits('0.5', 18));
+      });
     });
 
     describe('computeFinalizeAssetAmount', () => {
@@ -770,6 +799,28 @@ describe('Utility libraries', () => {
             ethers.parseUnits('50', 18),
           ),
         ).to.equal(0n);
+      });
+
+      // FNA-34: same fix as computeImmediateWithdrawPortion above, applied here too — leaving
+      // only the immediate path fixed would just move the exploit to queued withdrawals.
+      it('includes the pool\'s unharvested reward claim in totalClaims, haircutting a finalize the old formula would have paid at par', async () => {
+        const { fund, fundCalcPool, assetGuard18, assetAddr } = await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18)); // fundValue == old totalClaims (100)
+        await fundCalcPool.setTotalRewardAccrued(ethers.parseUnits('20', 18));
+        await fundCalcPool.setTotalRewardHarvested(0n);
+
+        const assetAmount = await fund.computeFinalizeAssetAmount(
+          await fundCalcPool.getAddress(),
+          assetAddr,
+          ethers.parseUnits('50', 18),
+        );
+        // Old (buggy) formula: totalClaims = 100 (manager's fUSD balance from setupPool) =
+        // fundValue -> no haircut, assetAmount = 50. Fixed: totalClaims = 100 + 20 = 120 ->
+        // effectiveFusd = 50*100/120 = 41.666...
+        const expected = (ethers.parseUnits('50', 18) * ethers.parseUnits('100', 18)) /
+          ethers.parseUnits('120', 18);
+        expect(assetAmount).to.equal(expected);
+        expect(assetAmount).to.be.lt(ethers.parseUnits('50', 18));
       });
     });
   });

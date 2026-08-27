@@ -293,7 +293,14 @@ library FundCalculationLibrary {
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
         uint256 completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
-        uint256 totalClaims = IERC20(IPoolLogic(pool).fusd()).totalSupply() + netFusd;
+        // FNA-34: totalSupply() alone omits reward FUSD the protocol is already committed to
+        // minting via harvest() but hasn't minted yet — a real outstanding claim against the
+        // pool just like any staker's already-minted balance. Omitting it understated
+        // totalClaims, giving a withdrawing user a more favorable (less haircut) ratio than
+        // fair, at unharvested stakers' expense.
+        uint256 totalClaims = IERC20(IPoolLogic(pool).fusd()).totalSupply() +
+            netFusd +
+            (IPoolLogic(pool).totalRewardAccrued() - IPoolLogic(pool).totalRewardHarvested());
         uint256 fairFusd = _applyClaimsHaircut(netFusd, completeFundValue, totalClaims);
         // The fair share can still exceed what's actually liquid right now (a temporary
         // liquidity gap, distinct from insolvency). netFusd has already been burned by the
@@ -357,10 +364,16 @@ library FundCalculationLibrary {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
+        // FNA-34: same reasoning as computeImmediateWithdrawPortion above — totalSupply() alone
+        // omits reward FUSD the protocol is already committed to minting via harvest() but
+        // hasn't minted yet. Applied here too: leaving only this path fixed would just move the
+        // exploit from immediate to queued withdrawals, since either path lets a withdrawer
+        // dodge a fair share of the pool's real outstanding claims.
         uint256 effectiveFusd = _applyClaimsHaircut(
             grossFusd,
             _withdrawableFundValue(pool, poolManagerLogic, false),
-            IERC20(IPoolLogic(pool).fusd()).totalSupply()
+            IERC20(IPoolLogic(pool).fusd()).totalSupply() +
+                (IPoolLogic(pool).totalRewardAccrued() - IPoolLogic(pool).totalRewardHarvested())
         );
         if (effectiveFusd == 0) return 0;
 

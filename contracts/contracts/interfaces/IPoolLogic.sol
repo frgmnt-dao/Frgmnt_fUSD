@@ -19,6 +19,18 @@ interface IPoolLogic {
 
     function reservedAssetBalance(address asset) external view returns (uint256);
 
+    /// @notice FNA-34: cumulative net yield ever routed into the staking reward index
+    ///         (_accrueYield()'s appliedNetYield), regardless of whether any staker has
+    ///         harvested it yet. Together with totalRewardHarvested below, the difference is
+    ///         the FUSD the protocol is already committed to minting via harvest() — a real,
+    ///         outstanding claim against the pool that existing FUSD claims-haircut math must
+    ///         not ignore.
+    function totalRewardAccrued() external view returns (uint256);
+
+    /// @notice FNA-34: cumulative amount already minted out via harvest(). See
+    ///         totalRewardAccrued above — the difference between the two is what's still owed.
+    function totalRewardHarvested() external view returns (uint256);
+
     function incrementAccountedAssets(uint256 amount) external;
 
     /// @notice FNA-04 follow-up: reverted by checkpointFeesForDeposit() when the pool's active

@@ -2154,6 +2154,62 @@ describe('PoolLogic', () => {
     });
   });
 
+  // FNA-34: computeImmediateWithdrawPortion/computeFinalizeAssetAmount sized totalClaims off
+  // fUSD totalSupply() alone, omitting reward FUSD the protocol is already committed to minting
+  // via harvest() but hasn't minted yet (totalRewardAccrued - totalRewardHarvested) — a real
+  // outstanding claim against the pool just like a staker's already-minted balance. A withdrawer
+  // could exit at a more favorable (less haircut) ratio than fair, leaving insufficient real
+  // backing for a staker's legitimate, already-earned-but-unharvested reward.
+  describe('FNA-34: immediate withdrawal haircut must include unharvested reward claims', () => {
+    it('haircuts an immediate withdrawal for the pool\'s unharvested reward claim, not just its fUSD supply', async () => {
+      const { pool, fusd, asset, poolManager, manager, user, user2 } =
+        await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const poolAddr = await pool.getAddress();
+
+      // Baseline: 80 real value backing 80 accountedAssets (fully aligned, no yield yet).
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('80', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('80', 18));
+      await poolManager.setTotalFundValue(ethers.parseUnits('80', 18));
+
+      // Bob stakes 60 fUSD in two steps (40 now, 20 after the yield bump below) so the second
+      // stake's own accrual step is the one that recognizes the organic yield into
+      // totalRewardAccrued, rather than needing a separate dust-stake trigger.
+      await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('60', 18));
+      await pool.connect(bob).stake(ethers.parseUnits('40', 18));
+
+      // Organic yield arrives: real asset balance and active NAV both rise by 40 (120 total).
+      await asset.mint(poolAddr, ethers.parseUnits('40', 18));
+      await poolManager.setTotalFundValue(ethers.parseUnits('120', 18));
+
+      // Bob's second stake triggers accrual against the now-120 active NAV: netYield = 120 - 80
+      // = 40, recognized into totalRewardAccrued (0% fees in this fixture, so none of it is
+      // diverted to a manager fee).
+      await pool.connect(bob).stake(ethers.parseUnits('20', 18));
+      expect(await pool.totalRewardAccrued()).to.equal(ethers.parseUnits('40', 18));
+      expect(await pool.totalRewardHarvested()).to.equal(0n);
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('120', 18));
+
+      // Alice holds fUSD (never staked) sized so that, under the OLD formula (totalSupply()
+      // alone), her withdrawal would be exactly fully collateralized: Bob's 60 (all now staked,
+      // inside the pool's own balance) + Alice's 60 = 120 = the pool's real value, so the old
+      // code would apply no haircut at all — even though the pool is also on the hook for
+      // Bob's real, already-earned 40 reward claim that isn't part of fUSD supply yet.
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('60', 18));
+
+      const before = await asset.balanceOf(await alice.getAddress());
+      await pool.connect(alice).withdrawCashImmediate(ethers.parseUnits('60', 18));
+      const delivered = (await asset.balanceOf(await alice.getAddress())) - before;
+
+      // Old (buggy) formula: totalClaims = 60 (Bob) + 60 (Alice's netFusd added back) = 120 =
+      // fundValue -> no haircut, Alice would receive her full par 60. Fixed formula: totalClaims
+      // = 60 + 60 + 40 (Bob's unharvested reward) = 160 -> fairFusd = 60 * 120 / 160 = 45,
+      // correctly haircutting Alice's exit so real backing remains for Bob's reward claim too.
+      expect(delivered).to.equal(ethers.parseUnits('45', 18));
+    });
+  });
+
   // FNA-06: compoundedRewardIndex must never grow unbounded. An attacker holding the pool's only
   // (dust) effective sfUSD supply could previously donate directly to the pool (reads as "yield"
   // since it grows fund value without growing accountedAssets) and harvest repeatedly, compounding
