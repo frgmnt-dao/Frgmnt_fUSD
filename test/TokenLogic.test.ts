@@ -789,6 +789,32 @@ describe('TokenLogic (fEURO)', () => {
         expect(await mockPoolLogic.checkpointCallCount()).to.equal(1n);
       });
 
+      it('bubbles up an unrelated checkpoint failure too, not just IncompleteNAV (FNA-04 follow-up, second round)', async () => {
+        // CertiK's second FNA-04 follow-up: the fix above only special-cased the
+        // IncompleteNAV selector, so any *other* checkpointFeesForDeposit() failure (a
+        // genuine bug or panic elsewhere in the fee/reward pipeline, unrelated to NAV
+        // completeness) was still silently swallowed, letting the deposit proceed past a
+        // checkpoint that failed for an unknown reason.
+        const fx = await loadFixture(deployFixture);
+        const { fusd, user, usdcAddress, mockPoolLogic, usdc } = fx;
+        const { amount } = await setUpUsdcDeposit(fx);
+
+        await mockPoolLogic.setRevertOther(true);
+
+        const userBalBefore = await usdc.balanceOf(await user.getAddress());
+        const poolBalBefore = await usdc.balanceOf(await mockPoolLogic.getAddress());
+
+        await expect(
+          fusd.connect(user).deposit(usdcAddress, amount, await user.getAddress()),
+        ).to.be.revertedWithCustomError(mockPoolLogic, 'OtherCheckpointFailure');
+
+        // Atomic: no fUSD minted and no collateral pulled from the depositor, exactly like
+        // the IncompleteNAV case above.
+        expect(await fusd.balanceOf(await user.getAddress())).to.equal(0n);
+        expect(await usdc.balanceOf(await user.getAddress())).to.equal(userBalBefore);
+        expect(await usdc.balanceOf(await mockPoolLogic.getAddress())).to.equal(poolBalBefore);
+      });
+
       it('still deposits normally when PoolLogic does not implement checkpointFeesForDeposit at all (fail-open preserved, e.g. cross-proxy upgrade ordering)', async () => {
         // A real (but not-yet-upgraded) PoolLogic implementation: has incrementAccountedAssets
         // (pre-dates FNA-22) but lacks checkpointFeesForDeposit (added by FNA-22, after this

@@ -534,22 +534,22 @@ contract TokenLogic is
         // every deposit into an unconditional revert in exactly the case this call must stay
         // fail-open for — cross-proxy upgrade ordering, since PoolLogic and TokenLogic are
         // separately upgradeable). Inspecting the raw returndata keeps that fail-open behavior
-        // for every case except one: if the call failed AND the returndata is specifically
-        // IncompleteNAV (see IPoolLogic and PoolLogic.checkpointFeesForDeposit()'s own doc for
-        // the full mechanism), re-revert it here so this deposit is blocked outright — CertiK
-        // flagged that the previous version ignored the low-level call's result entirely,
-        // letting a deposit silently continue past a checkpoint that had (silently) done
-        // nothing. A pool that hasn't called initializeAutoCompounding() yet still returns
-        // (does not revert) from checkpointFeesForDeposit() itself, so it never reaches here.
+        // for exactly that one case (a missing selector on the callee reverts with empty
+        // returndata) and bubbles up any other revert reason verbatim, whatever it is — not
+        // just IncompleteNAV specifically. CertiK's follow-up flagged that only special-casing
+        // IncompleteNAV let any *other* checkpoint failure (a genuine bug or unexpected revert
+        // inside the fee/reward pipeline) be silently swallowed the same way the original,
+        // fully-ignored low-level call once was, letting the deposit proceed past a checkpoint
+        // that failed for an unknown reason. A pool that hasn't called
+        // initializeAutoCompounding() yet still returns (does not revert) from
+        // checkpointFeesForDeposit() itself, so it never reaches here.
         (bool checkpointOk, bytes memory checkpointReturnData) = poolLogic.call(
             abi.encodeWithSelector(IPoolLogic.checkpointFeesForDeposit.selector)
         );
-        if (
-            !checkpointOk &&
-            checkpointReturnData.length >= 4 &&
-            bytes4(checkpointReturnData) == IPoolLogic.IncompleteNAV.selector
-        ) {
-            revert IPoolLogic.IncompleteNAV();
+        if (!checkpointOk && checkpointReturnData.length > 0) {
+            assembly {
+                revert(add(checkpointReturnData, 32), mload(checkpointReturnData))
+            }
         }
 
         // FNA-23: mint against what PoolLogic actually received, not the nominal `amount`
