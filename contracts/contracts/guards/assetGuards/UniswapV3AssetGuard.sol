@@ -12,6 +12,7 @@ import "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 
 import "./ERC20Guard.sol";
 import "../../interfaces/guards/IPreValuedAssetGuard.sol";
+import "../../interfaces/guards/IIncompleteValuationGuard.sol";
 import "../../interfaces/IHasAssetInfo.sol";
 import "../../interfaces/IPoolLogic.sol";
 import "../../interfaces/IERC20Extended.sol";
@@ -27,7 +28,7 @@ import "../../utils/UniswapV3PriceLibrary.sol";
  *      - Skips NFTs whose underlying tokens are not valid assets in the factory.
  * @custom:project Frgmnt
  */
-contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
+contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteValuationGuard {
     struct UniV3PoolParams {
         address token0;
         address token1;
@@ -125,6 +126,37 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
         address pool,
         address asset
     ) public view override returns (uint256 balance) {
+        (balance, ) = _valuePositions(pool, asset);
+    }
+
+    /// @notice FNA-37: see IIncompleteValuationGuard. Reports whether every owned NFT's pool
+    ///         spot price was inside the fair-price band as of getBalance()'s own last read.
+    function isValuationComplete(
+        address pool,
+        address asset
+    ) external view override returns (bool complete) {
+        (, complete) = _valuePositions(pool, asset);
+    }
+
+    function isIncompleteValuationGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @dev FNA-37: an external trader can push a single tracked NFT's own Uniswap V3 pool spot
+    ///      price outside the Chainlink-derived fair band (cheaply, for a thin or non-mainstream
+    ///      pool) — assertFairPrice() would revert the whole getBalance() call over that one
+    ///      position, freezing stake/unstake/harvest/immediate-withdraw for the entire pool.
+    ///      Skips (degrades to 0 contribution) just the affected position instead, same as the
+    ///      unsupported-token skip already below, and reports it via `complete` so
+    ///      PoolManagerLogic.totalFundValueWithCompleteness() can tell a genuinely-empty position
+    ///      apart from a temporarily-unpriceable one. Shared by getBalance() and
+    ///      isValuationComplete() so both see identical per-position handling, mirroring
+    ///      MorphoVaultV2AssetGuard's _valuePosition() pattern.
+    function _valuePositions(
+        address pool,
+        address asset
+    ) internal view returns (uint256 balance, bool complete) {
+        complete = true;
         address factory = IPoolLogic(pool).factory();
         INonfungiblePositionManager nonfungiblePositionManager = INonfungiblePositionManager(asset);
 
@@ -160,14 +192,18 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard {
                 continue;
             }
 
-            // Load conservative fair price (TWAP) for the pool
-            params.sqrtPriceX96 = UniswapV3PriceLibrary.assertFairPrice(
+            (bool inRange, uint160 sqrtPriceX96) = UniswapV3PriceLibrary.isFairPrice(
                 factory,
                 nonfungiblePositionManager.factory(),
                 params.token0,
                 params.token1,
                 params.fee
             );
+            if (!inRange) {
+                complete = false;
+                continue;
+            }
+            params.sqrtPriceX96 = sqrtPriceX96;
 
             // Total amounts for this NFT at current sqrtPrice
             (uint256 amount0, uint256 amount1) = _positionTotalAmounts(

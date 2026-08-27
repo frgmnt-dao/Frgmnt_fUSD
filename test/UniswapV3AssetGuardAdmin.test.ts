@@ -225,6 +225,38 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
     expect(balance).to.be.gt(0n);
   });
 
+  // FNA-37: an external trader can push a single tracked NFT's own Uniswap V3 pool spot price
+  // outside the Chainlink-derived fair band cheaply (a thin or non-mainstream pool) —
+  // getBalance() previously reverted the whole call over that one position, freezing
+  // stake/unstake/harvest/immediate-withdraw for the entire pool. It must instead degrade just
+  // that position to zero and report it via isValuationComplete().
+  describe('FNA-37: out-of-band Uniswap V3 spot price degrades instead of reverting', () => {
+    it('isIncompleteValuationGuard returns true', async () => {
+      const { guard } = await deployPositionFixture();
+      expect(await guard.isIncompleteValuationGuard()).to.equal(true);
+    });
+
+    it('getBalance degrades an out-of-band position to zero instead of reverting, and isValuationComplete reports it', async () => {
+      const { guard, poolAndFactory, nfpm, uniPool } = await deployPositionFixture();
+      const poolAddr = await poolAndFactory.getAddress();
+      const nfpmAddr = await nfpm.getAddress();
+
+      const balanceBefore = await guard.getBalance(poolAddr, nfpmAddr);
+      expect(balanceBefore).to.be.gt(0n);
+      expect(await guard.isValuationComplete(poolAddr, nfpmAddr)).to.equal(true);
+
+      // Push the pool's spot price far outside the Chainlink-derived fair band (both tokens
+      // priced at $1, so the fair sqrt price is ~SQRT_PRICE_1; push it 50% higher — the fee-3000
+      // threshold here is well under 1%).
+      await uniPool.setSqrtPriceX96((SQRT_PRICE_1 * 3n) / 2n);
+
+      // Without the fix, this reverts with "Uni v3 LP price mismatch" instead of returning 0.
+      const balanceAfter = await guard.getBalance(poolAddr, nfpmAddr);
+      expect(balanceAfter).to.equal(0n);
+      expect(await guard.isValuationComplete(poolAddr, nfpmAddr)).to.equal(false);
+    });
+  });
+
   it('removeTokenCheck returns false for tokens used by owned NFTs', async () => {
     const { guard, token0, token1, poolAndFactory, nfpm } = await deployPositionFixture();
 
