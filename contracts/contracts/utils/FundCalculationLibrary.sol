@@ -7,6 +7,7 @@ import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
 import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
 import { IPoolLogic } from "../interfaces/IPoolLogic.sol";
 import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
+import { IUnwindCostAwareGuard } from "../interfaces/guards/IUnwindCostAwareGuard.sol";
 import { IWithdrawalEscrow } from "../interfaces/IWithdrawalEscrow.sol";
 
 /**
@@ -423,7 +424,7 @@ library FundCalculationLibrary {
             address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
             uint256 withdrawableBalance = capByLiquidity
                 ? _guardWithdrawableBalance(pool, asset, guard)
-                : IAssetGuard(guard).getBalance(pool, asset);
+                : _guardNetRealizableBalance(pool, asset, guard);
             uint256 reserved = IPoolLogic(pool).reservedAssetBalance(asset);
             if (reserved > 0) {
                 if (withdrawableBalance < reserved) revert InvalidReservedBalance();
@@ -431,6 +432,27 @@ library FundCalculationLibrary {
             }
             value += IPoolManagerLogic(poolManagerLogic).assetValue(asset, withdrawableBalance);
         }
+    }
+
+    /// @notice FNA-35: checks the IUnwindCostAwareGuard marker via the same low-level-call
+    ///      pattern already used elsewhere in this codebase (isPreValuedAssetGuard(),
+    ///      isWithdrawableBalanceGuard()) — a guard without the marker is assumed to already
+    ///      report net-realizable value from getBalance() (today's behavior, unaffected). Unlike
+    ///      _guardWithdrawableBalance()'s liquidity cap, a marked guard's actual call here is not
+    ///      wrapped in a further try/degrade: it's a plain valuation read, exactly as
+    ///      unconditional as getBalance() itself already is.
+    function _guardNetRealizableBalance(
+        address pool,
+        address asset,
+        address guard
+    ) private view returns (uint256) {
+        (bool hasMarker, bytes memory markerData) = guard.staticcall(
+            abi.encodeWithSignature("isUnwindCostAwareGuard()")
+        );
+        if (hasMarker && markerData.length == 32 && abi.decode(markerData, (bool))) {
+            return IUnwindCostAwareGuard(guard).getNetRealizableBalance(pool, asset);
+        }
+        return IAssetGuard(guard).getBalance(pool, asset);
     }
 
     /// @dev Checks the IWithdrawableBalanceGuard marker via the same low-level-call-with-fallback

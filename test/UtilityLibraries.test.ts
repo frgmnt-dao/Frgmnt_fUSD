@@ -683,6 +683,30 @@ describe('Utility libraries', () => {
         expect(portion).to.equal(expectedPortion);
         expect(portion).to.be.lt(ethers.parseUnits('0.5', 18));
       });
+
+      // FNA-35: a guard whose getBalance() reports gross, unrealized leveraged-position equity
+      // (e.g. Aave collateral minus debt, ignoring flashloan premium/route costs) can implement
+      // IUnwindCostAwareGuard so this function sizes the solvency haircut against the
+      // net-realizable figure instead of the inflated gross one.
+      it('uses IUnwindCostAwareGuard.getNetRealizableBalance() instead of gross getBalance() when the guard implements the marker', async () => {
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18)); // Bob's remaining claim
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18)); // gross equity (unmarked fallback)
+        await assetGuard18.setUnwindCostAwareGuard(true);
+        await assetGuard18.setNetRealizableBalance(ethers.parseUnits('80', 18)); // net of unwind cost
+
+        const netFusd = ethers.parseUnits('50', 18); // Alice's withdrawal; totalClaims = 50 + 50 = 100
+        const withdrawableFundValue = ethers.parseUnits('80', 18);
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          withdrawableFundValue,
+        );
+        // Using gross (100) would give fairFusd = 50*100/100 = 50 (no haircut), portion = 0.625e18.
+        // Using net-realizable (80): fairFusd = 50*80/100 = 40, portion = 40*1e18/80 = 0.5e18.
+        expect(portion).to.equal(ethers.parseUnits('0.5', 18));
+      });
     });
 
     describe('computeFinalizeAssetAmount', () => {
@@ -821,6 +845,25 @@ describe('Utility libraries', () => {
           ethers.parseUnits('120', 18);
         expect(assetAmount).to.equal(expected);
         expect(assetAmount).to.be.lt(ethers.parseUnits('50', 18));
+      });
+
+      // FNA-35: same fix as computeImmediateWithdrawPortion above, applied here too — a queued
+      // finalize never executes the unwind, so it must not size a fixed payout from gross,
+      // unrealized leveraged-position equity either.
+      it('uses IUnwindCostAwareGuard.getNetRealizableBalance() instead of gross getBalance() when the guard implements the marker', async () => {
+        const { fund, fundCalcPool, assetGuard18, assetAddr } = await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('100', 18)); // gross equity (unmarked fallback)
+        await assetGuard18.setUnwindCostAwareGuard(true);
+        await assetGuard18.setNetRealizableBalance(ethers.parseUnits('80', 18)); // net of unwind cost
+
+        const assetAmount = await fund.computeFinalizeAssetAmount(
+          await fundCalcPool.getAddress(),
+          assetAddr,
+          ethers.parseUnits('50', 18),
+        );
+        // Using gross (100) would give effectiveFusd = 50*100/100 = 50 (no haircut). Using
+        // net-realizable (80): effectiveFusd = 50*80/100 = 40.
+        expect(assetAmount).to.equal(ethers.parseUnits('40', 18));
       });
     });
   });

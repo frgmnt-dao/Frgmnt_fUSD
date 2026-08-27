@@ -431,6 +431,100 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     expect(await guard.getBalance(await pl.getAddress(), ethers.ZeroAddress)).to.equal(0n);
   });
 
+  // FNA-35: getBalance() reports gross collateral-minus-debt equity, with no deduction for what
+  // it actually costs to realize it — the flashloan premium, route fees/slippage, and configured
+  // buffer this guard's own unwind route requires. getNetRealizableBalance() is the
+  // IUnwindCostAwareGuard-marked counterpart FundCalculationLibrary substitutes in for NAV sizing.
+  describe('FNA-35: getNetRealizableBalance (unwind-cost-aware NAV)', () => {
+    it('isUnwindCostAwareGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isUnwindCostAwareGuard()).to.equal(true);
+    });
+
+    it('equals gross equity when there is no debt to unwind', async () => {
+      const { guard, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), ethers.ZeroAddress);
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+      expect(net).to.equal(gross);
+      expect(net).to.be.gt(0n);
+    });
+
+    it('deducts the flashloan premium required to unwind debt from gross equity', async () => {
+      const { guard, aavePool, dataProvider, usdc, aToken, debtToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      // USDC both supplied and borrowed: the debt's underlying is then also the guard's own
+      // chosen settlement token, so the flash-amount estimate takes the same-token shortcut
+      // (no swap/oracle-slippage math involved) — isolating just the premium deduction.
+      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      await usdcDebt.mint(plAddr, 400n * 10n ** 6n);
+
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(100); // 1%
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      expect(gross).to.equal(ethers.parseUnits('600', 18)); // 1000 - 400
+
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+      // flashAmount = 400 (no buffer, same-token shortcut); premium = 400 * 1% = 4 USDC = $4.
+      expect(net).to.equal(ethers.parseUnits('596', 18));
+      expect(net).to.be.lt(gross);
+    });
+
+    it('floors at 0 rather than underflowing when the premium exceeds gross equity', async () => {
+      const { guard, aavePool, dataProvider, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      // Thin gross equity (1 USDC) against a debt sized to make even a small premium exceed it.
+      await aToken.mint(plAddr, 401n * 10n ** 6n);
+      await usdcDebt.mint(plAddr, 400n * 10n ** 6n);
+
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(1000); // 10% — premium (40 USDC) far exceeds the 1 USDC gross equity
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      expect(gross).to.equal(ethers.parseUnits('1', 18));
+
+      expect(await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress)).to.equal(0n);
+    });
+  });
+
   it('removeAssetCheck passes when no positions', async () => {
     const { guard } = await deploy();
     const PMF = await ethers.getContractFactory('MockPoolManagerLogicWithAssets');

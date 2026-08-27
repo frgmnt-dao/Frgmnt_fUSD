@@ -6,6 +6,7 @@ import { IAaveV3Pool } from "../../interfaces/aave/v3/IAaveV3Pool.sol";
 import { IAaveLendingPoolAssetGuard } from "../../interfaces/guards/IAaveLendingPoolAssetGuard.sol";
 import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckingGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
+import { IUnwindCostAwareGuard } from "../../interfaces/guards/IUnwindCostAwareGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
@@ -19,7 +20,8 @@ contract AaveV3LendingPoolAssetGuard is
     ClosedAssetGuard,
     IAaveLendingPoolAssetGuard,
     ISlippageCheckingGuard,
-    IPreValuedAssetGuard
+    IPreValuedAssetGuard,
+    IUnwindCostAwareGuard
 {
     // -----------------------------
     // Constants
@@ -196,6 +198,54 @@ contract AaveV3LendingPoolAssetGuard is
         if (totalCollateralInUsd > totalDebtInUsd) {
             balance = totalCollateralInUsd - totalDebtInUsd;
         }
+    }
+
+    /// @notice FNA-35: see IUnwindCostAwareGuard — marker so FundCalculationLibrary substitutes
+    ///         getNetRealizableBalance() below for getBalance()'s gross figure when sizing NAV
+    ///         for the immediate/queued withdrawal solvency haircut.
+    function isUnwindCostAwareGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @notice getBalance() minus a conservative estimate of what a full unwind of this position
+    ///         actually costs via this guard's own flashloan route: the settlement<->debt swaps'
+    ///         oracle-based slippage tolerance (already folded into
+    ///         _estimateFlashAmountInSettlement's sizing), the configured flash-amount buffer, and
+    ///         Aave's own flashloan premium — none of which getBalance()'s gross
+    ///         collateral-minus-debt figure reflects. Without debt, there is nothing to unwind and
+    ///         gross equity is already net-realizable (a plain collateral withdrawal). See
+    ///         IUnwindCostAwareGuard and FNA-35.
+    function getNetRealizableBalance(
+        address pool,
+        address
+    ) external view override returns (uint256 balance) {
+        (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
+        if (totalCollateralInUsd <= totalDebtInUsd) return 0;
+        uint256 gross = totalCollateralInUsd - totalDebtInUsd;
+
+        (DebtRepayPlan[] memory repayPlans, uint256 debtAssetCount) = _collectDebtPlans(
+            pool,
+            PORTION_DENOMINATOR
+        );
+        if (debtAssetCount == 0) return gross;
+
+        address settlementToken = _chooseSettlementToken(repayPlans);
+        uint256 flashAmount = _estimateFlashAmountInSettlement(
+            pool,
+            repayPlans,
+            settlementToken,
+            defaultSlippageBps
+        );
+
+        uint256 premiumBps = uint256(IAaveV3Pool(aaveLendingPool).FLASHLOAN_PREMIUM_TOTAL());
+        uint256 premiumInSettlement = (flashAmount * premiumBps) / BPS_DENOMINATOR;
+
+        address factory = IPoolLogic(pool).factory();
+        uint256 priceUsd = IHasAssetInfo(factory).getAssetPrice(settlementToken);
+        uint256 decimals = IERC20Extended(settlementToken).decimals();
+        uint256 premiumUsd = (priceUsd * premiumInSettlement) / (10 ** decimals);
+
+        balance = gross > premiumUsd ? gross - premiumUsd : 0;
     }
 
     function getDecimals(address) external pure override returns (uint256) {

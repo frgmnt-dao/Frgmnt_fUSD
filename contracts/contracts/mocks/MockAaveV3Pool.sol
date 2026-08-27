@@ -10,6 +10,16 @@ contract MockAaveV3Pool {
     mapping(address => uint256) private _totalCollateral;
     mapping(address => uint256) private _totalDebt;
     uint256 private _healthFactor = type(uint256).max;
+    // FNA-35: Aave V3's real default is 5 bps (0.05%); configurable for test scenarios.
+    uint128 private _flashloanPremiumTotal = 5;
+
+    function setFlashloanPremiumTotal(uint128 premiumBps) external {
+        _flashloanPremiumTotal = premiumBps;
+    }
+
+    function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint128) {
+        return _flashloanPremiumTotal;
+    }
 
     function setReserveTokens(
         address asset,
