@@ -1172,7 +1172,11 @@ contract PoolLogic is
         v.guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
         if (v.guard == address(0)) revert InvalidGuard();
 
-        v.balance = IAssetGuard(v.guard).getBalance(address(this), asset);
+        // FNA-36: sized against net-realizable value (see IUnwindCostAwareGuard/FNA-35), not raw
+        // getBalance(), so a leveraged position whose gross equity looks positive but whose real
+        // proceeds are fully consumed by unwind costs is skipped below the same way a genuinely
+        // zero-equity one already is.
+        v.balance = FundCalculationLibrary.guardNetRealizableBalance(address(this), asset, v.guard);
         uint256 reserved = reservedAssetBalance[asset];
         if (reserved > 0) {
             if (v.balance < reserved) revert InvalidReservedBalance();
@@ -1180,6 +1184,15 @@ contract PoolLogic is
         }
 
         v.portionBalance = (v.balance * portion) / 1e18;
+        // FNA-36: this asset's own share of the withdrawal NAV is already zero — calling the
+        // guard's own withdrawProcessing() here would, for a leveraged position, still plan and
+        // attempt a real unwind (e.g. an Aave flashloan) purely because debt exists, with nothing
+        // to actually deliver; if that unwind fails, it reverts the *entire* pro-rata withdrawal,
+        // including every other, healthy asset's share. Skipping here is equivalent to the guard
+        // itself reporting a zero-value, zero-transaction withdrawal for this asset.
+        if (v.portionBalance == 0) {
+            return (address(0), 0, false);
+        }
         v.expectedValue = IPoolManagerLogic(poolManagerLogic).assetValue(asset, v.portionBalance);
         v.regularProcessing = true;
 

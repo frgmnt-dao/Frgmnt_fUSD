@@ -424,7 +424,7 @@ library FundCalculationLibrary {
             address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
             uint256 withdrawableBalance = capByLiquidity
                 ? _guardWithdrawableBalance(pool, asset, guard)
-                : _guardNetRealizableBalance(pool, asset, guard);
+                : guardNetRealizableBalance(pool, asset, guard);
             uint256 reserved = IPoolLogic(pool).reservedAssetBalance(asset);
             if (reserved > 0) {
                 if (withdrawableBalance < reserved) revert InvalidReservedBalance();
@@ -434,18 +434,26 @@ library FundCalculationLibrary {
         }
     }
 
-    /// @notice FNA-35: checks the IUnwindCostAwareGuard marker via the same low-level-call
+    /// @notice FNA-35/FNA-36: checks the IUnwindCostAwareGuard marker via the same low-level-call
     ///      pattern already used elsewhere in this codebase (isPreValuedAssetGuard(),
     ///      isWithdrawableBalanceGuard()) — a guard without the marker is assumed to already
     ///      report net-realizable value from getBalance() (today's behavior, unaffected). Unlike
     ///      _guardWithdrawableBalance()'s liquidity cap, a marked guard's actual call here is not
     ///      wrapped in a further try/degrade: it's a plain valuation read, exactly as
     ///      unconditional as getBalance() itself already is.
-    function _guardNetRealizableBalance(
+    /// @dev public (not external, not private): also called directly by name from
+    ///      _withdrawableFundValue() below within this same library (see
+    ///      totalValueWithCompleteness()'s own doc comment for why `external` cannot be invoked
+    ///      internally by name here), and separately called by PoolLogic._withdrawProcessing()
+    ///      (FNA-36) to size a single asset's own portion against net-realizable rather than
+    ///      gross balance, so a leveraged position whose gross equity looks positive but whose
+    ///      net realizable value is fully consumed by unwind costs is skipped the same way a
+    ///      genuinely zero-equity one already is — not just excluded from NAV sizing.
+    function guardNetRealizableBalance(
         address pool,
         address asset,
         address guard
-    ) private view returns (uint256) {
+    ) public view returns (uint256) {
         (bool hasMarker, bytes memory markerData) = guard.staticcall(
             abi.encodeWithSignature("isUnwindCostAwareGuard()")
         );

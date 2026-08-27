@@ -19,6 +19,15 @@ contract TestAssetGuard {
     uint256 public amountBps = 10_000;
     address public transactionTo;
     bytes public transactionData;
+    // FNA-36: lets a test simulate a leveraged position whose reported balance (e.g. Aave
+    // collateral-minus-debt) is zero even though a real ERC20 balance exists underneath, so
+    // withdrawProcessing() below (and any transaction it would plan) must never actually be
+    // reached for this asset — see PoolLogic._withdrawProcessing()'s v.portionBalance == 0 skip.
+    bool public forceZeroBalance;
+
+    function setForceZeroBalance(bool value) external {
+        forceZeroBalance = value;
+    }
 
     function setWithdrawMode(bool zeroAsset, bool zeroAmount, uint256 bps) external {
         returnZeroAsset = zeroAsset;
@@ -41,6 +50,7 @@ contract TestAssetGuard {
     }
 
     function getBalance(address poolLogic, address asset) external view returns (uint256) {
+        if (forceZeroBalance) return 0;
         return IERC20(asset).balanceOf(poolLogic);
     }
 

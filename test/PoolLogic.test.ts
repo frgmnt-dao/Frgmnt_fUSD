@@ -1323,6 +1323,59 @@ describe('PoolLogic', () => {
     await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'TxFailed');
   });
 
+  // FNA-36: a leveraged position (e.g. Aave) whose reported balance is zero (debt >= collateral)
+  // must not still attempt its own withdrawal transaction (e.g. a flashloan unwind) purely
+  // because it exists as a supported asset — if that doomed attempt reverts, it previously took
+  // down the *entire* pro-rata withdrawal, including every other, healthy asset's share.
+  it("skips a zero-equity leveraged leg instead of reverting the whole immediate withdrawal (FNA-36)", async () => {
+    const { pool, fusd, poolManager, asset, assetGuard, target, user } =
+      await loadFixture(deployPoolFixture);
+    const amount = ethers.parseUnits('100', 18);
+    const poolAsset = ethers.parseUnits('1000', 18);
+
+    await mintAndApproveFUSD(fusd, pool, user, amount);
+    await asset.mint(await pool.getAddress(), poolAsset);
+    await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
+
+    // A second, leveraged-style asset whose reported balance is zero even though a real position
+    // exists underneath (mirroring AaveLendingPoolAssetGuard.getBalance() flooring to zero once
+    // debt >= collateral) — its own withdrawProcessing() would still plan a real unwind
+    // transaction purely because debt exists, which reverts if ever actually called.
+    const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
+    const zeroEquityAsset = await TestTokenLogic.deploy('Zero Equity Asset', 'ZEA', 18);
+    await zeroEquityAsset.waitForDeployment();
+    const TestAssetGuard = await ethers.getContractFactory('TestAssetGuard');
+    const zeroEquityGuard = await TestAssetGuard.deploy();
+    await zeroEquityGuard.waitForDeployment();
+    await poolManager.setAssetGuard(
+      await zeroEquityAsset.getAddress(),
+      await zeroEquityGuard.getAddress(),
+    );
+    await poolManager.setSupportedAsset(
+      await zeroEquityAsset.getAddress(),
+      true,
+      ethers.parseUnits('1', 18),
+      18,
+    );
+    await zeroEquityGuard.setForceZeroBalance(true);
+    await zeroEquityGuard.setTransaction(
+      await target.getAddress(),
+      target.interface.encodeFunctionData('revertAlways'),
+    );
+
+    const before = await asset.balanceOf(await user.getAddress());
+    await pool.connect(user).withdrawCashImmediate(amount);
+    const after = await asset.balanceOf(await user.getAddress());
+
+    // The healthy asset's full fair share is still delivered — the zero-equity leg's doomed
+    // transaction was never attempted (this call could not have succeeded otherwise, since
+    // revertAlways() unconditionally reverts).
+    expect(after - before).to.equal(amount);
+
+    // The unmodified single-asset guard (assetGuard) is untouched by any of this.
+    expect(await assetGuard.forceZeroBalance()).to.equal(false);
+  });
+
   it('detects a corrupted mock balance on immediate withdraw, and finalizes the genuinely-available remainder', async () => {
     const { pool, fusd, asset, manager, user, user2, withdrawalEscrow } = await loadFixture(deployPoolFixture);
     const firstAmount = ethers.parseUnits('100', 18);
