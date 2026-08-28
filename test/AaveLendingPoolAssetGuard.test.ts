@@ -1134,8 +1134,16 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       return FEE_DENOM - surviving;
     }
 
-    function minSlippageBps(feePpm: bigint): bigint {
+    // FNA-49: exact-output (oracleMaxIn) uses the gross-up floor — receiving a fixed amount
+    // out after a fee cut requires sending in / (1 - fee), not in * (1 + fee).
+    function grossUpSlippageBps(feePpm: bigint): bigint {
       return (feePpm * BPS_DENOM) / (FEE_DENOM - feePpm);
+    }
+
+    // FNA-49: exact-input (oracleMinOut) uses the direct fee-only floor — paying a fee cut on
+    // a fixed amount in costs amount * fee, not the exact-output gross-up form.
+    function feeOnlySlippageBps(feePpm: bigint): bigint {
+      return (feePpm * BPS_DENOM) / FEE_DENOM;
     }
 
     const exactInputIface = new ethers.Interface([
@@ -1193,7 +1201,10 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       expect(decoded).to.not.equal(undefined);
 
       const routeFee = combinedFee([3000n, 3000n]);
-      const routeSlippageBps = minSlippageBps(routeFee);
+      // FNA-49: exact-input (oracleMinOut) uses the fee-only floor, not the exact-output
+      // gross-up — this call passes slippageBps=0, so the composed and maxed forms coincide
+      // here and only the floor-direction correction is visible in this assertion.
+      const routeSlippageBps = feeOnlySlippageBps(routeFee);
       const expectedOut = (amountIn * ethers.parseUnits('2000', 18) * 10n ** 6n) / (10n ** 18n * ethers.parseUnits('1', 18));
       const expectedMinOut = (expectedOut * (BPS_DENOM - routeSlippageBps)) / BPS_DENOM;
 
@@ -1202,7 +1213,7 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       // The buggy fallback-fee (100 ppm) bound would have been strictly tighter than
       // what a real, zero-price-impact swap along the actual 2-hop route delivers —
       // guaranteeing a revert even with no price impact at all.
-      const buggySlippageBps = minSlippageBps(100n);
+      const buggySlippageBps = feeOnlySlippageBps(100n);
       const buggyMinOut = (expectedOut * (BPS_DENOM - buggySlippageBps)) / BPS_DENOM;
       expect(decoded!.params.amountOutMinimum).to.be.lessThan(buggyMinOut);
     });
@@ -1239,7 +1250,7 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       expect(decoded).to.not.equal(undefined);
 
       const routeFee = combinedFee([3000n, 3000n]);
-      const routeSlippageBps = minSlippageBps(routeFee);
+      const routeSlippageBps = grossUpSlippageBps(routeFee);
       const expectedIn = (desiredDebtOut * ethers.parseUnits('2000', 18) * 10n ** 6n) / (10n ** 18n * ethers.parseUnits('1', 18));
       const expectedMaxIn = (expectedIn * (BPS_DENOM + routeSlippageBps)) / BPS_DENOM;
 
@@ -1248,7 +1259,7 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       // The buggy fallback-fee (100 ppm) bound would have been strictly tighter than
       // what a real, zero-price-impact swap along the actual 2-hop route actually costs —
       // guaranteeing a revert even with no price impact at all.
-      const buggySlippageBps = minSlippageBps(100n);
+      const buggySlippageBps = grossUpSlippageBps(100n);
       const buggyMaxIn = (expectedIn * (BPS_DENOM + buggySlippageBps)) / BPS_DENOM;
       expect(decoded!.params.amountInMaximum).to.be.greaterThan(buggyMaxIn);
     });
