@@ -11,6 +11,7 @@ describe('MorphoVaultV2ContractGuard', () => {
     'function withdraw(uint256 assets, address receiver, address owner) returns (uint256)',
     'function redeem(uint256 shares, address receiver, address owner) returns (uint256)',
     'function forceDeallocate(address adapter, bytes data, uint256 assets, address onBehalf) returns (uint256)',
+    'function multicall(bytes[] data) returns (bytes[])',
   ]);
 
   async function deploy() {
@@ -303,68 +304,30 @@ describe('MorphoVaultV2ContractGuard', () => {
   });
 
   // -----------------------------------------------------------------------
-  // forceDeallocate
+  // forceDeallocate (FNA-46: no longer reachable standalone — see multicall below)
   // -----------------------------------------------------------------------
 
-  it('forceDeallocate succeeds when onBehalf == pool and the adapter is registered', async () => {
+  it('FNA-46: a standalone forceDeallocate call is no longer dispatched — returns txType=NotUsed and emits no event', async () => {
     const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter } =
       await deploy();
     await vault.setAdapter(adapter.address, true);
 
-    // Non-trivial, non-empty `data` payload deliberately exercises ABI decoding of a dynamic
-    // `bytes` parameter that is NOT the last parameter in the tuple (adapter, data, assets,
-    // onBehalf) — confirms abi.decode correctly follows the offset pointer regardless of
-    // where the dynamic type sits, rather than naively reading fields in sequence.
-    const adapterData = ethers.AbiCoder.defaultAbiCoder().encode(
-      ['uint256', 'uint256', 'address'],
-      [123n, 456n, adapter.address],
-    );
-
     const data = vaultIface.encodeFunctionData('forceDeallocate', [
       adapter.address,
-      adapterData,
+      '0x',
       777n,
       poolLogicAddr,
     ]);
 
-    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
-      .to.emit(guard, 'MorphoVaultV2ForceDeallocateEvt')
-      .withArgs(poolLogicAddr, vaultAddr, adapter.address, 777n, anyValue);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data)).to.not.emit(
+      guard,
+      'MorphoVaultV2ForceDeallocateEvt',
+    );
 
     const result = await guard
       .connect(poolLogicSigner)
       .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
-    expect(result[0]).to.equal(29n); // TransactionType.MorphoVaultV2ForceDeallocate
-  });
-
-  it('forceDeallocate reverts when onBehalf != pool', async () => {
-    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, vault, adapter, other } =
-      await deploy();
-    await vault.setAdapter(adapter.address, true);
-    const data = vaultIface.encodeFunctionData('forceDeallocate', [
-      adapter.address,
-      '0x',
-      777n,
-      other.address,
-    ]);
-    await expect(
-      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
-    ).to.be.revertedWith('MorphoVaultV2Guard: onBehalf != pool');
-  });
-
-  it('forceDeallocate reverts when the adapter is not registered on the vault', async () => {
-    const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, adapter } =
-      await deploy();
-    // Note: setAdapter was never called, so isAdapter(adapter) is false on the mock vault.
-    const data = vaultIface.encodeFunctionData('forceDeallocate', [
-      adapter.address,
-      '0x',
-      777n,
-      poolLogicAddr,
-    ]);
-    await expect(
-      callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
-    ).to.be.revertedWith('MorphoVaultV2Guard: adapter not registered');
+    expect(result[0]).to.equal(0n); // TransactionType.NotUsed
   });
 
   it('forceDeallocate is permissionless on the vault itself: an unrelated address can call it directly, bypassing this guard entirely, and burns only the configured, bounded penalty', async () => {
@@ -395,6 +358,221 @@ describe('MorphoVaultV2ContractGuard', () => {
     expect(await vault.balanceOf(poolLogicAddr)).to.equal(initialShares - expectedPenaltyShares);
     // The caller receives no shares or assets directly — this is griefing, not a theft path.
     expect(await vault.balanceOf(other.address)).to.equal(0n);
+  });
+
+  // -----------------------------------------------------------------------
+  // FNA-46: multicall — the only way to reach forceDeallocate now. Batching the deallocation
+  // and the exit into one atomic transaction closes the idle-liquidity race a standalone
+  // forceDeallocate exposed: no other vault shareholder can withdraw against the freed
+  // liquidity between two separate execTransaction calls, because there is no longer a second
+  // call — both legs execute together or not at all.
+  // -----------------------------------------------------------------------
+
+  describe('multicall', () => {
+    function encodeMulticall(calls: string[]) {
+      return vaultIface.encodeFunctionData('multicall', [calls]);
+    }
+
+    it('succeeds with a single forceDeallocate leg followed by exactly one redeem, atomically', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter } =
+        await deploy();
+      await vault.setAdapter(adapter.address, true);
+
+      const dealloc = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        777n,
+        poolLogicAddr,
+      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [
+        500n,
+        poolLogicAddr,
+        poolLogicAddr,
+      ]);
+      const data = encodeMulticall([dealloc, redeem]);
+
+      await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+        .to.emit(guard, 'MorphoVaultV2ForceDeallocateEvt')
+        .withArgs(poolLogicAddr, vaultAddr, adapter.address, 777n, anyValue);
+      await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+        .to.emit(guard, 'MorphoVaultV2RedeemEvt')
+        .withArgs(poolLogicAddr, vaultAddr, 500n, anyValue);
+
+      const result = await guard
+        .connect(poolLogicSigner)
+        .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+      expect(result[0]).to.equal(38n); // TransactionType.MorphoVaultV2ForceDeallocateAndExit
+    });
+
+    it('succeeds with multiple forceDeallocate legs (from different adapters) before the final withdraw', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter, other } =
+        await deploy();
+      await vault.setAdapter(adapter.address, true);
+      await vault.setAdapter(other.address, true); // second adapter, reusing `other`'s address
+
+      const dealloc1 = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        100n,
+        poolLogicAddr,
+      ]);
+      const dealloc2 = vaultIface.encodeFunctionData('forceDeallocate', [
+        other.address,
+        '0x',
+        200n,
+        poolLogicAddr,
+      ]);
+      const withdraw = vaultIface.encodeFunctionData('withdraw', [
+        300n,
+        poolLogicAddr,
+        poolLogicAddr,
+      ]);
+      const data = encodeMulticall([dealloc1, dealloc2, withdraw]);
+
+      const result = await guard
+        .connect(poolLogicSigner)
+        .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+      expect(result[0]).to.equal(38n);
+    });
+
+    it('succeeds with zero forceDeallocate legs — a multicall wrapping just one redeem is equivalent to calling redeem directly', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
+      const redeem = vaultIface.encodeFunctionData('redeem', [
+        500n,
+        poolLogicAddr,
+        poolLogicAddr,
+      ]);
+      const data = encodeMulticall([redeem]);
+
+      const result = await guard
+        .connect(poolLogicSigner)
+        .txGuard.staticCall(poolManagerAddr, vaultAddr, data);
+      expect(result[0]).to.equal(38n);
+    });
+
+    it('reverts on an empty multicall', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr } = await deploy();
+      const data = encodeMulticall([]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: empty multicall');
+    });
+
+    it('reverts when a non-last leg is not forceDeallocate', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
+      const deposit = vaultIface.encodeFunctionData('deposit', [1000n, poolLogicAddr]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [
+        500n,
+        poolLogicAddr,
+        poolLogicAddr,
+      ]);
+      const data = encodeMulticall([deposit, redeem]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: only forceDeallocate legs allowed');
+    });
+
+    it('reverts when the last leg is not withdraw or redeem (e.g. another forceDeallocate — "all deallocate, no exit")', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter } =
+        await deploy();
+      await vault.setAdapter(adapter.address, true);
+      const dealloc1 = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        100n,
+        poolLogicAddr,
+      ]);
+      const dealloc2 = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        200n,
+        poolLogicAddr,
+      ]);
+      const data = encodeMulticall([dealloc1, dealloc2]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: last leg must be withdraw or redeem');
+    });
+
+    it('reverts when the last leg is deposit/mint (not withdraw/redeem)', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter } =
+        await deploy();
+      await vault.setAdapter(adapter.address, true);
+      const dealloc = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        100n,
+        poolLogicAddr,
+      ]);
+      const mint = vaultIface.encodeFunctionData('mint', [500n, poolLogicAddr]);
+      const data = encodeMulticall([dealloc, mint]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: last leg must be withdraw or redeem');
+    });
+
+    it('propagates a forceDeallocate leg validation failure (onBehalf != pool)', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter, other } =
+        await deploy();
+      await vault.setAdapter(adapter.address, true);
+      const dealloc = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        100n,
+        other.address, // wrong onBehalf
+      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [
+        500n,
+        poolLogicAddr,
+        poolLogicAddr,
+      ]);
+      const data = encodeMulticall([dealloc, redeem]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: onBehalf != pool');
+    });
+
+    it('propagates a forceDeallocate leg validation failure (adapter not registered)', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, adapter } =
+        await deploy();
+      // Note: setAdapter was never called, so isAdapter(adapter) is false on the mock vault.
+      const dealloc = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        100n,
+        poolLogicAddr,
+      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [
+        500n,
+        poolLogicAddr,
+        poolLogicAddr,
+      ]);
+      const data = encodeMulticall([dealloc, redeem]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: adapter not registered');
+    });
+
+    it('propagates the final leg validation failure (redeem receiver != pool)', async () => {
+      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter, other } =
+        await deploy();
+      await vault.setAdapter(adapter.address, true);
+      const dealloc = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        100n,
+        poolLogicAddr,
+      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [
+        500n,
+        other.address, // wrong receiver
+        poolLogicAddr,
+      ]);
+      const data = encodeMulticall([dealloc, redeem]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: receiver != pool');
+    });
   });
 
   // -----------------------------------------------------------------------

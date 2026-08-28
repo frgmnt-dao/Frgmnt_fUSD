@@ -88,8 +88,14 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     /// @dev redeem(uint256 shares, address receiver, address owner) — identical selector to ERC-4626.
     bytes4 private constant SEL_REDEEM = IERC4626.redeem.selector;
 
-    /// @dev forceDeallocate(address adapter, bytes data, uint256 assets, address onBehalf).
+    /// @dev forceDeallocate(address adapter, bytes data, uint256 assets, address onBehalf) — see
+    ///      FNA-46: no longer dispatched standalone, only decoded as a leg inside SEL_MULTICALL.
     bytes4 private constant SEL_FORCE_DEALLOCATE = IMorphoVaultV2.forceDeallocate.selector;
+
+    /// @dev multicall(bytes[] data) — Morpho Vault V2's native batch-call entry point (standard
+    ///      OZ Multicall). FNA-46: the only way to reach forceDeallocate now — see
+    ///      _handleMulticall's own docs.
+    bytes4 private constant SEL_MULTICALL = bytes4(keccak256("multicall(bytes[])"));
 
     /*//////////////////////////////////////////////////////////////////////////
                                   IMMUTABLES
@@ -183,8 +189,10 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         else if (method == SEL_WITHDRAW)
             txType = _handleWithdraw(poolLogic, to, _poolManagerLogic, params);
         else if (method == SEL_REDEEM) txType = _handleRedeem(poolLogic, to, _poolManagerLogic, params);
-        else if (method == SEL_FORCE_DEALLOCATE)
-            txType = _handleForceDeallocate(poolLogic, to, params);
+        else if (method == SEL_MULTICALL)
+            txType = _handleMulticall(poolLogic, to, _poolManagerLogic, params);
+        // FNA-46: SEL_FORCE_DEALLOCATE is deliberately NOT dispatched standalone here — see
+        // _handleMulticall's own docs. A bare forceDeallocate call now falls through to NotUsed.
         else txType = uint16(TransactionType.NotUsed);
 
         // Vault V2 deposits/withdrawals carry no debt and no liquidation risk, so there is
@@ -290,6 +298,16 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     ///      be registered on the target vault (defense in depth; the vault would reject an
     ///      unregistered adapter on its own, but checking here keeps the failure local and
     ///      explicit rather than relying solely on the external call reverting).
+    /// @dev FNA-46: only ever called now as one leg inside _handleMulticall's loop — txGuard()
+    ///      no longer dispatches this selector standalone. A standalone forceDeallocate burns
+    ///      the pool's penalty shares and moves the freed assets into the vault's *shared* idle
+    ///      liquidity rather than to the caller; between that call and a second, separate
+    ///      withdraw/redeem execTransaction, any other vault shareholder can withdraw against
+    ///      that same liquidity first — the pool pays the penalty and still doesn't get its
+    ///      exit. forceDeallocate's own precondition (a dry adapter) makes competing exit demand
+    ///      the expected state at exactly that moment, not an edge case. Still returns
+    ///      TransactionType.MorphoVaultV2ForceDeallocate and still emits its own event per leg,
+    ///      exactly as it did standalone — only reachability changed.
     function _handleForceDeallocate(
         address poolLogic,
         address vault,
@@ -307,5 +325,52 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
 
         emit MorphoVaultV2ForceDeallocateEvt(poolLogic, vault, adapter, assets, block.timestamp);
         return uint16(TransactionType.MorphoVaultV2ForceDeallocate);
+    }
+
+    /// @notice FNA-46: the only way to reach forceDeallocate — decodes the vault's native
+    ///         multicall(bytes[]) and requires every leg but the last to be a validated
+    ///         forceDeallocate (see _handleForceDeallocate), with the last leg required to be
+    ///         exactly one pool-bound withdraw or redeem (see _handleWithdraw/_handleRedeem).
+    /// @dev Making the penalty and the exit atomic in one transaction closes the idle-liquidity
+    ///      race a standalone forceDeallocate exposed: since both legs execute in the same call,
+    ///      no other vault shareholder gets a window to withdraw against the freed liquidity
+    ///      before the pool claims it. A batch of zero forceDeallocate legs (just the one
+    ///      withdraw/redeem) is also permitted — functionally identical to calling that selector
+    ///      directly, so there is nothing to gain from forbidding it. A batch ending in anything
+    ///      other than withdraw/redeem (including another forceDeallocate, i.e. "all deallocate,
+    ///      no exit") reverts — forceDeallocate is only ever a means to an atomic exit now, never
+    ///      an end in itself, even inside a multicall wrapper. Mirrors the recursive
+    ///      txGuard()-call pattern UniswapV3RouterGuard already uses for its own multicall
+    ///      support, reusing each leg's existing single-call handler (and its existing event)
+    ///      rather than duplicating validation logic.
+    function _handleMulticall(
+        address poolLogic,
+        address vault,
+        address poolManagerLogic,
+        bytes memory params
+    ) internal returns (uint16 txType) {
+        bytes[] memory calls = abi.decode(params, (bytes[]));
+        uint256 length = calls.length;
+        require(length >= 1, "MorphoVaultV2Guard: empty multicall");
+
+        for (uint256 i = 0; i < length - 1; ++i) {
+            require(
+                getMethod(calls[i]) == SEL_FORCE_DEALLOCATE,
+                "MorphoVaultV2Guard: only forceDeallocate legs allowed"
+            );
+            _handleForceDeallocate(poolLogic, vault, getParams(calls[i]));
+        }
+
+        bytes memory lastCall = calls[length - 1];
+        bytes4 lastMethod = getMethod(lastCall);
+        if (lastMethod == SEL_WITHDRAW) {
+            _handleWithdraw(poolLogic, vault, poolManagerLogic, getParams(lastCall));
+        } else if (lastMethod == SEL_REDEEM) {
+            _handleRedeem(poolLogic, vault, poolManagerLogic, getParams(lastCall));
+        } else {
+            revert("MorphoVaultV2Guard: last leg must be withdraw or redeem");
+        }
+
+        txType = uint16(TransactionType.MorphoVaultV2ForceDeallocateAndExit);
     }
 }
