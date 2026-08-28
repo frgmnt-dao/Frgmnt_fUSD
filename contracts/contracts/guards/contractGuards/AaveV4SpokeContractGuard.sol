@@ -217,6 +217,8 @@ contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     /// @dev Supply-side validation: the Spoke must be a registered supported asset of the pool
     ///      AND the specific reserveId must be in the protocol owner's ACTIVE allowlist. See the
     ///      contract-level documentation above for why supply uses the active (not tracked) set.
+    /// @dev FNA-44: also requires the reserve's underlying to be a supported pool asset — see
+    ///      _requireSupportedUnderlying's own docs.
     function _requireActiveReserve(
         address poolManagerLogic,
         address poolLogic,
@@ -231,12 +233,21 @@ contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
             IAaveV4SpokeManager(aaveV4SpokeManager).isValidPoolReserve(poolLogic, spoke, reserveId),
             "AaveV4SpokeGuard: reserve not whitelisted"
         );
+        _requireSupportedUnderlying(poolManagerLogic, spoke, reserveId);
     }
 
     /// @dev Withdraw-side validation (FNA-10): the Spoke must still be a registered supported
     ///      asset of the pool, but the reserveId only needs to be TRACKED, not actively
     ///      whitelisted — see the contract-level documentation above for why a delisted reserve
     ///      must still be withdrawable through this manual path.
+    /// @dev FNA-44: also requires the reserve's underlying to be a supported pool asset — see
+    ///      _requireSupportedUnderlying's own docs. Unlike the reserveId check above, this does
+    ///      NOT relax for a delisted underlying the way tracked-vs-active does for the reserve
+    ///      itself: withdrawing a reserve whose underlying was removed from supportedAssets would
+    ///      land the funds as an idle ERC20 that totalFundValue()/pro-rata withdrawals/the
+    ///      ordinary guarded execTransaction path all skip while unsupported — a strictly worse
+    ///      outcome than leaving the position parked in the (still-valued) Spoke until the
+    ///      underlying is either re-added or governance uses an explicit recovery path.
     function _requireTrackedReserve(
         address poolManagerLogic,
         address poolLogic,
@@ -250,6 +261,41 @@ contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         require(
             IAaveV4SpokeManager(aaveV4SpokeManager).isTrackedPoolReserve(poolLogic, spoke, reserveId),
             "AaveV4SpokeGuard: reserve not tracked"
+        );
+        _requireSupportedUnderlying(poolManagerLogic, spoke, reserveId);
+    }
+
+    /// @dev FNA-44: neither the Spoke-level `isSupportedAsset` check above nor the Aave V4 Spoke
+    ///      reserveId allowlist ever resolves or validates the reserve's actual underlying ERC20
+    ///      — Aave V4 addresses a market as (spoke, reserveId), not by the underlying's own
+    ///      address, so nothing here previously stopped supply/approveWithdraw/withdraw from
+    ///      moving a reserve whose underlying isn't (or is no longer) one of this pool's
+    ///      supportedAssets. Resolved via the same trusted `getReserve(uint256)` raw-staticcall
+    ///      pattern AaveV4SpokeAssetGuard._getReserveUnderlyingAndHub already uses (duplicated
+    ///      here rather than shared, since it is a small, self-contained, single-purpose decode
+    ///      with no state and this guard has no other dependency on that asset guard). Reverts —
+    ///      rather than failing open — on a staticcall failure or a zero-address result: this is
+    ///      a contract guard gating a fund-moving transaction before it executes, not a passive
+    ///      valuation read, so an unresolvable reserve must block the operation, not silently
+    ///      permit it.
+    function _requireSupportedUnderlying(
+        address poolManagerLogic,
+        address spoke,
+        uint256 reserveId
+    ) internal view {
+        (bool success, bytes memory data) = spoke.staticcall(
+            abi.encodeWithSignature("getReserve(uint256)", reserveId)
+        );
+        require(success && data.length >= 32, "AaveV4SpokeGuard: reserve lookup failed");
+
+        address underlying;
+        assembly {
+            underlying := mload(add(data, 32))
+        }
+        require(underlying != address(0), "AaveV4SpokeGuard: underlying=0");
+        require(
+            IHasSupportedAsset(poolManagerLogic).isSupportedAsset(underlying),
+            "AaveV4SpokeGuard: underlying not enabled"
         );
     }
 }

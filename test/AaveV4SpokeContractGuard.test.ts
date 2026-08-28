@@ -32,10 +32,24 @@ describe('AaveV4SpokeContractGuard', () => {
     const poolLogicAddr = await poolLogicSigner.getAddress();
     await poolManager.setPoolLogic(poolLogicAddr);
 
-    const spoke = ethers.Wallet.createRandom().address;
+    // FNA-44: `spoke` must be a real ISpoke.getReserve(uint256) implementer now that the guard
+    // resolves the reserve's underlying via a raw staticcall — a plain EOA address (this test
+    // file's pre-FNA-44 setup) would make that staticcall trivially "succeed" with empty
+    // returndata, which the fix deliberately treats as a lookup failure.
+    const SpokeFactory = await ethers.getContractFactory('MockAaveV4Spoke');
+    const spokeContract = await SpokeFactory.deploy();
+    await spokeContract.waitForDeployment();
+    const spoke = await spokeContract.getAddress();
 
-    // Happy-path registration: supported asset + whitelisted reserveId.
+    const Token = await ethers.getContractFactory('MockERC20Custom');
+    const underlyingToken = await Token.deploy('USDC', 'USDC', 6);
+    await underlyingToken.waitForDeployment();
+    const underlying = await underlyingToken.getAddress();
+    await spokeContract.setReserveUnderlying(RESERVE_ID, underlying);
+
+    // Happy-path registration: supported asset + whitelisted reserveId + supported underlying.
     await poolManager.setSupportedAsset(spoke, true);
+    await poolManager.setSupportedAsset(underlying, true);
     await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, [RESERVE_ID]);
 
     return {
@@ -49,6 +63,8 @@ describe('AaveV4SpokeContractGuard', () => {
       poolManagerAddr,
       poolLogicAddr,
       spoke,
+      spokeContract,
+      underlying,
     };
   }
 
@@ -123,6 +139,105 @@ describe('AaveV4SpokeContractGuard', () => {
     ]);
     await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data)).to.be.revertedWith(
       'AaveV4SpokeGuard: reserve not whitelisted',
+    );
+  });
+
+  // -----------------------------------------------------------------------
+  // FNA-44: Aave V4 addresses a market as (spoke, reserveId), not by the underlying's own
+  // address — nothing previously resolved or validated the reserve's actual underlying ERC20,
+  // so supply/approveWithdraw/withdraw could move a reserve whose underlying isn't (or is no
+  // longer) one of this pool's supportedAssets.
+  // -----------------------------------------------------------------------
+
+  it('supply reverts when the reserve underlying is not a supported pool asset', async () => {
+    const { guard, poolManager, poolLogicSigner, poolManagerAddr, spoke, underlying, poolLogicAddr } =
+      await deploy();
+    await poolManager.setSupportedAsset(underlying, false);
+    const data = positionManagerIface.encodeFunctionData('supplyOnBehalfOf', [
+      spoke,
+      RESERVE_ID,
+      100n,
+      poolLogicAddr,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data)).to.be.revertedWith(
+      'AaveV4SpokeGuard: underlying not enabled',
+    );
+  });
+
+  it('approveWithdraw reverts when the reserve underlying is not a supported pool asset', async () => {
+    const { guard, poolManager, poolLogicSigner, poolManagerAddr, spoke, underlying, poolLogicAddr } =
+      await deploy();
+    await poolManager.setSupportedAsset(underlying, false);
+    const data = positionManagerIface.encodeFunctionData('approveWithdraw', [
+      spoke,
+      RESERVE_ID,
+      poolLogicAddr,
+      ethers.MaxUint256,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data)).to.be.revertedWith(
+      'AaveV4SpokeGuard: underlying not enabled',
+    );
+  });
+
+  it('withdraw reverts when the reserve underlying is not a supported pool asset (closes the idle-token gap)', async () => {
+    const { guard, poolManager, poolLogicSigner, poolManagerAddr, spoke, underlying, poolLogicAddr } =
+      await deploy();
+    await poolManager.setSupportedAsset(underlying, false);
+    const data = positionManagerIface.encodeFunctionData('withdrawOnBehalfOf', [
+      spoke,
+      RESERVE_ID,
+      500n,
+      poolLogicAddr,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data)).to.be.revertedWith(
+      'AaveV4SpokeGuard: underlying not enabled',
+    );
+  });
+
+  it('withdraw reverts even for a delisted-but-tracked reserveId if the underlying is also unsupported', async () => {
+    // Unlike the reserveId check itself (tracked-vs-active, FNA-10), the underlying check does
+    // NOT relax for a delisted reserve — see _requireTrackedReserve's own docs.
+    const {
+      guard,
+      aaveV4SpokeManager,
+      poolManager,
+      poolLogicSigner,
+      poolManagerAddr,
+      spoke,
+      underlying,
+      poolLogicAddr,
+    } = await deploy();
+    await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, []); // delist RESERVE_ID
+    await poolManager.setSupportedAsset(underlying, false);
+
+    const data = positionManagerIface.encodeFunctionData('withdrawOnBehalfOf', [
+      spoke,
+      RESERVE_ID,
+      500n,
+      poolLogicAddr,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data)).to.be.revertedWith(
+      'AaveV4SpokeGuard: underlying not enabled',
+    );
+  });
+
+  it('reverts when a whitelisted reserveId resolves to a zero-address underlying (never configured on the Spoke)', async () => {
+    const { guard, aaveV4SpokeManager, poolLogicSigner, poolManagerAddr, spoke, poolLogicAddr } =
+      await deploy();
+    const UNCONFIGURED_RESERVE_ID = 8n;
+    // Whitelisted/tracked, but setReserveUnderlying() was never called for it, so the mock
+    // Spoke's getReserve() returns address(0) for `underlying` — a reserveId Aave itself has
+    // never actually initialized.
+    await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, [RESERVE_ID, UNCONFIGURED_RESERVE_ID]);
+
+    const data = positionManagerIface.encodeFunctionData('supplyOnBehalfOf', [
+      spoke,
+      UNCONFIGURED_RESERVE_ID,
+      100n,
+      poolLogicAddr,
+    ]);
+    await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, data)).to.be.revertedWith(
+      'AaveV4SpokeGuard: underlying=0',
     );
   });
 
