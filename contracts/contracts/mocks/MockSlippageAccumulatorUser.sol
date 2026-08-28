@@ -18,14 +18,16 @@ contract MockSlippageAccumulatorUser is SlippageAccumulatorUser {
         return (0, false);
     }
 
-    /// @notice Allow tests to seed intermediateSwapData before calling afterTxGuard.
+    /// @notice Allow tests to seed intermediateSwapData for a given caller before calling
+    ///         afterTxGuard() as that same caller — FNA-47: keyed by caller, not a shared slot.
     function setIntermediateSwapData(
+        address caller,
         address srcAsset,
         address dstAsset,
         uint256 srcAmount,
         uint256 dstAmount
     ) external {
-        intermediateSwapData = SlippageAccumulator.SwapData({
+        intermediateSwapData[caller] = SlippageAccumulator.SwapData({
             srcAsset: srcAsset,
             dstAsset: dstAsset,
             srcAmount: srcAmount,
@@ -34,8 +36,10 @@ contract MockSlippageAccumulatorUser is SlippageAccumulatorUser {
     }
 
     /// @notice Exposes internal storage for assertions.
-    function getIntermediateSwapData() external view returns (SlippageAccumulator.SwapData memory) {
-        return intermediateSwapData;
+    function getIntermediateSwapData(
+        address caller
+    ) external view returns (SlippageAccumulator.SwapData memory) {
+        return intermediateSwapData[caller];
     }
 
     /// @notice Exposes internal _getBalance for unit tests.

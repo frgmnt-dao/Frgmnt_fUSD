@@ -43,6 +43,10 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
 
     /**
      * @notice Transaction guard for Uniswap V3 Swap Router.
+     * @dev FNA-47: `intermediateSwapData` writes below are keyed by `msg.sender` (== `poolLogic`,
+     *      per the require immediately above) rather than a single shared slot — see
+     *      SlippageAccumulatorUser's own docs for why this closes the cross-caller
+     *      snapshot-replacement/underflow-DoS exposure without needing a trusted pool registry.
      * @param poolManagerLogic Pool manager logic address
      * @param to               Swap router address
      * @param data             Encoded function call
@@ -74,7 +78,7 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
 
-            intermediateSwapData = SlippageAccumulator.SwapData({
+            intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: srcAsset,
                 dstAsset: dstAsset,
                 srcAmount: _getBalance(srcAsset, poolLogic),
@@ -95,7 +99,7 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
 
-            intermediateSwapData = SlippageAccumulator.SwapData({
+            intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: params.tokenIn,
                 dstAsset: params.tokenOut,
                 srcAmount: _getBalance(params.tokenIn, poolLogic),
@@ -124,7 +128,7 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
 
-            intermediateSwapData = SlippageAccumulator.SwapData({
+            intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: srcAsset,
                 dstAsset: dstAsset,
                 srcAmount: _getBalance(srcAsset, poolLogic),
@@ -145,7 +149,7 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
 
-            intermediateSwapData = SlippageAccumulator.SwapData({
+            intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: params.tokenIn,
                 dstAsset: params.tokenOut,
                 srcAmount: _getBalance(params.tokenIn, poolLogic),
