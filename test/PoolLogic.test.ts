@@ -1615,15 +1615,13 @@ describe('PoolLogic', () => {
       expect(await fusd.totalSupply()).to.equal(ethers.parseUnits('50', 18)); // Bob's claim only
     });
 
-    // Known, accepted limitation (see FundCalculationLibrary.computeFinalizeAssetAmount's
-    // "KNOWN LIMITATION" doc comment): a finalized-but-unclaimed request's un-burned FUSD still
-    // inflates totalClaims for later finalizers, even though its backing assets are already
-    // excluded from fundValue via reservedAssetBalance. This under-pays (never over-pays) later
-    // finalizers while earlier reservations sit unclaimed, so it cannot reintroduce FNA-05's
-    // first-redeemer exploit — it is a fairness/ordering gap, not a fund-safety one. Tracked as a
-    // non-urgent follow-up rather than fixed immediately, since closing it precisely requires a
-    // new PoolLogic storage slot on a contract with only a few bytes of bytecode headroom left.
-    it('[KNOWN LIMITATION] under-pays a later finalize while an earlier finalized-but-unclaimed reservation is outstanding', async () => {
+    // FNA-38: a finalized-but-unclaimed request's un-burned FUSD previously still inflated
+    // totalClaims for later finalizers, even though its backing assets were already excluded
+    // from fundValue via reservedAssetBalance/escrow — understating (never overstating) later
+    // finalizers' fair share while earlier reservations sat unclaimed. Fixed via
+    // finalizedUnclaimedFusd, which excludes it from totalClaims the same way its backing is
+    // already excluded from fundValue.
+    it('gives a later finalize its true fair share even while an earlier finalized-but-unclaimed reservation is outstanding (FNA-38)', async () => {
       const { pool, fusd, asset, poolManager, manager, user, user2, withdrawalEscrow } = await loadFixture(deployPoolFixture);
       const alice = user;
       const bob = user2;
@@ -1659,22 +1657,18 @@ describe('PoolLogic', () => {
         .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       // Bob finalizes while Alice's reservation is still outstanding (unclaimed). His true fair
-      // share is also 50, but he is under-paid here — this assertion documents the known gap,
-      // not the desired end-state.
+      // share is 50 — with Alice's 100 FUSD excluded from totalClaims (finalizedUnclaimedFusd),
+      // he now correctly gets it, not the 25 the pre-fix asymmetry would have given him.
       await pool.connect(manager).finalizeCashWithdraw(bobEvent!.args.requestId);
       const bobStored = await pool.cashWithdrawRequests(bobEvent!.args.requestId);
-      expect(bobStored.assetAmount).to.equal(ethers.parseUnits('25', 18));
+      expect(bobStored.assetAmount).to.equal(ethers.parseUnits('50', 18));
 
-      // Critically: Bob is never over-paid relative to his true share, and the sum of both
-      // reservations never exceeds what the pool ever actually had — the core FNA-05 safety
-      // property (no over-extraction) holds even in this degraded-fairness scenario. FNA-03:
-      // both reservations are physically escrowed now (not left sitting in the pool's own
-      // balance), so the conservation check compares against the escrow's balance instead of
-      // the pool's own.
-      expect(bobStored.assetAmount).to.be.lte(ethers.parseUnits('50', 18));
+      // Both reservations are physically escrowed (FNA-03), and together exactly exhaust the
+      // pool's original 100 balance — a fair, complete split with nothing left over and nothing
+      // over-extracted.
       const totalReserved = aliceStored.assetAmount + bobStored.assetAmount;
       expect(totalReserved).to.equal(await asset.balanceOf(await withdrawalEscrow.getAddress()));
-      expect(totalReserved).to.be.lte(ethers.parseUnits('100', 18)); // never exceeds the pool's original balance
+      expect(totalReserved).to.equal(ethers.parseUnits('100', 18));
     });
   });
 
@@ -2261,6 +2255,57 @@ describe('PoolLogic', () => {
       // correctly haircutting Alice's exit so real backing remains for Bob's reward claim too.
       expect(delivered).to.equal(ethers.parseUnits('45', 18));
     });
+  });
+
+  // FNA-38: a finalized-but-unclaimed queued withdrawal's backing asset is excluded from active
+  // NAV (physically escrowed, FNA-03) from the moment it's finalized, but its FUSD isn't burned
+  // until claim — so it stayed counted as an "active" claim in totalSupply() in the meantime,
+  // double-counting the same value and understating every other still-active claim's fair share.
+  describe('FNA-38: finalized-but-unclaimed reservations must not inflate other claims (totalClaims)', () => {
+    it("gives an immediate withdrawer their true fair share instead of over-haircutting against a coexisting finalized reservation", async () => {
+      const { pool, fusd, asset, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const poolAddr = await pool.getAddress();
+
+      // Pool: 100 value backing Alice's 50 FUSD + Bob's 50 FUSD (fully collateralized).
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
+      await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('50', 18));
+
+      // Alice queues and finalizes her full 50 — fully collateralized, so no haircut: she's
+      // reserved (escrowed) exactly 50, physically leaving the pool's own balance.
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('50', 18), await asset.getAddress());
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      await pool.connect(manager).finalizeCashWithdraw(event!.args.requestId);
+      const aliceStored = await pool.cashWithdrawRequests(event!.args.requestId);
+      expect(aliceStored.assetAmount).to.equal(ethers.parseUnits('50', 18));
+      expect(await pool.finalizedUnclaimedFusd()).to.equal(ethers.parseUnits('50', 18));
+      expect(await asset.balanceOf(poolAddr)).to.equal(ethers.parseUnits('50', 18)); // Alice's 50 already left
+
+      // Bob immediately withdraws 10 of his own 50 FUSD while Alice's reservation sits unclaimed.
+      await pool.connect(manager).setImmediateWithdrawEnabled(true);
+      const before = await asset.balanceOf(await bob.getAddress());
+      await pool.connect(bob).withdrawCashImmediate(ethers.parseUnits('10', 18));
+      const delivered = (await asset.balanceOf(await bob.getAddress())) - before;
+
+      // Old (buggy) formula: totalClaims = totalSupply(90, Alice's 50 + Bob's remaining 40) +
+      // netFusd(10, Bob's own just-burned amount added back) = 100 -> fairFusd = 10*50/100 = 5.
+      // Fixed: totalClaims = (totalSupply(90) - finalizedUnclaimedFusd(50)) + 10 = 50 ->
+      // fairFusd = 10*50/50 = 10 — Bob's true, undiluted fair par share, matching the finding's
+      // own worked example exactly.
+      expect(delivered).to.equal(ethers.parseUnits('10', 18));
+    });
+
+    // The queued-finalize side of this same fix (computeFinalizeAssetAmount(), which shares the
+    // identical _activeTotalClaims() helper) is covered end-to-end by the "FNA-05: ... gives a
+    // later finalize its true fair share ..." test above.
   });
 
   // FNA-06: compoundedRewardIndex must never grow unbounded. An attacker holding the pool's only

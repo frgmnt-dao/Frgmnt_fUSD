@@ -185,6 +185,20 @@ contract PoolLogic is
     ///         initializeWithdrawalEscrow() below.
     address public withdrawalEscrow;
 
+    /// @notice FNA-38: sum of fusdNetForAsset across every request currently
+    ///         Finalized/FinalizedEscrowed but not yet Claimed. finalizeCashWithdraw() already
+    ///         carves that request's backing asset out of active NAV immediately, but its FUSD
+    ///         isn't burned until claimCashWithdraw() — leaving it counted as an active claim in
+    ///         totalSupply() in the meantime would double-count the same value against remaining
+    ///         holders. See computeImmediateWithdrawPortion()/computeFinalizeAssetAmount().
+    /// @dev Only ever incremented for a FinalizedEscrowed request and decremented on its claim —
+    ///      never touches a legacy, pre-FNA-38 plain-Finalized request, which was never added
+    ///      here to begin with (this counter starts at 0 on upgrade, regardless of any such
+    ///      request already outstanding at the time — a bounded, self-correcting gap: it only
+    ///      ever *under*-excludes claims until any such legacy request is itself claimed, never
+    ///      over-excludes).
+    uint256 public finalizedUnclaimedFusd;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -1090,6 +1104,11 @@ contract PoolLogic is
         r.assetAmount = assetAmount;
         r.status = RequestStatus.FinalizedEscrowed;
 
+        // FNA-38: this request's backing asset just left active NAV above; its FUSD isn't
+        // burned until claimCashWithdraw(), so exclude it from totalClaims in the meantime too —
+        // see finalizedUnclaimedFusd's own docs.
+        finalizedUnclaimedFusd += fusdNetForAsset;
+
         emit CashWithdrawFinalized(
             requestId,
             totalFusd,
@@ -1123,6 +1142,13 @@ contract PoolLogic is
 
         // burn the FUSD locked in contract
         ITokenLogic(fusd).burn(fusdNetForAsset);
+
+        // FNA-38: only ever incremented for an escrowed finalize (see finalizedUnclaimedFusd's
+        // own docs) — a legacy, pre-FNA-38 plain-Finalized claim was never added here, so must
+        // never be subtracted here either.
+        if (escrowed) {
+            finalizedUnclaimedFusd -= fusdNetForAsset;
+        }
 
         // FNA-03: releases from this pool's dedicated escrow when `escrowed` (the normal case
         // going forward — see finalizeCashWithdraw()), or from this pool's own balance under

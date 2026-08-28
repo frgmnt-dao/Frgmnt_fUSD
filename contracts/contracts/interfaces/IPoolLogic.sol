@@ -31,6 +31,13 @@ interface IPoolLogic {
     ///         totalRewardAccrued above — the difference between the two is what's still owed.
     function totalRewardHarvested() external view returns (uint256);
 
+    /// @notice FNA-38: sum of fusdNetForAsset across every request currently
+    ///         Finalized/FinalizedEscrowed but not yet Claimed — FUSD still counted in
+    ///         totalSupply() (not burned until claim) whose backing asset has already been
+    ///         carved out of active NAV at finalize time. Existing claims-haircut math must
+    ///         exclude it from totalClaims or it double-counts the same value.
+    function finalizedUnclaimedFusd() external view returns (uint256);
+
     function incrementAccountedAssets(uint256 amount) external;
 
     /// @notice FNA-04 follow-up: reverted by checkpointFeesForDeposit() when the pool's active
