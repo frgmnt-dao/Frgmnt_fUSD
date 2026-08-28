@@ -191,12 +191,28 @@ contract TestFundCalculationLibrary {
         address pool,
         uint256 netFusd,
         uint256 withdrawableFundValue
-    ) external view returns (uint256) {
+    ) external view returns (uint256 portion) {
+        (portion, , ) = FundCalculationLibrary.computeImmediateWithdrawPortion(
+            pool,
+            netFusd,
+            withdrawableFundValue
+        );
+    }
+
+    function computeAccountedAssetsReduction(
+        uint256 netFusd,
+        uint256 totalClaimsBeforeWithdrawal,
+        uint256 accountedAssetsBefore,
+        uint256 valueBefore,
+        uint256 valueDelta
+    ) external pure returns (uint256) {
         return
-            FundCalculationLibrary.computeImmediateWithdrawPortion(
-                pool,
+            FundCalculationLibrary.computeAccountedAssetsReduction(
                 netFusd,
-                withdrawableFundValue
+                totalClaimsBeforeWithdrawal,
+                accountedAssetsBefore,
+                valueBefore,
+                valueDelta
             );
     }
 
@@ -204,8 +220,8 @@ contract TestFundCalculationLibrary {
         address pool,
         address asset,
         uint256 grossFusd
-    ) external view returns (uint256) {
-        return FundCalculationLibrary.computeFinalizeAssetAmount(pool, asset, grossFusd);
+    ) external view returns (uint256 assetAmount) {
+        (assetAmount, , ) = FundCalculationLibrary.computeFinalizeAssetAmount(pool, asset, grossFusd);
     }
 }
 
