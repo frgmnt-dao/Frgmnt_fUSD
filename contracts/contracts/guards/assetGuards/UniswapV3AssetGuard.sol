@@ -245,6 +245,31 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
         return true;
     }
 
+    /// @notice FNA-48: blocks removing this position manager from supportedAssets while ANY
+    ///         Uniswap V3 NFT position remains tracked for this pool — even one that has been
+    ///         fully decreased and collected down to a zero balance.
+    /// @dev The inherited ERC20Guard.removeAssetCheck() only checks getBalance()==0, which a
+    ///      fully-decreased-and-collected (but not burned) position already satisfies — the
+    ///      NFT itself is still owned by the pool and its tokenId still tracked in
+    ///      NftTrackerStorage, since tracker entries are only ever cleared on burn(). Without
+    ///      this, a manager/trader could decrease+collect a position to zero, delist the
+    ///      position manager via that balance-only check (changeAssets accepts a trader by
+    ///      default), then increaseLiquidity real ERC-20 capital back into the still-tracked
+    ///      NFT — moving it into a position totalFundValue() no longer iterates and ordinary
+    ///      pro-rata withdrawals no longer enumerate. Requiring the tracked position list to be
+    ///      fully empty (i.e. every position burned, not just emptied) closes this for the
+    ///      whole "delist then refill" family, not just one guard branch.
+    function removeAssetCheck(address pool, address asset) public view override {
+        address factory = IPoolLogic(pool).factory();
+        UniswapV3NonfungiblePositionGuard guard = UniswapV3NonfungiblePositionGuard(
+            IHasGuardInfo(factory).getContractGuard(asset)
+        );
+        require(
+            guard.getOwnedTokenIds(pool).length == 0,
+            "UniswapV3AssetGuard: positions tracked"
+        );
+    }
+
     function removeTokenCheck(
         address pool,
         address asset,

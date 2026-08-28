@@ -304,6 +304,62 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     );
   });
 
+  // FNA-48: defense in depth — increaseLiquidity was the only branch here that never checked
+  // isSupportedAsset on the position manager or the position's own underlying tokens, letting
+  // real ERC-20 capital be injected into a position whose manager (or tokens) had since been
+  // delisted. Mirrors mint's own checks.
+  describe('FNA-48: increaseLiquidity requires the position manager and both underlying tokens to remain supported', () => {
+    async function trackPosition() {
+      await positionManager.setTokenByIndex(0, 1);
+      await positionManager.setPosition(
+        1,
+        await token0.getAddress(),
+        await token1.getAddress(),
+        FEE_3000,
+      );
+      const mintData = await encodeMintToPool();
+      await callAfterTx(await positionManager.getAddress(), mintData);
+    }
+
+    it('reverts when the position manager is no longer a supported asset', async () => {
+      await trackPosition();
+      await poolManagerLogic.setSupportedAsset(await positionManager.getAddress(), false);
+
+      const data = await encodeIncreaseLiquidity(1n);
+      await expect(staticTxGuard(await positionManager.getAddress(), data)).to.be.revertedWith(
+        'Frgmnt: Uniswap position mgr not enabled',
+      );
+    });
+
+    it('reverts when token0 is no longer a supported asset', async () => {
+      await trackPosition();
+      await poolManagerLogic.setSupportedAsset(await token0.getAddress(), false);
+
+      const data = await encodeIncreaseLiquidity(1n);
+      await expect(staticTxGuard(await positionManager.getAddress(), data)).to.be.revertedWith(
+        'Frgmnt: unsupported token0',
+      );
+    });
+
+    it('reverts when token1 is no longer a supported asset', async () => {
+      await trackPosition();
+      await poolManagerLogic.setSupportedAsset(await token1.getAddress(), false);
+
+      const data = await encodeIncreaseLiquidity(1n);
+      await expect(staticTxGuard(await positionManager.getAddress(), data)).to.be.revertedWith(
+        'Frgmnt: unsupported token1',
+      );
+    });
+
+    it('still succeeds when the position manager and both underlying tokens remain supported (regression)', async () => {
+      await trackPosition();
+
+      const data = await encodeIncreaseLiquidity(1n);
+      const [txType] = await staticTxGuard(await positionManager.getAddress(), data);
+      expect(txType).to.equal(4); // UniswapV3IncreaseLiquidity
+    });
+  });
+
   it('txGuard - collect checks underlying token support and recipient', async () => {
     // Set up position in the mock NFT manager
     await positionManager.setPosition(

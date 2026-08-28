@@ -283,6 +283,51 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
     ).to.equal(true);
   });
 
+  // FNA-48: getBalance()==0 (ERC20Guard's default removeAssetCheck) is satisfied by a position
+  // that has been fully decreased and collected but not burned — the NFT itself, and its
+  // tokenId in NftTrackerStorage, remain tracked. removeAssetCheck must block delisting the
+  // position manager while ANY position is still tracked, not just while there's a nonzero
+  // balance, or a manager/trader could later increaseLiquidity real capital back into the
+  // still-tracked, now-unsupported NFT — hiding it from totalFundValue() and withdrawals.
+  describe('FNA-48: removeAssetCheck blocks delisting while any NFT position remains tracked', () => {
+    it('succeeds (does not revert) when no NFT positions are tracked for this pool', async () => {
+      const { guard } = await deployReal();
+
+      const PoolFactory = await ethers.getContractFactory('MockAssetHandlerAndPool');
+      const factory = await PoolFactory.deploy();
+      await factory.waitForDeployment();
+
+      const MockNFPMFactory = await ethers.getContractFactory('MockNonfungiblePositionManager');
+      const nfpm = await MockNFPMFactory.deploy(ethers.ZeroAddress);
+      await nfpm.waitForDeployment();
+
+      const MockPosGuard = await ethers.getContractFactory('MockUniswapV3PositionGuard');
+      const posGuard = await MockPosGuard.deploy();
+      await posGuard.waitForDeployment();
+      await factory.setContractGuard(nfpm.target, posGuard.target);
+      // posGuard has no owned tokens for any pool
+
+      const MockPool = await ethers.getContractFactory('MockPoolLogicWithManager');
+      const pool = await MockPool.deploy(ethers.ZeroAddress, await factory.getAddress());
+      await pool.waitForDeployment();
+
+      await expect(
+        guard.removeAssetCheck(await pool.getAddress(), await nfpm.getAddress()),
+      ).to.not.be.reverted;
+    });
+
+    it('reverts when any NFT position is still tracked, even one worth zero (fully decreased and collected but not burned)', async () => {
+      const { guard, poolAndFactory, nfpm } = await deployPositionFixture();
+
+      // deployPositionFixture() registers tokenIds [1, 2] as owned/tracked, regardless of their
+      // current liquidity/value — mirroring a position that getBalance() would report as zero
+      // (e.g. fully decreased and collected) but whose NFT is still tracked, not yet burned.
+      await expect(
+        guard.removeAssetCheck(await poolAndFactory.getAddress(), await nfpm.getAddress()),
+      ).to.be.revertedWith('UniswapV3AssetGuard: positions tracked');
+    });
+  });
+
   it('withdrawProcessing builds real decreaseLiquidity and collect transactions', async () => {
     const { guard, poolAndFactory, nfpm } = await deployPositionFixture();
     const [, recipient] = await ethers.getSigners();
