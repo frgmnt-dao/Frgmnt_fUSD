@@ -43,6 +43,18 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
     /// @notice Freshness window for the EUR/USD conversion feed.
     uint256 public eurUsdTimeout;
 
+    /// @notice FNA-40: set permanently by the first call to setEurUsdAggregator() or
+    ///         clearEurUsdAggregator(), after which neither function can be called again. This
+    ///         registry's USD/EUR valuation basis feeds every pool's NAV, deposit, fee, and
+    ///         withdrawal accounting; toggling it later — after any pool has recorded real
+    ///         activity in the old basis — reprices existing FUSD supply, accountedAssets, and
+    ///         pending queued withdrawals to a different unit without migrating any of them,
+    ///         letting a pure conversion-basis change be minted as pool yield or otherwise
+    ///         corrupt live accounting. The intended flow is a single bootstrap-time decision
+    ///         (see deploy_core_contracts.ts, called immediately after deploy, before any pool
+    ///         exists) — not a runtime toggle.
+    bool public eurUsdModeLocked;
+
     /// @notice Grace period after sequencer recovery (seconds)
     uint256 public constant SEQUENCER_GRACE_PERIOD = 3600; // 1 hour
 
@@ -185,19 +197,29 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
 
     /// @notice Configure the EUR/USD conversion feed.
     /// @dev The feed must return USD per 1 EUR, as standard Chainlink EUR/USD feeds do.
+    /// @dev FNA-40: callable only until the valuation basis is locked (see eurUsdModeLocked) —
+    ///      a single bootstrap-time decision, not a runtime toggle.
     function setEurUsdAggregator(address feed, uint256 timeout) external onlyOwner {
+        require(!eurUsdModeLocked, "Frgmnt: eur/usd mode locked");
         require(feed != address(0), "Frgmnt: eur/usd feed=0");
         require(timeout != 0, "Frgmnt: eur/usd timeout=0");
         eurUsdAggregator = IAggregatorV3Interface(feed);
         eurUsdTimeout = timeout;
+        eurUsdModeLocked = true;
         emit SetEurUsdAggregator(feed, timeout);
     }
 
     /// @notice Disable USD-to-EUR conversion and return raw USD asset-feed prices again.
+    /// @dev FNA-40: callable only until the valuation basis is locked (see eurUsdModeLocked) —
+    ///      a single bootstrap-time decision, not a runtime toggle. Locks even when the
+    ///      aggregator was already unset (the default), so a USD-only deployment that never
+    ///      calls setEurUsdAggregator() can still explicitly lock in raw-USD mode permanently.
     function clearEurUsdAggregator() external onlyOwner {
+        require(!eurUsdModeLocked, "Frgmnt: eur/usd mode locked");
         address oldFeed = address(eurUsdAggregator);
         eurUsdAggregator = IAggregatorV3Interface(address(0));
         eurUsdTimeout = 0;
+        eurUsdModeLocked = true;
         emit ClearedEurUsdAggregator(oldFeed);
     }
 
@@ -231,6 +253,6 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
         emit RemovedAsset(asset);
     }
 
-    // Storage gap for future upgrades.
-    uint256[48] private __gap;
+    // Storage gap for future upgrades. FNA-40 consumed one slot (eurUsdModeLocked) above.
+    uint256[47] private __gap;
 }
