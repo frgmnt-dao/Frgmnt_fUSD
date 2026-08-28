@@ -523,8 +523,13 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     ///      codebase that doesn't opt in, since those either revert on failure (making the whole
     ///      totalFundValue() call revert, not silently understate it) or have no external
     ///      dependency that can degrade a nonzero position to zero.
+    /// @dev public (not external): FNA-43's commitFeeIncrease() below also calls this by bare
+    ///      name from within this same contract — external functions cannot be invoked
+    ///      internally by name in Solidity (unlike the delegatecall-library "this." pitfall
+    ///      elsewhere in this codebase, PoolManagerLogic is not delegatecall-invoked, so `this.`
+    ///      would also work here, just as a strictly more expensive external call for no benefit).
     function totalFundValueWithCompleteness()
-        external
+        public
         view
         override
         returns (uint256 total, bool complete)
@@ -653,8 +658,25 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         emit ManagerFeeIncreaseRenounced();
     }
 
+    /// @dev FNA-43: mintManagerFee() -> PoolLogic._accrueYield() is a deliberate no-op on an
+    ///      incomplete NAV (see its own docs) — it leaves accountedAssets/lastFeeMintTime exactly
+    ///      where they were rather than checkpointing against a possibly-understated total. That
+    ///      protects stakers from an under-recognized checkpoint, but it also means committing a
+    ///      fee increase during a transient incomplete-NAV window installs the new numerators
+    ///      without ever settling the old ones against the yield/time that already elapsed — the
+    ///      first *complete*-NAV accrual afterwards then charges the new, higher rate on that
+    ///      entire pre-commit interval. Reverting here instead makes the manager wait for the
+    ///      guard to recover before the new rate can be installed, so the old rate always gets
+    ///      its own checkpoint first. Uses this contract's own totalFundValueWithCompleteness()
+    ///      rather than a new call into PoolLogic — its `complete` flag is the same one
+    ///      PoolLogic's accrual reads (activeTotalValueWithCompleteness() calls this function's
+    ///      figure and only subtracts reserved value, never touching completeness), so this check
+    ///      is exactly equivalent, one transaction earlier.
     function commitFeeIncrease() external onlyManager {
         require(block.timestamp >= announcedFeeIncreaseTimestamp, "delay active");
+
+        (, bool navComplete) = totalFundValueWithCompleteness();
+        require(navComplete, "NAV incomplete");
 
         IPoolLogic(poolLogic).mintManagerFee();
 

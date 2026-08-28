@@ -414,6 +414,44 @@ describe('PoolManagerLogic', () => {
       expect(incAfter[4]).to.equal(0n);
     });
 
+    // FNA-43: mintManagerFee() -> PoolLogic._accrueYield() is a deliberate no-op on an
+    // incomplete NAV, leaving accountedAssets/lastFeeMintTime exactly where they were. Installing
+    // the new, higher fee numerators anyway (the pre-fix behavior) meant the first *complete*-NAV
+    // accrual afterwards would charge the new rate on the entire pre-commit interval, including
+    // yield/time that predated the increase.
+    it('FNA-43: reverts commitFeeIncrease while NAV is incomplete, leaving fees and the checkpoint untouched', async () => {
+      const { contract, manager, poolLogic, guard } = await loadFixture(setupFixture);
+
+      await contract.connect(manager).announceFeeIncrease(500, 120, 10, 10);
+      const inc = await contract.getFeeIncreaseInfo();
+      await time.increaseTo(inc[4] + 1n);
+
+      // Simulate a guard reporting a transient, incomplete valuation (FNA-04's marker pattern).
+      await guard.setIncompleteValuationGuard(true);
+      await guard.setValuationComplete(false);
+      const [, navComplete] = await contract.totalFundValueWithCompleteness();
+      expect(navComplete).to.equal(false);
+
+      const mintCountBefore = await poolLogic.mintCount_();
+      const [perfBefore, mgmtBefore] = await contract.getFee();
+
+      await expect(contract.connect(manager).commitFeeIncrease()).to.be.revertedWith(
+        'NAV incomplete',
+      );
+
+      // No accrual attempted and the old fee numerators are still in effect.
+      expect(await poolLogic.mintCount_()).to.equal(mintCountBefore);
+      const [perfAfter, mgmtAfter] = await contract.getFee();
+      expect(perfAfter).to.equal(perfBefore);
+      expect(mgmtAfter).to.equal(mgmtBefore);
+
+      // Once the guard's valuation recovers, the same announced increase commits normally.
+      await guard.setValuationComplete(true);
+      await contract.connect(manager).commitFeeIncrease();
+      const [perfCommitted] = await contract.getFee();
+      expect(perfCommitted).to.equal(500n);
+    });
+
     it('renounces announced increase', async () => {
       const { contract, manager } = await loadFixture(setupFixture);
 
