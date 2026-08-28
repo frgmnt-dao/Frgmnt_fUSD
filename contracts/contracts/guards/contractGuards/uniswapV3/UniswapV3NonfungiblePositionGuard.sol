@@ -186,6 +186,17 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
             (bool isValidTokenId, ) = _isValidOwnedTokenId(pool, param.tokenId);
             require(isValidTokenId, "Frgmnt: position not tracked");
 
+            // FNA-48: defense in depth, mirroring mint's own checks — increaseLiquidity was the
+            // only branch here that never verified the position manager or the position's own
+            // underlying tokens were still pool-supported, letting real ERC-20 capital be
+            // injected into a delisted position. The primary fix is
+            // UniswapV3AssetGuard.removeAssetCheck() (blocks delisting while any NFT remains
+            // tracked at all); this closes the same gap defensively at the call site itself.
+            require(
+                poolManagerLogicAssets.isSupportedAsset(to),
+                "Frgmnt: Uniswap position mgr not enabled"
+            );
+
             (
                 ,
                 ,
@@ -200,6 +211,9 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
                 ,
 
             ) = nonfungiblePositionManager.positions(param.tokenId);
+
+            require(poolManagerLogicAssets.isSupportedAsset(token0), "Frgmnt: unsupported token0");
+            require(poolManagerLogicAssets.isSupportedAsset(token1), "Frgmnt: unsupported token1");
 
             UniswapV3PriceLibrary.assertFairPrice(
                 IPoolLogic(pool).factory(),
