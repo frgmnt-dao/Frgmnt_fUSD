@@ -1347,11 +1347,20 @@ contract PoolLogic is
     ///      design note), including this new depositor at the incumbents' expense. Reverting
     ///      here blocks the deposit outright while incomplete; the depositor can simply retry
     ///      once the failing guard recovers.
-    /// @dev Still fails open (returns without reverting) if autocompounding was never
-    ///      initialized — matching this function's pre-existing behavior for that unrelated,
-    ///      cross-proxy-upgrade-ordering case (an already-deployed pool that hasn't called
-    ///      initializeAutoCompounding() yet): there is no reward index or accrual concept
-    ///      active yet, so an unrelated guard's transient failure has nothing to protect.
+    /// @dev FNA-22 follow-up (CertiK, 08/25): still fails open (returns without reverting,
+    ///      lastFeeMintTime left untouched) if autocompounding was never initialized — the one
+    ///      remaining case where this function returns without either accruing or reverting.
+    ///      Provably NOT the FNA-22 bug (a deposit's new fUSD retroactively taxed for a period
+    ///      before it existed), because no fee of any kind — deposit-triggered or otherwise —
+    ///      can accrue while compoundedRewardIndex == 0: _accrueYield() itself starts with
+    ///      _requireAutoCompoundingInitialized(), so every OTHER caller (stake/unstake/harvest)
+    ///      already reverts outright in this state rather than silently skipping. This early
+    ///      return exists purely so a deposit doesn't revert with that same
+    ///      AutoCompoundingNotInitialized error on an already-deployed, not-yet-migrated pool
+    ///      (an unrelated, cross-proxy-upgrade-ordering case, matching this function's
+    ///      pre-existing behavior) — deliberately kept fail-open rather than requiring every such
+    ///      pool's owner to call initializeAutoCompounding() before its first post-upgrade
+    ///      deposit can succeed.
     function checkpointFeesForDeposit() external {
         if (msg.sender != fusd) revert OnlyTokenLogic();
         if (compoundedRewardIndex == 0) return;

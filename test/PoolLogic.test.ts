@@ -3129,5 +3129,43 @@ describe('PoolLogic', () => {
 
       await expect(fusd.triggerCheckpointFeesForDepositRequired(poolAddr)).to.not.be.reverted;
     });
+
+    // FNA-22 follow-up (CertiK, 08/25): confirms the safety invariant the compoundedRewardIndex
+    // == 0 fail-open branch relies on — that no fee of any kind can accrue while
+    // compoundedRewardIndex == 0, so this early return can never let a deposit's freshly minted
+    // supply be retroactively taxed for a period before it existed (the actual FNA-22 bug). If this were
+    // ever untrue, harvest() below would settle a checkpoint despite the guard, not revert.
+    it('proves checkpointFeesForDeposit\'s compoundedRewardIndex==0 no-op is safe: no lastFeeMintTime change here, and every other accrual path reverts outright in this same state', async () => {
+      const { pool, fusd, poolManager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const marker = await pool.compoundedRewardIndex();
+      const slot = await findCompoundedRewardIndexSlot(pool, poolAddr, marker);
+      expect(slot).to.be.gte(0);
+      await ethers.provider.send('hardhat_setStorageAt', [
+        poolAddr,
+        ethers.toBeHex(slot),
+        ethers.toBeHex(0n, 32),
+      ]);
+      expect(await pool.compoundedRewardIndex()).to.equal(0n);
+
+      const lastFeeMintTimeBefore = await pool.lastFeeMintTime();
+      await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
+      await poolManager.setValuationComplete(true); // NAV complete, isolating this from FNA-04
+
+      await expect(fusd.triggerCheckpointFeesForDepositRequired(poolAddr)).to.not.be.reverted;
+      // The one thing that would make this branch unsafe: settling the clock without actually
+      // accruing anything, letting the NEXT (post-migration) accrual retroactively tax this
+      // deposit's supply for the dormant period too. It does not move at all.
+      expect(await pool.lastFeeMintTime()).to.equal(lastFeeMintTimeBefore);
+
+      // Every other _accrueYield() caller reverts outright in this same state, rather than
+      // silently skipping — confirming no fee accrual of any kind is reachable while
+      // compoundedRewardIndex == 0, which is exactly why the deposit-side no-op above is safe.
+      await expect(pool.harvest()).to.be.revertedWithCustomError(
+        pool,
+        'AutoCompoundingNotInitialized',
+      );
+    });
   });
 });
