@@ -1672,6 +1672,78 @@ describe('PoolLogic', () => {
     });
   });
 
+  // FNA-42: accountedAssets is a high-water mark that never drops on its own when a loss hits —
+  // only accrual ratchets it UP to a higher NAV, never down to a lower one. Retiring a claim
+  // while accountedAssets sits above active NAV (an unrecognized loss "overhang") must realize
+  // that claim's own proportional share of the overhang, not just the real dollars paid out, or
+  // the overhang concentrates onto a shrinking population of remaining claims every time someone
+  // exits underwater.
+  describe('FNA-42: underwater immediate withdrawal must realize its own share of the accountedAssets overhang', () => {
+    it('reduces accountedAssets by valueDelta plus the claim-proportional overhang share, preserving overhang-per-claim (haircut exit)', async () => {
+      const { pool, fusd, asset, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const poolAddr = await pool.getAddress();
+
+      // Aligned, fully-collateralized baseline: 100 accountedAssets backed by 100 of real value.
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+
+      // Alice and Bob each hold a 50 FUSD claim.
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
+      await fusd.mint(await bob.getAddress(), ethers.parseUnits('50', 18));
+
+      // A 20 loss hits before Alice withdraws — the pool now only holds 80 in real backing for
+      // 100 total claims (80% collateralized). accountedAssets (a high-water mark) stays at 100.
+      await asset.burnFromPool(poolAddr, ethers.parseUnits('20', 18));
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('100', 18));
+
+      // Alice's 50 claim (50% of the 100 total) haircuts to her 80%-collateralized share: 40.
+      const before = await asset.balanceOf(await alice.getAddress());
+      await pool.connect(alice).withdrawCashImmediate(ethers.parseUnits('50', 18));
+      const aliceOut = (await asset.balanceOf(await alice.getAddress())) - before;
+      expect(aliceOut).to.equal(ethers.parseUnits('40', 18));
+
+      // FNA-42: accountedAssets must drop by more than the 40 valueDelta actually paid out — by
+      // Alice's own 50% share of the pre-existing 20 overhang (10) too: 100 - 40 - 10 = 50. The
+      // old formula (accountedAssets -= valueDelta only) would have left it at 60, overstating
+      // the baseline the remaining 50 claim (Bob's) is measured against.
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('50', 18));
+
+      // Invariant: overhang / totalClaims is preserved exactly across the exit.
+      // overhangBefore(20) / totalClaimsBefore(100) == overhangAfter(?) / totalClaimsAfter(50).
+      const navAfter = await asset.balanceOf(poolAddr); // 40 — pool's own remaining real balance
+      const accountedAssetsAfter = await pool.accountedAssets();
+      const overhangAfter = accountedAssetsAfter - navAfter;
+      const totalClaimsAfter = await fusd.totalSupply(); // Bob's remaining 50
+      expect(overhangAfter).to.equal(ethers.parseUnits('10', 18));
+      expect(totalClaimsAfter).to.equal(ethers.parseUnits('50', 18));
+      expect(ethers.parseUnits('20', 18) * totalClaimsAfter).to.equal(
+        overhangAfter * ethers.parseUnits('100', 18),
+      );
+    });
+
+    it('reduces accountedAssets by exactly valueDelta when there is no overhang (regression, at-par/no prior loss)', async () => {
+      const { pool, fusd, asset, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const poolAddr = await pool.getAddress();
+
+      // Fully aligned, fully collateralized: no overhang at all.
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
+      await fusd.mint(await bob.getAddress(), ethers.parseUnits('50', 18));
+
+      await pool.connect(alice).withdrawCashImmediate(ethers.parseUnits('50', 18));
+
+      // Par redemption, no overhang: accountedAssets drops by exactly the 50 paid out, matching
+      // pre-fix behavior exactly in this unaffected case.
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('50', 18));
+    });
+  });
+
   // FNA-26: finalizeCashWithdraw() reserves (but does not transfer) a haircut-adjusted
   // assetAmount, which immediately removes that value from active, reserved-excluding NAV —
   // the same NAV _accrueYield() compares accountedAssets against. finalizeCashWithdraw() now
@@ -1746,16 +1818,20 @@ describe('PoolLogic', () => {
       expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('100', 18));
 
       // Finalize: 80 backing / 100 total claims = 80% collateralized -> Alice's 50 haircuts to
-      // 40. finalizeCashWithdraw's own fix reduces accountedAssets by the reservation's NAV
-      // impact: 100 - 40 = 60.
+      // 40 (valueDelta). FNA-42: accountedAssets (100) already sat above active NAV (80) before
+      // this finalize — a 20 overhang from the earlier loss. Alice's request is 50 of the 100
+      // total claims (50%), so her exit also realizes 50% of that overhang (10) permanently,
+      // on top of the 40 in real dollars reserved: accountedAssets drops by 40 + 10 = 50, to 50 —
+      // not merely 100 - 40 = 60, which would leave Bob's remaining 50 claim measured against an
+      // overstated baseline (see finalizeReserveAndUpdateBaseline's own docs).
       await pool.connect(manager).finalizeCashWithdraw(requestId);
       const stored = await pool.cashWithdrawRequests(requestId);
       expect(stored.assetAmount).to.equal(ethers.parseUnits('40', 18));
-      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('60', 18));
+      expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('50', 18));
 
       // Unrelated, legitimate new value arrives and gets recognized (ratcheted up) — active NAV
-      // exceeds the current accountedAssets(60), so a dust stake triggers accrual that raises
-      // accountedAssets to match it exactly. This recognizes 90 of *legitimate* yield (150 - 60)
+      // exceeds the current accountedAssets(50), so a dust stake triggers accrual that raises
+      // accountedAssets to match it exactly. This recognizes 100 of *legitimate* yield (150 - 50)
       // from the new inflow itself — nothing to do with the claim that follows. Bob harvests it
       // now (mirroring the CertiK PoC's own approach) so the post-claim check below isolates
       // whatever the claim itself contributes, if anything.

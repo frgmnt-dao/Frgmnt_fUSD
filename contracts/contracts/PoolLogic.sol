@@ -865,15 +865,30 @@ contract PoolLogic is
         (
             address[] memory outAssets,
             uint256[] memory outAmounts,
-            uint256 valueBefore
+            uint256 valueBefore,
+            uint256 totalClaims,
+            uint256 completeFundValue
         ) = _withdrawProRata(recipient, netFusd, complexAssetsData);
 
         uint256 valueAfter = _withdrawableFundValue();
         if (valueBefore < valueAfter) revert InvalidFundValue();
         uint256 valueDelta = valueBefore - valueAfter;
         if (valueDelta > netFusd + 1e15) revert InvalidFundValue();
-        if (accountedAssets < valueDelta) revert InvalidFundValue();
-        accountedAssets -= valueDelta;
+        // FNA-42: reduces accountedAssets by more than valueDelta whenever this withdrawal
+        // retires claims while an unrecognized loss (accountedAssets > completeFundValue) is
+        // outstanding — see computeAccountedAssetsReduction's own docs for why the plain
+        // valueDelta subtraction previously left the baseline overstated for remaining claims,
+        // and for why completeFundValue (not this function's own liquidity-capped valueBefore)
+        // is the correct NAV to measure the overhang against.
+        uint256 reduction = FundCalculationLibrary.computeAccountedAssetsReduction(
+            netFusd,
+            totalClaims,
+            accountedAssets,
+            completeFundValue,
+            valueDelta
+        );
+        if (accountedAssets < reduction) revert InvalidFundValue();
+        accountedAssets -= reduction;
 
         // Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
         emit CashWithdrawImmediate(user, amount, netFusd, feeFusd);
@@ -894,7 +909,13 @@ contract PoolLogic is
         ComplexAsset[] memory complexAssetsData
     )
         internal
-        returns (address[] memory outAssets, uint256[] memory outAmounts, uint256 valueBefore)
+        returns (
+            address[] memory outAssets,
+            uint256[] memory outAmounts,
+            uint256 valueBefore,
+            uint256 totalClaims,
+            uint256 completeFundValue
+        )
     {
         // compute portion in terms of totalFundValue, floored by outstanding claims so an
         // underwater pool socializes the shortfall instead of paying early redeemers at par —
@@ -904,11 +925,9 @@ contract PoolLogic is
         // FNA-07 follow-up: computeImmediateWithdrawPortion now internally derives a separate,
         // non-liquidity-capped NAV for its solvency haircut, so a temporary under-liquid lending
         // position is never misread as permanent insolvency — see its own docs.
-        uint256 portion = FundCalculationLibrary.computeImmediateWithdrawPortion(
-            address(this),
-            netFusd,
-            fundValue
-        );
+        uint256 portion;
+        (portion, totalClaims, completeFundValue) = FundCalculationLibrary
+            .computeImmediateWithdrawPortion(address(this), netFusd, fundValue);
         if (portion == 0) revert WithdrawAmountTooSmall();
 
         // withdraw proportionally from ALL supported assets
@@ -1058,11 +1077,8 @@ contract PoolLogic is
         // see FundCalculationLibrary.computeFinalizeAssetAmount and FNA-05. FUSD backing this
         // request is transferred-not-burned until claimCashWithdraw, so totalSupply() already
         // reflects outstanding claims as of this finalization.
-        uint256 assetAmount = FundCalculationLibrary.computeFinalizeAssetAmount(
-            address(this),
-            asset,
-            fusdNetForAsset
-        );
+        (uint256 assetAmount, uint256 totalClaims, uint256 completeFundValue) = FundCalculationLibrary
+            .computeFinalizeAssetAmount(address(this), asset, fusdNetForAsset);
         if (assetAmount == 0) revert ZeroAmount();
 
         // Finalization does not transfer assets to the user; assets remain on the contract until claim.
@@ -1093,11 +1109,18 @@ contract PoolLogic is
         // that function's docs for why that was wrong). Delegated entirely to
         // FundCalculationLibrary purely to keep this call site's own bytecode under the
         // EIP-170 size limit.
+        // FNA-42: also feeds this request's own netFusd/totalClaims/completeFundValue through so
+        // the baseline reduction accounts for this claim's own share of any pre-existing
+        // unrecognized loss, not just the dollars physically moved to escrow — see
+        // _computeAccountedAssetsReduction's own docs.
         accountedAssets = FundCalculationLibrary.finalizeReserveAndUpdateBaseline(
             poolManagerLogic,
             withdrawalEscrow,
             asset,
             assetAmount,
+            fusdNetForAsset,
+            totalClaims,
+            completeFundValue,
             accountedAssets
         );
 

@@ -288,13 +288,13 @@ library FundCalculationLibrary {
         address pool,
         uint256 netFusd,
         uint256 withdrawableFundValue
-    ) external view returns (uint256 portion) {
-        if (withdrawableFundValue == 0) return 0;
+    ) external view returns (uint256 portion, uint256 totalClaims, uint256 completeFundValue) {
+        totalClaims = _activeTotalClaims(pool) + netFusd;
+        if (withdrawableFundValue == 0) return (0, totalClaims, 0);
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
-        uint256 completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
-        uint256 totalClaims = _activeTotalClaims(pool) + netFusd;
+        completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
         uint256 fairFusd = _applyClaimsHaircut(netFusd, completeFundValue, totalClaims);
         // The fair share can still exceed what's actually liquid right now (a temporary
         // liquidity gap, distinct from insolvency). netFusd has already been burned by the
@@ -303,8 +303,74 @@ library FundCalculationLibrary {
         // (PoolLogic's existing WithdrawAmountTooSmall check reverts the whole, still-atomic
         // transaction, unwinding that burn) rather than silently paying out less than the fair
         // share.
-        if (fairFusd > withdrawableFundValue) return 0;
+        if (fairFusd > withdrawableFundValue) return (0, totalClaims, completeFundValue);
         portion = (fairFusd * 1e18) / withdrawableFundValue;
+    }
+
+    /// @notice FNA-42: the accountedAssets reduction for an immediate cash withdrawal that
+    ///         retires `netFusd` of outstanding claims.
+    /// @dev See _computeAccountedAssetsReduction's own docs for the rationale. `valueBefore` here
+    ///      must be `completeFundValue` from computeImmediateWithdrawPortion's own output (the
+    ///      same, reserved-excluding, net-realizable NAV the solvency haircut is computed
+    ///      against), NOT PoolLogic's own liquidity-capped `_withdrawableFundValue()` — the
+    ///      latter can sit below accountedAssets purely from a temporary per-asset liquidity cap
+    ///      (FNA-07) with no real loss at all, which would misread illiquidity as an overhang and
+    ///      over-reduce the baseline for no reason.
+    /// @param netFusd FUSD retired by this withdrawal (net of fees).
+    /// @param totalClaimsBeforeWithdrawal Outstanding claims immediately before this withdrawal,
+    ///        i.e. including `netFusd` itself — see computeImmediateWithdrawPortion's own
+    ///        `totalClaims` output, which this must be sourced from.
+    /// @param accountedAssetsBefore PoolLogic.accountedAssets() immediately before this withdrawal.
+    /// @param valueBefore computeImmediateWithdrawPortion's own `completeFundValue` output.
+    /// @param valueDelta The real dollar outflow this withdrawal caused (valueBefore - valueAfter,
+    ///        both measured via PoolLogic's own liquidity-capped NAV).
+    function computeAccountedAssetsReduction(
+        uint256 netFusd,
+        uint256 totalClaimsBeforeWithdrawal,
+        uint256 accountedAssetsBefore,
+        uint256 valueBefore,
+        uint256 valueDelta
+    ) external pure returns (uint256 reduction) {
+        return
+            _computeAccountedAssetsReduction(
+                netFusd,
+                totalClaimsBeforeWithdrawal,
+                accountedAssetsBefore,
+                valueBefore,
+                valueDelta
+            );
+    }
+
+    /// @dev Shared by computeAccountedAssetsReduction() (immediate withdrawals) and
+    ///      finalizeReserveAndUpdateBaseline() (queued withdrawals) — see the former's docs for
+    ///      the full rationale.
+    ///
+    ///      accountedAssets is a high-water mark: PoolLogic._accrueYield() only ever raises it to
+    ///      match a NEW higher NAV, never lowers it to follow a NAV drop — losses stay
+    ///      unrecognized (an "overhang") until NAV recovers past the old mark. Previously, both
+    ///      withdrawal paths reduced accountedAssets by only `valueDelta`, the real dollars that
+    ///      left — correct when there is no overhang (valueDelta then equals the claim's true
+    ///      share of NAV 1:1), but an under-reduction whenever accountedAssetsBefore >
+    ///      valueBefore: the exiting claim's proportional share of that overhang
+    ///      (`netFusd / totalClaims` of it) is realized and gone the moment its FUSD is retired,
+    ///      yet was left sitting on the books, permanently overstating the baseline the
+    ///      *remaining* claims are measured against and delaying their yield recognition.
+    ///      Reducing by `valueDelta + realizedLossShare` instead keeps
+    ///      (accountedAssets - activeNAV) / totalClaims constant across any partial claim
+    ///      retirement, proportional or not, haircut-triggering or not — when there is no
+    ///      overhang, realizedLossShare is 0 and this is exactly the pre-existing behavior.
+    function _computeAccountedAssetsReduction(
+        uint256 netFusd,
+        uint256 totalClaims,
+        uint256 accountedAssetsBefore,
+        uint256 valueBefore,
+        uint256 valueDelta
+    ) private pure returns (uint256 reduction) {
+        uint256 overhang = accountedAssetsBefore > valueBefore
+            ? accountedAssetsBefore - valueBefore
+            : 0;
+        uint256 realizedLossShare = totalClaims == 0 ? 0 : (netFusd * overhang) / totalClaims;
+        reduction = valueDelta + realizedLossShare;
     }
 
     /// @notice FNA-38: fUSD.totalSupply() plus the unharvested reward claim (FNA-34), minus
@@ -364,25 +430,29 @@ library FundCalculationLibrary {
     ///      reasoning on computeImmediateWithdrawPortion above. This is a materially bigger risk
     ///      here than for immediate withdrawal: a queued request's assetAmount is fixed once at
     ///      finalize and is never recalculated even after the failing guard recovers.
+    /// @dev FNA-42: also returns `totalClaims` and `completeFundValue` (the same NAV the haircut
+    ///      above is computed against) so PoolLogic.finalizeCashWithdraw() can feed them into
+    ///      _computeAccountedAssetsReduction() the same way the immediate path does — see that
+    ///      function's own docs.
     function computeFinalizeAssetAmount(
         address pool,
         address asset,
         uint256 grossFusd
-    ) external view returns (uint256 assetAmount) {
+    ) external view returns (uint256 assetAmount, uint256 totalClaims, uint256 completeFundValue) {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
+        totalClaims = _activeTotalClaims(pool);
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
-        uint256 effectiveFusd = _applyClaimsHaircut(
-            grossFusd,
-            _withdrawableFundValue(pool, poolManagerLogic, false),
-            _activeTotalClaims(pool)
-        );
-        if (effectiveFusd == 0) return 0;
+        completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
+        uint256 effectiveFusd = _applyClaimsHaircut(grossFusd, completeFundValue, totalClaims);
+        if (effectiveFusd == 0) return (0, totalClaims, completeFundValue);
 
-        if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset)) return 0;
+        if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset)) {
+            return (0, totalClaims, completeFundValue);
+        }
 
         uint256 price = IPoolManagerLogic(poolManagerLogic).getAssetPrice(asset);
-        if (price == 0) return 0;
+        if (price == 0) return (0, totalClaims, completeFundValue);
 
         uint256 decimals = IPoolManagerLogic(poolManagerLogic).assetDecimal(asset);
         uint256 assetAmount18 = (effectiveFusd * 1e18) / price;
@@ -587,11 +657,22 @@ library FundCalculationLibrary {
     ///      prices a legacy (non-escrowed) reservedAssetBalance amount. Reverts if the escrow
     ///      hasn't been wired yet, rather than silently no-op'ing through a call to an unset
     ///      address and recording a claim nothing actually backs.
+    /// @dev FNA-42: the plain `accountedAssetsBefore - valueDelta` subtraction had the same
+    ///      overhang-blind gap as the immediate path (see _computeAccountedAssetsReduction's own
+    ///      docs) — reducing the baseline by only the dollars reserved, not by this request's own
+    ///      share of any pre-existing unrecognized loss, overstated the baseline for whichever
+    ///      claims remained. `netFusd`/`totalClaims`/`valueBefore` must come from the same
+    ///      finalize call's own computeFinalizeAssetAmount() output (`fusdNetForAsset`,
+    ///      `totalClaims`, `completeFundValue` respectively) so the overhang is measured against
+    ///      the exact NAV the haircut itself was just computed from.
     function finalizeReserveAndUpdateBaseline(
         address poolManagerLogic,
         address escrow,
         address asset,
         uint256 assetAmount,
+        uint256 netFusd,
+        uint256 totalClaims,
+        uint256 valueBefore,
         uint256 accountedAssetsBefore
     ) external returns (uint256 newAccountedAssets) {
         if (escrow == address(0)) revert EscrowNotSet();
@@ -601,6 +682,13 @@ library FundCalculationLibrary {
         IERC20(asset).forceApprove(escrow, assetAmount);
         IWithdrawalEscrow(escrow).reserve(asset, assetAmount);
 
-        newAccountedAssets = accountedAssetsBefore > valueDelta ? accountedAssetsBefore - valueDelta : 0;
+        uint256 reduction = _computeAccountedAssetsReduction(
+            netFusd,
+            totalClaims,
+            accountedAssetsBefore,
+            valueBefore,
+            valueDelta
+        );
+        newAccountedAssets = accountedAssetsBefore > reduction ? accountedAssetsBefore - reduction : 0;
     }
 }

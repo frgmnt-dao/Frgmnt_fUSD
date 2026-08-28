@@ -734,6 +734,81 @@ describe('Utility libraries', () => {
       });
     });
 
+    // FNA-42: accountedAssets is a high-water mark (PoolLogic._accrueYield() only ever raises
+    // it to match a higher NAV, never lowers it on a drop) — so it can sit above active NAV
+    // ("overhang") for a genuinely unrecovered loss. Retiring a claim while that overhang exists
+    // must realize that claim's own proportional share of it, not just the real dollars paid out,
+    // or the overhang concentrates onto a shrinking population of remaining claims every time
+    // someone exits underwater.
+    describe('computeAccountedAssetsReduction', () => {
+      it('reduces by exactly valueDelta when there is no overhang (accountedAssets == valueBefore)', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const reduction = await fund.computeAccountedAssetsReduction(
+          ethers.parseUnits('50', 18), // netFusd
+          ethers.parseUnits('100', 18), // totalClaimsBeforeWithdrawal
+          ethers.parseUnits('100', 18), // accountedAssetsBefore == valueBefore: no overhang
+          ethers.parseUnits('100', 18), // valueBefore
+          ethers.parseUnits('50', 18), // valueDelta (par redemption)
+        );
+        expect(reduction).to.equal(ethers.parseUnits('50', 18));
+      });
+
+      it('adds the claim-proportional overhang share when accountedAssets sits above active NAV (FNA-42)', async () => {
+        // Hand-derived: accountedAssetsBefore=1000, valueBefore=700 (overhang=300),
+        // totalClaims=800, netFusd=100 (12.5% of claims) -> realizedLossShare = 100*300/800 =
+        // 37.5, valueDelta=87.5 (this withdrawal's actual haircut-adjusted payout) ->
+        // reduction = 87.5 + 37.5 = 125.
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const reduction = await fund.computeAccountedAssetsReduction(
+          ethers.parseUnits('100', 18),
+          ethers.parseUnits('800', 18),
+          ethers.parseUnits('1000', 18),
+          ethers.parseUnits('700', 18),
+          ethers.parseUnits('87.5', 18),
+        );
+        expect(reduction).to.equal(ethers.parseUnits('125', 18));
+      });
+
+      it('a proportional exit leaves the remaining overhang-per-claim ratio unchanged (FNA-42 invariant)', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const accountedAssetsBefore = ethers.parseUnits('1000', 18);
+        const valueBefore = ethers.parseUnits('700', 18);
+        const totalClaims = ethers.parseUnits('800', 18);
+        const netFusd = ethers.parseUnits('100', 18);
+        const valueDelta = ethers.parseUnits('87.5', 18); // netFusd's haircut-adjusted share of valueBefore
+
+        const reduction = await fund.computeAccountedAssetsReduction(
+          netFusd,
+          totalClaims,
+          accountedAssetsBefore,
+          valueBefore,
+          valueDelta,
+        );
+
+        const accountedAssetsAfter = accountedAssetsBefore - reduction;
+        const valueAfter = valueBefore - valueDelta;
+        const totalClaimsAfter = totalClaims - netFusd;
+        const overhangBefore = accountedAssetsBefore - valueBefore;
+        const overhangAfter = accountedAssetsAfter - valueAfter;
+
+        // overhang / totalClaims is preserved exactly (both sides scaled to avoid fractions):
+        // overhangBefore * totalClaimsAfter == overhangAfter * totalClaims
+        expect(overhangBefore * totalClaimsAfter).to.equal(overhangAfter * totalClaims);
+      });
+
+      it('reduces by valueDelta alone when totalClaimsBeforeWithdrawal is 0', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const reduction = await fund.computeAccountedAssetsReduction(
+          ethers.parseUnits('50', 18),
+          0n,
+          ethers.parseUnits('100', 18),
+          ethers.parseUnits('40', 18),
+          ethers.parseUnits('40', 18),
+        );
+        expect(reduction).to.equal(ethers.parseUnits('40', 18));
+      });
+    });
+
     describe('computeFinalizeAssetAmount', () => {
       async function setupPool() {
         const fixture = await loadFixture(deployLibrariesFixture);
