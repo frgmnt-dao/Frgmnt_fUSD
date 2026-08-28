@@ -1,7 +1,7 @@
 # AaveLendingPoolAssetGuard
 
 **Source:** `contracts/contracts/guards/assetGuards/AaveLendingPoolAssetGuard.sol`
-**Asset Type:** `4` (Aave V3 lending position)
+**Asset Type:** `2` (Aave V3 lending position) — see [Governance's Asset Type Registry](Governance.md#asset-type-registry) for the on-chain-verified mapping (FNA-33)
 
 ---
 

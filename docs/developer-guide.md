@@ -237,14 +237,20 @@ governance.setContractGuard(
 
 ### Registering an Asset Guard
 
+<!-- FNA-33: this example previously showed the wrong type for every guard (0/4/5/7),
+     matching the same wrong mapping docs/deployments.md's Asset Guards table had before
+     it was corrected against the live registry (Governance.assetGuards(uint16) on Base,
+     block 49894684). Verify against that table (or the registry directly) before adding a
+     new asset type — do not assume this numbering carries over to a type not listed here. -->
 ```solidity
-// Asset types:
-// 0 = ERC20
-// 4 = Aave V3 lending asset
-// 5 = Morpho Blue
-// 7 = Uniswap V3 NFT position
+// Asset types (see docs/deployments.md's Asset Guards table for the authoritative,
+// on-chain-verified mapping):
+// 1 = Morpho Blue lending asset
+// 2 = Aave V3 lending asset
+// 3 = Uniswap V3 NFT position
+// 4 = ERC20
 governance.setAssetGuard(
-    4,                           // asset type
+    2,                           // asset type
     AAVE_ASSET_GUARD_ADDRESS     // guard implementation
 );
 ```
