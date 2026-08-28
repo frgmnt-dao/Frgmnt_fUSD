@@ -7,6 +7,7 @@ import { IAaveLendingPoolAssetGuard } from "../../interfaces/guards/IAaveLending
 import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckingGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IUnwindCostAwareGuard } from "../../interfaces/guards/IUnwindCostAwareGuard.sol";
+import { IDeficitReportingGuard } from "../../interfaces/guards/IDeficitReportingGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
@@ -21,7 +22,8 @@ contract AaveV3LendingPoolAssetGuard is
     IAaveLendingPoolAssetGuard,
     ISlippageCheckingGuard,
     IPreValuedAssetGuard,
-    IUnwindCostAwareGuard
+    IUnwindCostAwareGuard,
+    IDeficitReportingGuard
 {
     // -----------------------------
     // Constants
@@ -197,6 +199,26 @@ contract AaveV3LendingPoolAssetGuard is
 
         if (totalCollateralInUsd > totalDebtInUsd) {
             balance = totalCollateralInUsd - totalDebtInUsd;
+        }
+    }
+
+    /// @notice FNA-54: see IDeficitReportingGuard — an underwater position (debt > collateral)
+    ///         is a real liability, not a zero-value asset. getBalance() above must still clamp
+    ///         at 0 (every NAV consumer sums non-negative uint256 balances), but that silently
+    ///         *omits* the shortfall instead of *subtracting* it from the rest of the pool's
+    ///         positive balances — including, most directly, the borrowed tokens this exact
+    ///         position produced and that the pool still holds as a separately-counted balance.
+    ///         Every aggregate NAV/withdrawal-sizing consumer sums this alongside its gross
+    ///         positive total and subtracts it (floored at 0) — see this interface's own docs.
+    function isDeficitReportingGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    function getDeficit(address pool, address) external view override returns (uint256 deficit) {
+        (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
+
+        if (totalDebtInUsd > totalCollateralInUsd) {
+            deficit = totalDebtInUsd - totalCollateralInUsd;
         }
     }
 

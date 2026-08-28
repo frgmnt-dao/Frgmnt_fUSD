@@ -482,6 +482,12 @@ library FundCalculationLibrary {
         return _withdrawableFundValue(pool, poolManagerLogic, true);
     }
 
+    /// @dev FNA-54: also sums each asset guard's IDeficitReportingGuard-reported deficit (an
+    ///      underwater lending position's debt exceeding its collateral) and subtracts the total
+    ///      from the withdrawal-sizing NAV, floored at 0 — see
+    ///      PoolManagerLogic._subtractTotalDeficit()'s own docs for the full rationale, which
+    ///      applies identically here. Checked in the same per-asset loop already resolving each
+    ///      `guard`, rather than a second pass over `assets`.
     function _withdrawableFundValue(
         address pool,
         address poolManagerLogic,
@@ -490,6 +496,7 @@ library FundCalculationLibrary {
         IHasSupportedAsset.Asset[] memory assets = IHasSupportedAsset(poolManagerLogic)
             .getSupportedAssets();
 
+        uint256 totalDeficit;
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i].asset;
             address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
@@ -502,6 +509,32 @@ library FundCalculationLibrary {
                 withdrawableBalance -= reserved;
             }
             value += IPoolManagerLogic(poolManagerLogic).assetValue(asset, withdrawableBalance);
+            totalDeficit += _guardDeficit(pool, asset, guard);
+        }
+        value = value > totalDeficit ? value - totalDeficit : 0;
+    }
+
+    /// @dev FNA-54: checks the IDeficitReportingGuard marker via the same low-level-staticcall
+    ///      pattern already used elsewhere in this codebase — a guard without the marker
+    ///      contributes 0, correct for every guard in this codebase that cannot carry negative
+    ///      equity.
+    function _guardDeficit(
+        address pool,
+        address asset,
+        address guard
+    ) private view returns (uint256 deficit) {
+        if (guard == address(0)) return 0;
+
+        (bool hasMarker, bytes memory markerData) = guard.staticcall(
+            abi.encodeWithSignature("isDeficitReportingGuard()")
+        );
+        if (!hasMarker || markerData.length != 32 || !abi.decode(markerData, (bool))) return 0;
+
+        (bool ok, bytes memory data) = guard.staticcall(
+            abi.encodeWithSignature("getDeficit(address,address)", pool, asset)
+        );
+        if (ok && data.length == 32) {
+            deficit = abi.decode(data, (uint256));
         }
     }
 

@@ -119,6 +119,29 @@ contract MockAssetGuard {
         return netRealizableBalance;
     }
 
+    // PoolManagerLogic._subtractTotalDeficit()/FundCalculationLibrary._guardDeficit() check for
+    // this via low-level call, mirroring isUnwindCostAwareGuard() above (FNA-54). Defaults to
+    // false so existing tests that don't call setDeficitReportingGuard() keep the deficit
+    // contribution at 0 unchanged.
+    bool public deficitReportingGuard;
+    uint256 public deficit;
+
+    function setDeficitReportingGuard(bool _isGuard) external {
+        deficitReportingGuard = _isGuard;
+    }
+
+    function isDeficitReportingGuard() external view returns (bool) {
+        return deficitReportingGuard;
+    }
+
+    function setDeficit(uint256 _deficit) external {
+        deficit = _deficit;
+    }
+
+    function getDeficit(address /*pool*/, address /*asset*/) external view returns (uint256) {
+        return deficit;
+    }
+
     function getDecimals(address /*asset*/) external view returns (uint256) {
         return dec;
     }

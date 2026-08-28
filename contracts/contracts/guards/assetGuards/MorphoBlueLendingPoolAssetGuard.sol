@@ -20,6 +20,7 @@ import { IMorphoBlueLendingPoolAssetGuard } from "../../interfaces/guards/IMorph
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckingGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
+import { IDeficitReportingGuard } from "../../interfaces/guards/IDeficitReportingGuard.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IMorphoBlueManager } from "../../interfaces/IMorphoBlueManager.sol";
 import { IERC20Extended } from "../../interfaces/IERC20Extended.sol";
@@ -47,7 +48,8 @@ contract MorphoBlueLendingPoolAssetGuard is
     ClosedAssetGuard,
     IMorphoBlueLendingPoolAssetGuard,
     ISlippageCheckingGuard,
-    IPreValuedAssetGuard
+    IPreValuedAssetGuard,
+    IDeficitReportingGuard
 {
     /// @notice Required flag for dHEDGE slippage guards
     bool public override isSlippageCheckingGuard = true;
@@ -217,6 +219,22 @@ contract MorphoBlueLendingPoolAssetGuard is
     /// @dev USD value is returned with 18 decimals
     function getBalance(address pool, address) public view override returns (uint256 balanceUsd18) {
         balanceUsd18 = MorphoCollectLib.getBalance(morphoManager, morpho, pool);
+    }
+
+    /// @notice FNA-54: see IDeficitReportingGuard — an underwater position (aggregate debt
+    ///         exceeding aggregate collateral+supply across this pool's tracked Morpho Blue
+    ///         markets) is a real liability, not a zero-value asset. getBalance() above must
+    ///         still clamp at 0 (every NAV consumer sums non-negative uint256 balances), but
+    ///         that silently *omits* the shortfall instead of *subtracting* it from the rest of
+    ///         the pool's positive balances. Every aggregate NAV/withdrawal-sizing consumer sums
+    ///         this alongside its gross positive total and subtracts it (floored at 0) — see this
+    ///         interface's own docs.
+    function isDeficitReportingGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    function getDeficit(address pool, address) external view override returns (uint256 deficitUsd18) {
+        deficitUsd18 = MorphoCollectLib.getDeficit(morphoManager, morpho, pool);
     }
 
     /// @notice AssetGuard balances are always expressed in USD (18 decimals)

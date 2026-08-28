@@ -514,6 +514,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         for (uint256 i; i < len; ++i) {
             total += assetValue(supportedAssets[i].asset);
         }
+        total = _subtractTotalDeficit(total);
     }
 
     /// @dev See IPoolManagerLogic.totalFundValueWithCompleteness(). Checks the
@@ -543,6 +544,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
                 complete = false;
             }
         }
+        total = _subtractTotalDeficit(total);
     }
 
     function _isValuationComplete(address _asset) internal view returns (bool) {
@@ -559,6 +561,40 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         );
         if (!ok || data.length != 32) return false;
         return abi.decode(data, (bool));
+    }
+
+    /// @notice FNA-54: sums every supported asset's IDeficitReportingGuard-reported deficit
+    ///         (an underwater lending position's debt exceeding its collateral) and subtracts
+    ///         the total from `grossTotal`, floored at 0. getBalance() alone can only clamp an
+    ///         underwater position's own contribution to 0 — it cannot make the sum go negative,
+    ///         since every consumer here works in non-negative uint256 — so without this
+    ///         separate pass the deficit is silently omitted rather than actually deducted from
+    ///         the rest of the pool's positive balances.
+    /// @dev Checked via the same low-level-staticcall marker pattern as
+    ///      isPreValuedAssetGuard()/isIncompleteValuationGuard() above; a guard without the
+    ///      marker contributes 0, correct for every guard in this codebase that cannot carry
+    ///      negative equity.
+    function _subtractTotalDeficit(uint256 grossTotal) internal view returns (uint256) {
+        uint256 totalDeficit;
+        uint256 len = supportedAssets.length;
+        for (uint256 i; i < len; ++i) {
+            address asset = supportedAssets[i].asset;
+            address guard = getAssetGuard(asset);
+            if (guard == address(0)) continue;
+
+            (bool hasMarker, bytes memory markerData) = guard.staticcall(
+                abi.encodeWithSignature("isDeficitReportingGuard()")
+            );
+            if (!hasMarker || markerData.length != 32 || !abi.decode(markerData, (bool))) continue;
+
+            (bool ok, bytes memory data) = guard.staticcall(
+                abi.encodeWithSignature("getDeficit(address,address)", poolLogic, asset)
+            );
+            if (ok && data.length == 32) {
+                totalDeficit += abi.decode(data, (uint256));
+            }
+        }
+        return grossTotal > totalDeficit ? grossTotal - totalDeficit : 0;
     }
 
     // -----------------------------------------------------------------------

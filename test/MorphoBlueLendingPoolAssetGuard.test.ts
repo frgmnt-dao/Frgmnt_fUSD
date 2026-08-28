@@ -383,6 +383,64 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await weth.getAddress())).to.equal(false);
   });
 
+  // FNA-54: getBalance() must clamp an underwater position to 0 (every NAV consumer sums
+  // non-negative uint256 balances), but that only means this ONE asset's own contribution is
+  // omitted — it does not, by itself, subtract the shortfall from the rest of the pool's
+  // positive balances. getDeficit() reports that shortfall separately so aggregate NAV
+  // consumers can actually deduct it.
+  describe('FNA-54: getDeficit (IDeficitReportingGuard)', () => {
+    it('isDeficitReportingGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isDeficitReportingGuard()).to.equal(true);
+    });
+
+    it('returns 0 when collateral exceeds debt', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+      );
+
+      await morpho.setPosition(id, poolAddress, 500_000n, 100_000n, ethers.parseEther('2'));
+
+      expect(await guard.getDeficit(poolAddress, ethers.ZeroAddress)).to.equal(0n);
+    });
+
+    it('reports the exact shortfall (debt - collateral) when the position is underwater, matching the same scenario where getBalance() clamps to 0', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      // Override weth's price to $1000 so 1 WETH of collateral ($1000) is dwarfed by ~$2000 of USDC debt.
+      await pool.setAsset(await weth.getAddress(), true, ethers.parseUnits('1000', 18));
+
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+        {
+          totalSupplyAssets: 0n,
+          totalSupplyShares: 0n,
+          totalBorrowAssets: 1_000_000_000_000n,
+          totalBorrowShares: 1_000_000_000_000n,
+        },
+      );
+
+      // borrowShares=2e9 against a 1e12/1e12 market converts (via Morpho's virtual-shares
+      // formula, rounding up) to 1999998001 raw USDC units = $1999.998001 of debt.
+      await morpho.setPosition(id, poolAddress, 0n, 2_000_000_000n, ethers.parseEther('1'));
+
+      expect(await guard.getBalance(poolAddress, ethers.ZeroAddress)).to.equal(0n);
+      expect(await guard.getDeficit(poolAddress, ethers.ZeroAddress)).to.equal(999_998_001_000_000_000_000n);
+    });
+  });
+
   it('removeTokenCheck returns true when the token is not used by Morpho positions', async () => {
     const { guard, morpho, morphoManager, usdc, weth } = await deploy();
     const Token = await ethers.getContractFactory('MockERC20Custom');

@@ -422,6 +422,54 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     expect(await guard.getBalance(plAddr, ethers.ZeroAddress)).to.equal(0n);
   });
 
+  // FNA-54: getBalance() must clamp an underwater position to 0 (every NAV consumer sums
+  // non-negative uint256 balances), but that only means this ONE asset's own contribution is
+  // omitted — it does not, by itself, subtract the shortfall from the rest of the pool's
+  // positive balances. getDeficit() reports that shortfall separately so aggregate NAV
+  // consumers can actually deduct it.
+  describe('FNA-54: getDeficit (IDeficitReportingGuard)', () => {
+    it('isDeficitReportingGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isDeficitReportingGuard()).to.equal(true);
+    });
+
+    it('returns 0 when collateral exceeds debt', async () => {
+      const { guard, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), ethers.ZeroAddress);
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+
+      expect(await guard.getDeficit(plAddr, ethers.ZeroAddress)).to.equal(0n);
+    });
+
+    it('reports the exact shortfall (debt - collateral) when the position is underwater, matching the same scenario where getBalance() clamps to 0', async () => {
+      const { guard, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const Debt = await ethers.getContractFactory('MockERC20Custom');
+      const debt = await Debt.deploy('dUSDC', 'dUSDC', 6);
+      await debt.waitForDeployment();
+
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await debt.getAddress(),
+      );
+      await aToken.mint(plAddr, 100n * 10n ** 6n); // $100 collateral
+      await debt.mint(plAddr, 200n * 10n ** 6n); // $200 debt
+
+      expect(await guard.getBalance(plAddr, ethers.ZeroAddress)).to.equal(0n);
+      expect(await guard.getDeficit(plAddr, ethers.ZeroAddress)).to.equal(ethers.parseUnits('100', 18));
+    });
+  });
+
   it('getBalance ignores supported assets without Aave reserve tokens', async () => {
     const { guard, usdc } = await deploy();
     const [signer] = await ethers.getSigners();
