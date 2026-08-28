@@ -91,7 +91,13 @@ describe('SlippageAccumulatorUser', () => {
     const srcAmount = ethers.parseEther('10');
     const dstAmount = 0n;
 
-    await slippageUser.setIntermediateSwapData(tokenAddr, tokenAddr, srcAmount, dstAmount);
+    await slippageUser.setIntermediateSwapData(
+      poolLogicAddress,
+      tokenAddr,
+      tokenAddr,
+      srcAmount,
+      dstAmount,
+    );
 
     // We also assert that the mock accumulator is actually called
     await expect(
@@ -107,11 +113,74 @@ describe('SlippageAccumulatorUser', () => {
         0n, // dstDelta
       );
 
-    const data = await slippageUser.getIntermediateSwapData();
+    const data = await slippageUser.getIntermediateSwapData(poolLogicAddress);
     expect(data.srcAsset).to.equal(ethers.ZeroAddress);
     expect(data.dstAsset).to.equal(ethers.ZeroAddress);
     expect(data.srcAmount).to.equal(0n);
     expect(data.dstAmount).to.equal(0n);
+  });
+
+  // FNA-47: intermediateSwapData is keyed by msg.sender rather than a single shared slot, so
+  // one caller's pending snapshot can never be read, overwritten, or cleared by another —
+  // closing the cross-caller snapshot-replacement exploit (an attacker-forged poolManagerLogic,
+  // or a malicious intermediate-hop token that briefly gets control mid-swap, could otherwise
+  // overwrite the real pool's pending snapshot before its own afterTxGuard read it back).
+  it("FNA-47: another caller's own afterTxGuard call cannot read or clear a different caller's pending snapshot", async () => {
+    const poolManagerAddr = await mockPoolManager.getAddress();
+    const tokenAddr = await mockToken.getAddress();
+    const otherAddress = await other.getAddress();
+
+    // A second "pool" whose own poolLogic() self-referentially resolves to `other` — modelling
+    // an attacker's own forged poolManagerLogic, or simply a second, unrelated legitimate pool
+    // sharing this same singleton guard.
+    const MockPoolManagerLogic = await ethers.getContractFactory('MockPoolManagerLogic');
+    const otherPoolManager = await MockPoolManagerLogic.deploy(
+      await owner.getAddress(),
+      otherAddress,
+      await owner.getAddress(),
+    );
+    await otherPoolManager.waitForDeployment();
+    const otherPoolManagerAddr = await otherPoolManager.getAddress();
+
+    // Seed each caller's own, distinct pending snapshot.
+    await slippageUser.setIntermediateSwapData(
+      poolLogicAddress,
+      tokenAddr,
+      tokenAddr,
+      ethers.parseEther('10'),
+      0n,
+    );
+    await slippageUser.setIntermediateSwapData(
+      otherAddress,
+      tokenAddr,
+      tokenAddr,
+      ethers.parseEther('999'), // deliberately different from poolLogicAddress's own value
+      0n,
+    );
+
+    // `other` calls afterTxGuard for its own (unrelated) pool — this must only ever consume
+    // `other`'s own entry.
+    await expect(
+      slippageUser.connect(other).afterTxGuard(otherPoolManagerAddr, routerAddress, '0x'),
+    )
+      .to.emit(mockAccumulator, 'ImpactUpdated')
+      .withArgs(otherPoolManagerAddr, routerAddress, tokenAddr, tokenAddr, ethers.parseEther('999'), 0n);
+
+    // `other`'s own entry is now cleared...
+    const otherData = await slippageUser.getIntermediateSwapData(otherAddress);
+    expect(otherData.srcAmount).to.equal(0n);
+
+    // ...but poolLogicAddress's entry is completely untouched, still holding its original value.
+    const untouchedData = await slippageUser.getIntermediateSwapData(poolLogicAddress);
+    expect(untouchedData.srcAsset).to.equal(tokenAddr);
+    expect(untouchedData.srcAmount).to.equal(ethers.parseEther('10'));
+
+    // The real pool's own afterTxGuard call still sees its own, correct, never-clobbered data.
+    await expect(
+      slippageUser.connect(poolLogicSigner).afterTxGuard(poolManagerAddr, routerAddress, '0x'),
+    )
+      .to.emit(mockAccumulator, 'ImpactUpdated')
+      .withArgs(poolManagerAddr, routerAddress, tokenAddr, tokenAddr, ethers.parseEther('10'), 0n);
   });
 
   // ------------------
