@@ -42,6 +42,11 @@ interface ITransactionTypes {
         AaveV4TokenizationMint, // 34
         AaveV4TokenizationWithdraw, // 35
         AaveV4TokenizationRedeem, // 36
-        AaveV4SpokeSetPositionManager // 37
+        AaveV4SpokeSetPositionManager, // 37
+        // FNA-46: forceDeallocate is no longer reachable as a standalone call (see
+        // MorphoVaultV2ForceDeallocate, 29, now unused) — only inside a multicall(bytes[]) batch
+        // ending in exactly one pool-bound withdraw/redeem, so the penalty and the exit are
+        // atomic and no other vault shareholder can race the pool for the freed idle liquidity.
+        MorphoVaultV2ForceDeallocateAndExit // 38
     }
 }
