@@ -1,7 +1,7 @@
 # MorphoBlueLendingPoolAssetGuard
 
 **Source:** `contracts/contracts/guards/assetGuards/MorphoBlueLendingPoolAssetGuard.sol`
-**Asset Type:** `5` (Morpho Blue position)
+**Asset Type:** `1` (Morpho Blue position) — see [Governance's Asset Type Registry](Governance.md#asset-type-registry) for the on-chain-verified mapping (FNA-33)
 
 ---
 

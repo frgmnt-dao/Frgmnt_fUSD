@@ -73,7 +73,7 @@ Assigns an asset guard to an asset type.
 
 | Name | Type | Description |
 |------|------|-------------|
-| `assetType` | `uint16` | Asset type classification (0=ERC20, 4=AaveV3, 5=Morpho, 7=UniV3 NFT, etc.) |
+| `assetType` | `uint16` | Asset type classification — see [Asset Type Registry](#asset-type-registry) below for the current, on-chain-verified mapping |
 | `guardAddress` | `address` | The asset guard implementation |
 
 **Validation:**
@@ -102,14 +102,22 @@ Assigns an asset guard to an asset type.
 
 ## Asset Type Registry
 
-Standard asset type identifiers used across the protocol:
+<!-- FNA-33: this table previously listed 0=ERC20, 4=AaveV3, 5=Morpho, 7=UniV3 NFT, which
+     does not match the live registry (confirmed via Governance.assetGuards(uint16) on Base,
+     block 49894684 — see docs/deployments.md's Asset Guards table, the authoritative,
+     on-chain-verified source for this mapping). Corrected to match; the previous "1 = Closed
+     / non-withdrawable asset" row is dropped rather than reassigned, since on-chain Type 1 is
+     MorphoBlueAssetGuard and there is no confirmed on-chain type currently bound to
+     ClosedAssetGuard. -->
 
-| Type ID | Asset Class |
-|---------|------------|
-| `0` | Standard ERC20 token |
-| `1` | Closed / non-withdrawable asset |
-| `4` | Aave V3 lending position |
-| `5` | Morpho Blue position |
-| `7` | Uniswap V3 LP NFT position |
+Asset type identifiers currently bound on Base (verify against `Governance.assetGuards(uint16)` or docs/deployments.md before registering a new one — this table is a convenience mirror, not a second source of truth):
+
+| Type ID | Asset Class | Guard |
+|---------|------------|-------|
+| `0` | Unset | — |
+| `1` | Morpho Blue lending position | `MorphoBlueAssetGuard` |
+| `2` | Aave V3 lending position | `AaveV3LendingPoolAssetGuard` |
+| `3` | Uniswap V3 LP NFT position | `UniswapV3AssetGuard` |
+| `4` | Standard ERC20 token | `ERC20Guard` |
 
 New asset types can be added by deploying a new asset guard and calling `setAssetGuard()` without modifying any other contract.

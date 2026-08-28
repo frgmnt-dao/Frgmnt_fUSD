@@ -1,7 +1,7 @@
 # ERC20Guard
 
 **Source:** `contracts/contracts/guards/assetGuards/ERC20Guard.sol`
-**Asset Type:** `0` (Standard ERC20)
+**Asset Type:** `4` (Standard ERC20) — see [Governance's Asset Type Registry](Governance.md#asset-type-registry) for the on-chain-verified mapping (FNA-33)
 
 ---
 

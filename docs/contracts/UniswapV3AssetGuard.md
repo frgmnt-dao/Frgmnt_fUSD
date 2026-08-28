@@ -1,7 +1,7 @@
 # UniswapV3AssetGuard
 
 **Source:** `contracts/contracts/guards/assetGuards/UniswapV3AssetGuard.sol`
-**Asset Type:** `7` (Uniswap V3 LP NFT)
+**Asset Type:** `3` (Uniswap V3 LP NFT) — see [Governance's Asset Type Registry](Governance.md#asset-type-registry) for the on-chain-verified mapping (FNA-33)
 
 ---
 
