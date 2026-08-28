@@ -886,5 +886,61 @@ describe('PoolManagerLogic', () => {
         expect(complete).to.equal(false);
       });
     });
+
+    // Regression coverage for FNA-54: getBalance() clamps an underwater lending position to 0
+    // (every NAV consumer sums non-negative uint256 balances), which only omits that ONE
+    // asset's own contribution — it does not, by itself, reduce what the REST of the pool's
+    // positive balances are worth economically. A guard that opts in via IDeficitReportingGuard
+    // reports that shortfall separately so it can be subtracted from the aggregate total.
+    describe('FNA-54: deficit-reporting guards reduce the aggregate NAV', () => {
+      async function deployDeficitGuard(fixture: any) {
+        const { mockAssetHandler, mockGovernance, tokenB } = fixture;
+        const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
+        const spokeGuard = await MockAssetGuard.deploy(18);
+        await mockGovernance.setAssetGuard(2, await spokeGuard.getAddress());
+        await mockAssetHandler.addAsset(tokenB, 2, DUMMY_AGGREGATOR);
+        await fixture.contract.connect(fixture.manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+        return spokeGuard;
+      }
+
+      it('a guard that does not implement IDeficitReportingGuard contributes no deficit', async () => {
+        const { contract, guard, tokenA } = await loadFixture(setupFixture);
+        await guard.setBalance(1000n * 10n ** 6n); // $1000 (tokenA price = 1e18, 6 decimals)
+
+        expect(await guard.isDeficitReportingGuard()).to.equal(false);
+        expect(await contract.totalFundValue()).to.equal(ethers.parseUnits('1000', 18));
+      });
+
+      it('subtracts an opted-in guard\'s reported deficit from the REST of the pool\'s positive balances, not just its own contribution', async () => {
+        const fixture = await loadFixture(setupFixture);
+        const { contract, guard } = fixture;
+        const spokeGuard = await deployDeficitGuard(fixture);
+
+        await guard.setBalance(1000n * 10n ** 6n); // tokenA: $1000
+        // tokenB's own balance is 0 (never set) — its only contribution is the reported deficit.
+        await spokeGuard.setDeficitReportingGuard(true);
+        await spokeGuard.setDeficit(ethers.parseUnits('400', 18)); // $400 shortfall
+
+        expect(await contract.totalFundValue()).to.equal(ethers.parseUnits('600', 18));
+
+        const [total, complete] = await contract.totalFundValueWithCompleteness();
+        expect(total).to.equal(ethers.parseUnits('600', 18));
+        expect(complete).to.equal(true);
+      });
+
+      it('floors the aggregate at 0 rather than reverting when the reported deficit exceeds gross NAV', async () => {
+        const fixture = await loadFixture(setupFixture);
+        const { contract, guard } = fixture;
+        const spokeGuard = await deployDeficitGuard(fixture);
+
+        await guard.setBalance(1000n * 10n ** 6n); // tokenA: $1000
+        await spokeGuard.setDeficitReportingGuard(true);
+        await spokeGuard.setDeficit(ethers.parseUnits('1500', 18)); // $1500 shortfall > $1000 gross
+
+        expect(await contract.totalFundValue()).to.equal(0n);
+        const [total] = await contract.totalFundValueWithCompleteness();
+        expect(total).to.equal(0n);
+      });
+    });
   });
 });

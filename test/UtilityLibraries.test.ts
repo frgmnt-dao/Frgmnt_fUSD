@@ -708,6 +708,33 @@ describe('Utility libraries', () => {
         expect(portion).to.equal(ethers.parseUnits('0.5', 18));
       });
 
+      // FNA-54: a guard whose position can carry genuine negative equity (debt exceeding
+      // collateral) clamps its own getBalance()/getNetRealizableBalance() contribution to 0, but
+      // that alone doesn't reduce what the REST of the pool's positive balances are worth. A
+      // guard opted into IDeficitReportingGuard reports that shortfall separately so this
+      // function's internally-derived "complete" NAV (completeFundValue) subtracts it too.
+      it('subtracts IDeficitReportingGuard.getDeficit() from the internally-derived complete NAV', async () => {
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18)); // Bob's remaining claim
+        await assetGuard18.setBalance(ethers.parseUnits('110', 18)); // gross balance elsewhere in the pool
+        await assetGuard18.setDeficitReportingGuard(true);
+        await assetGuard18.setDeficit(ethers.parseUnits('30', 18)); // shortfall on an underwater position
+
+        const netFusd = ethers.parseUnits('50', 18); // Alice's withdrawal; totalClaims = 50 + 50 = 100
+        const withdrawableFundValue = ethers.parseUnits('80', 18); // matches the deficit-adjusted NAV, fully liquid
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          withdrawableFundValue,
+        );
+        // Ignoring the deficit would leave completeFundValue at the gross 110, which is >=
+        // totalClaims (100) and so would apply NO haircut: fairFusd = 50, portion =
+        // 50*1e18/80 = 0.625e18. Subtracting the deficit gives completeFundValue = 80 < 100,
+        // correctly triggering a haircut: fairFusd = 50*80/100 = 40, portion = 40*1e18/80 = 0.5e18.
+        expect(portion).to.equal(ethers.parseUnits('0.5', 18));
+      });
+
       // FNA-38: a coexisting finalized-but-unclaimed request's FUSD is still counted in
       // totalSupply() (not burned until claim) but its backing asset already left active NAV —
       // must be excluded from totalClaims too, or it double-counts the same value.
@@ -963,6 +990,26 @@ describe('Utility libraries', () => {
         );
         // Using gross (100) would give effectiveFusd = 50*100/100 = 50 (no haircut). Using
         // net-realizable (80): effectiveFusd = 50*80/100 = 40.
+        expect(assetAmount).to.equal(ethers.parseUnits('40', 18));
+      });
+
+      // FNA-54: same fix as computeImmediateWithdrawPortion above, applied here too — a queued
+      // finalize's completeFundValue must also subtract a reported deficit, not just clamp the
+      // underwater guard's own contribution to 0.
+      it('subtracts IDeficitReportingGuard.getDeficit() from the internally-derived complete NAV', async () => {
+        const { fund, fundCalcPool, assetGuard18, assetAddr } = await setupPool();
+        await assetGuard18.setBalance(ethers.parseUnits('110', 18)); // gross balance elsewhere in the pool
+        await assetGuard18.setDeficitReportingGuard(true);
+        await assetGuard18.setDeficit(ethers.parseUnits('30', 18)); // shortfall on an underwater position
+
+        const assetAmount = await fund.computeFinalizeAssetAmount(
+          await fundCalcPool.getAddress(),
+          assetAddr,
+          ethers.parseUnits('50', 18),
+        );
+        // Ignoring the deficit would leave completeFundValue at the gross 110 (>= totalClaims of
+        // 100 from setupPool's mint), applying no haircut: effectiveFusd = 50. Subtracting the
+        // deficit gives completeFundValue = 80 < 100: effectiveFusd = 50*80/100 = 40.
         expect(assetAmount).to.equal(ethers.parseUnits('40', 18));
       });
 

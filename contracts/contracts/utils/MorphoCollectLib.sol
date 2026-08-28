@@ -238,10 +238,50 @@ library MorphoCollectLib {
         address morpho,
         address pool
     ) internal view returns (uint256 balanceUsd18) {
+        (uint256 totalCollateralUsd18, uint256 totalDebtUsd18) = _aggregate(
+            morphoManager,
+            morpho,
+            pool
+        );
+
+        if (totalCollateralUsd18 > totalDebtUsd18) {
+            balanceUsd18 = totalCollateralUsd18 - totalDebtUsd18;
+        }
+    }
+
+    /// @notice FNA-54: see IDeficitReportingGuard — the aggregate shortfall (debt exceeding
+    ///         collateral+supply) across every one of the pool's tracked Morpho Blue markets,
+    ///         floored at 0. getBalance() above already clamps this same aggregate to 0 rather
+    ///         than reporting the negative figure; this exposes the omitted deficit separately so
+    ///         MorphoBlueLendingPoolAssetGuard can report it via the marker interface, letting
+    ///         aggregate NAV/withdrawal-sizing consumers subtract it from the rest of the pool's
+    ///         positive balances instead of silently dropping it.
+    /// @dev Shares _aggregate() with getBalance() rather than recomputing the same external
+    ///      calls twice — the two callers only ever need one or the other in the same call, not
+    ///      both, so this costs no extra work over the pre-fix getBalance() alone.
+    function getDeficit(
+        address morphoManager,
+        address morpho,
+        address pool
+    ) internal view returns (uint256 deficitUsd18) {
+        (uint256 totalCollateralUsd18, uint256 totalDebtUsd18) = _aggregate(
+            morphoManager,
+            morpho,
+            pool
+        );
+
+        if (totalDebtUsd18 > totalCollateralUsd18) {
+            deficitUsd18 = totalDebtUsd18 - totalCollateralUsd18;
+        }
+    }
+
+    function _aggregate(
+        address morphoManager,
+        address morpho,
+        address pool
+    ) private view returns (uint256 totalCollateralUsd18, uint256 totalDebtUsd18) {
         Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
         address factory = IPoolLogic(pool).factory();
-        uint256 totalCollateralUsd18;
-        uint256 totalDebtUsd18;
         MarketState memory marketState;
         Position memory p;
         MarketParams memory mp;
@@ -259,12 +299,6 @@ library MorphoCollectLib {
             totalCollateralUsd18 += _getSupplyValue(p, mp, factory, marketState);
             totalDebtUsd18 += _getBorrowValue(p, mp, factory, marketState);
         }
-
-        if (totalDebtUsd18 >= totalCollateralUsd18) {
-            return 0;
-        }
-
-        balanceUsd18 = totalCollateralUsd18 - totalDebtUsd18;
     }
 
     function _getCollateralValue(
