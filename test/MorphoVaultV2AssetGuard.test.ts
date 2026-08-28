@@ -349,6 +349,22 @@ describe('MorphoVaultV2AssetGuard', () => {
       expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
       expect(await guard.isValuationComplete(poolAddr, vaultAddr)).to.equal(false);
     });
+
+    it('returns true (not false) for a dust share balance that converts to zero underlying (FNA-41)', async () => {
+      // Unlike a broken/reverting vault or price feed, asset() and convertToAssets() both
+      // succeed here — the position is genuinely worth less than 1 atomic unit of the
+      // underlying, a known zero rather than an unknowable valuation. Any transferable-share
+      // holder can create this by sending a small enough nonzero amount directly to the pool,
+      // with no Frgmnt guard or pool approval involved.
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      await vault.mintShares(poolAddr, 1n);
+      await vault.setAssetsPerShare(1n); // convertToAssets(1) == (1 * 1) / 1e18 == 0
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+      expect(await guard.isValuationComplete(poolAddr, vaultAddr)).to.equal(true);
+    });
   });
 
   // -----------------------------------------------------------------------

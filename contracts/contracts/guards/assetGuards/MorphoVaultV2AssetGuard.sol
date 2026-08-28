@@ -224,7 +224,16 @@ contract MorphoVaultV2AssetGuard is
         } catch {
             return (0, false);
         }
-        if (underlyingAmount == 0) return (0, false);
+        // FNA-41: unlike every other early return above, this one didn't fail to obtain an
+        // input — asset() and convertToAssets() both succeeded, and the answer is a valid
+        // number: zero. A share balance worth less than 1 atomic unit of the underlying is
+        // known to be economically worthless, not unknowable, so this reports (0, true) the
+        // same as the shares == 0 case just above, not (0, false). Reporting it as "incomplete"
+        // let a permissionless dust transfer of vault shares (no Frgmnt guard or approval
+        // needed) freeze deposit checkpointing, immediate withdrawals, and queued finalization
+        // for the entire pool, while also leaving removeAssetCheck's separate raw-balance check
+        // as the only (still nonzero-blocked) way to clear the position.
+        if (underlyingAmount == 0) return (0, true);
 
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
 
