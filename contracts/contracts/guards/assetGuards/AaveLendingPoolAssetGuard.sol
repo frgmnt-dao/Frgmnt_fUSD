@@ -1106,7 +1106,7 @@ contract AaveV3LendingPoolAssetGuard is
         uint256 usdValueD18 = (amountIn * priceInUsdD18) / unitIn;
         uint256 expectedOut = (usdValueD18 * unitOut) / priceOutUsdD18;
 
-        slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
+        slippageBps = _effectiveSlippageExactIn(slippageBps, uint256(fee));
 
         return (expectedOut * (BPS_DENOMINATOR - slippageBps)) / BPS_DENOMINATOR;
     }
@@ -1129,18 +1129,47 @@ contract AaveV3LendingPoolAssetGuard is
         uint256 usdValueD18 = (amountOut * priceOutUsdD18) / unitOut;
         uint256 expectedIn = (usdValueD18 * unitIn) / priceInUsdD18;
 
-        slippageBps = _getEffectiveSlippage(slippageBps, uint256(fee));
+        slippageBps = _effectiveSlippageExactOut(slippageBps, uint256(fee));
 
         return (expectedIn * (BPS_DENOMINATOR + slippageBps)) / BPS_DENOMINATOR;
     }
 
-    function _getEffectiveSlippage(
+    /// @notice FNA-49: effective slippage bound for _oracleMinOut (exact-input). The pool-fee
+    ///         floor here is the direct fee fraction (fee / 1e6), not the exact-output gross-up
+    ///         — receiving `out` after paying a `fee` cut on `usd` value costs `usd * fee`, not
+    ///         `usd / (1 - fee)`. Composed (added) with the configured tolerance rather than
+    ///         maxed against it, so the operator's own tolerance is never silently discarded by
+    ///         a high-fee tier — the previous max()-based helper collapsed to just the fee floor
+    ///         (~101bps at the 1% tier) whenever that floor exceeded the configured tolerance
+    ///         (70bps by default), leaving ~1bps of real headroom on the forced settlement swap,
+    ///         exactly where a legitimate settlement is most likely to revert.
+    /// @dev Character-for-character identical to MorphoMathLib._effectiveSlippageExactIn() —
+    ///      duplicated rather than shared to keep this fix minimal; see that function's own
+    ///      docs for the full rationale.
+    /// @param slippageBps Configured/requested slippage tolerance.
+    /// @param fee Uniswap V3 pool fee (1e6 denominator).
+    function _effectiveSlippageExactIn(
         uint256 slippageBps,
         uint256 fee
     ) internal pure returns (uint256) {
-        // fee is Uniswap ppm (1e6 denominator)
-        uint256 minSlippageBps = (fee * BPS_DENOMINATOR) / (FEE_DENOMINATOR - fee);
-        return slippageBps < minSlippageBps ? minSlippageBps : slippageBps;
+        uint256 feeBps = (fee * BPS_DENOMINATOR) / FEE_DENOMINATOR;
+        return slippageBps + feeBps;
+    }
+
+    /// @notice FNA-49: effective slippage bound for _oracleMaxIn (exact-output). The gross-up
+    ///         form (fee / (1 - fee)) is correct here — receiving a fixed `out` after a `fee`
+    ///         cut requires sending `out / (1 - fee)` in, not `out * (1 + fee)`. Composed
+    ///         (added) with the configured tolerance rather than maxed against it — see
+    ///         _effectiveSlippageExactIn's own docs for why.
+    /// @dev Character-for-character identical to MorphoMathLib._effectiveSlippageExactOut().
+    /// @param slippageBps Configured/requested slippage tolerance.
+    /// @param fee Uniswap V3 pool fee (1e6 denominator).
+    function _effectiveSlippageExactOut(
+        uint256 slippageBps,
+        uint256 fee
+    ) internal pure returns (uint256) {
+        uint256 feeGrossUpBps = (fee * BPS_DENOMINATOR) / (FEE_DENOMINATOR - fee);
+        return slippageBps + feeGrossUpBps;
     }
 
     // ============================================================

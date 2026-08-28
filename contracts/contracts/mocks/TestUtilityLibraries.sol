@@ -278,8 +278,18 @@ contract TestMorphoMathLib {
         return MorphoMathLib.oracleMaxIn(factory, tokenIn, tokenOut, amountOut, slippageBps, fee);
     }
 
-    function effectiveSlippage(uint256 slippageBps, uint256 fee) external pure returns (uint256) {
-        return MorphoMathLib._getEffectiveSlippage(slippageBps, fee);
+    function effectiveSlippageExactIn(
+        uint256 slippageBps,
+        uint256 fee
+    ) external pure returns (uint256) {
+        return MorphoMathLib._effectiveSlippageExactIn(slippageBps, fee);
+    }
+
+    function effectiveSlippageExactOut(
+        uint256 slippageBps,
+        uint256 fee
+    ) external pure returns (uint256) {
+        return MorphoMathLib._effectiveSlippageExactOut(slippageBps, fee);
     }
 
     function mulPortionRoundUp(uint256 x, uint256 p) external pure returns (uint256) {

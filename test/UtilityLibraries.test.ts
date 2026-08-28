@@ -1064,9 +1064,13 @@ describe('Utility libraries', () => {
       await factory.setAssetPrice(await token6.getAddress(), ethers.parseUnits('1', 18));
       await factory.setAssetPrice(await token18.getAddress(), ethers.parseUnits('2', 18));
 
-      expect(await morphoMath.effectiveSlippage(1, 3_000)).to.equal(30n);
-      expect(await morphoMath.effectiveSlippage(500, 3_000)).to.equal(500n);
+      // FNA-49: composed (added), not maxed — 1 + fee-floor(3000) = 1 + 30 = 31; both directions
+      // agree at this tier since fee-only and gross-up floors coincide (30 == 30, see below).
+      expect(await morphoMath.effectiveSlippageExactIn(1, 3_000)).to.equal(31n);
+      expect(await morphoMath.effectiveSlippageExactOut(1, 3_000)).to.equal(31n);
+      expect(await morphoMath.effectiveSlippageExactIn(500, 3_000)).to.equal(530n);
 
+      // 100 (requested) + 30 (fee-only floor at 3000) = 130 effective slippage.
       expect(
         await morphoMath.oracleMinOut(
           await factory.getAddress(),
@@ -1076,8 +1080,9 @@ describe('Utility libraries', () => {
           100,
           3_000,
         ),
-      ).to.equal(ethers.parseUnits('0.495', 18));
+      ).to.equal(ethers.parseUnits('0.4935', 18));
 
+      // 100 (requested) + 30 (gross-up floor at 3000) = 130 effective slippage.
       expect(
         await morphoMath.oracleMaxIn(
           await factory.getAddress(),
@@ -1087,10 +1092,42 @@ describe('Utility libraries', () => {
           100,
           3_000,
         ),
-      ).to.equal(1_010_000n);
+      ).to.equal(1_013_000n);
 
       expect(await morphoMath.mulPortionRoundUp(5n, ethers.parseUnits('0.5', 18))).to.equal(3n);
       expect(await morphoMath.mulPortionRoundDown(5n, ethers.parseUnits('0.5', 18))).to.equal(2n);
+    });
+
+    // FNA-49: at the 1% (10000) fee tier, the fee-only floor (100) and the exact-output gross-up
+    // floor (101) diverge by 1bps — and, more consequentially, the old max()-based helper
+    // discarded the operator's configured tolerance (70bps default) entirely whenever the fee
+    // floor exceeded it: max(70, 101) = 101, leaving ~1bps of real headroom on the forced
+    // settlement swap. Composing instead preserves the full 70bps on top of the correct,
+    // direction-specific floor.
+    describe('FNA-49: exact-input uses the fee-only floor, exact-output the gross-up, both composed with the configured tolerance', () => {
+      it('reproduces the finding\'s own 1% (10000) tier numbers exactly', async () => {
+        const { morphoMath } = await loadFixture(deployLibrariesFixture);
+
+        // Fee-only floor: 10000 * 10000 / 1e6 = 100.
+        // Gross-up floor: 10000 * 10000 / (1e6 - 10000) = 101 (rounds down from 101.01...).
+        expect(await morphoMath.effectiveSlippageExactIn(0, 10_000)).to.equal(100n);
+        expect(await morphoMath.effectiveSlippageExactOut(0, 10_000)).to.equal(101n);
+
+        // Default tolerance (70) composed on top of each floor — never swallowed by it.
+        expect(await morphoMath.effectiveSlippageExactIn(70, 10_000)).to.equal(170n);
+        expect(await morphoMath.effectiveSlippageExactOut(70, 10_000)).to.equal(171n);
+      });
+
+      it('exact-input and exact-output floors agree at the two lower fee tiers (500, 3000)', async () => {
+        const { morphoMath } = await loadFixture(deployLibrariesFixture);
+
+        expect(await morphoMath.effectiveSlippageExactIn(0, 500)).to.equal(
+          await morphoMath.effectiveSlippageExactOut(0, 500),
+        );
+        expect(await morphoMath.effectiveSlippageExactIn(0, 3_000)).to.equal(
+          await morphoMath.effectiveSlippageExactOut(0, 3_000),
+        );
+      });
     });
   });
 
