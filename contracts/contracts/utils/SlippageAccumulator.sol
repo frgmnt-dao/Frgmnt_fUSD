@@ -135,7 +135,29 @@ contract SlippageAccumulator is Ownable {
     /// @notice Function to calculate an asset amount's value in usd.
     /// @param asset The asset whose price oracle exists.
     /// @param amount The amount of the `asset`.
+    /// @dev FNA-45: mirrors PoolManagerLogic.assetValue()'s IPreValuedAssetGuard short-circuit —
+    ///      a pre-valued guard's getBalance() already returns a fully priced, base-currency USD
+    ///      value, and its registered price feed is only a placeholder identity aggregator (see
+    ///      PoolManagerLogic.assetValue()'s own docs for why re-multiplying it here would
+    ///      silently double-apply pricing). Without this, a pre-valued ERC-20 share routed
+    ///      through the guarded Uniswap router would have its slippage measured against raw
+    ///      share counts instead of economic value, weakening (or, for an under-$1 share,
+    ///      tripping early) the cumulative-loss bound this contract exists to enforce. Uses the
+    ///      same `poolFactory` immutable already in scope — it is PoolManagerLogic's own address
+    ///      (see deploy_contract_guard.ts), which implements IHasGuardInfo.getAssetGuard().
     function assetValue(address asset, uint256 amount) public view returns (uint256 value) {
+        if (amount == 0) return 0;
+
+        address guard = IHasGuardInfo(poolFactory).getAssetGuard(asset);
+        if (guard != address(0)) {
+            (bool hasFn, bytes memory data) = guard.staticcall(
+                abi.encodeWithSignature("isPreValuedAssetGuard()")
+            );
+            if (hasFn && data.length == 32 && abi.decode(data, (bool))) {
+                return amount;
+            }
+        }
+
         uint256 price = IHasAssetInfo(poolFactory).getAssetPrice(asset);
         uint8 decimals = IERC20Extended(asset).decimals();
 

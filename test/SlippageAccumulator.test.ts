@@ -145,6 +145,44 @@ describe('SlippageAccumulator', () => {
       const expected = (amount * newPrice) / 10n ** TOKEN_DECIMALS;
       expect(value).to.equal(expected);
     });
+
+    it('returns 0 for a zero amount without consulting the guard or price feed', async () => {
+      expect(await slippageAccumulator.assetValue(srcTokenAddress, 0n)).to.equal(0n);
+    });
+
+    // FNA-45: mirrors PoolManagerLogic.assetValue()'s IPreValuedAssetGuard short-circuit — a
+    // pre-valued guard's getBalance() already returns a fully priced USD value, and its
+    // registered price feed is only a placeholder identity aggregator. Without this, a
+    // pre-valued share routed through the guarded router would have its slippage measured
+    // against raw share counts instead of economic value.
+    it('returns the raw amount unchanged for an asset guarded by a pre-valued asset guard', async () => {
+      const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
+      const preValuedGuard = await MockAssetGuard.connect(owner).deploy(18);
+      await preValuedGuard.waitForDeployment();
+      await preValuedGuard.setPreValued(true);
+
+      await poolFactory.setAssetGuard(srcTokenAddress, await preValuedGuard.getAddress());
+      // A price far from 1:1 — if this were still multiplied in, the assertion below would fail.
+      await poolFactory.setPrice(srcTokenAddress, ethers.parseUnits('1.5', 8));
+
+      const amount = ethers.parseEther('2');
+      expect(await slippageAccumulator.assetValue(srcTokenAddress, amount)).to.equal(amount);
+    });
+
+    it('still multiplies by price for an asset whose guard exists but is not pre-valued (regression)', async () => {
+      const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
+      const nonPreValuedGuard = await MockAssetGuard.connect(owner).deploy(18);
+      await nonPreValuedGuard.waitForDeployment();
+      // setPreValued() deliberately not called — defaults to false.
+
+      await poolFactory.setAssetGuard(srcTokenAddress, await nonPreValuedGuard.getAddress());
+      const price = ethers.parseUnits('1.5', 8);
+      await poolFactory.setPrice(srcTokenAddress, price);
+
+      const amount = ethers.parseEther('2');
+      const expected = (amount * price) / 10n ** TOKEN_DECIMALS;
+      expect(await slippageAccumulator.assetValue(srcTokenAddress, amount)).to.equal(expected);
+    });
   });
 
   // --------------------------
