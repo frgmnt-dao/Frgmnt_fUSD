@@ -207,26 +207,30 @@ describe('AssetHandler', () => {
       expect(await handler.getUSDPrice(asset)).to.equal(8n * 10n ** 17n);
     });
 
-    it('can disable EUR conversion and return raw USD feed prices again', async () => {
+    // FNA-40: setEurUsdAggregator()/clearEurUsdAggregator() are now a single, permanent
+    // bootstrap-time decision (see eurUsdModeLocked) rather than a runtime toggle — enabling EUR
+    // conversion and then later disabling it again (the old behavior this test exercised) is no
+    // longer possible, since the first call locks the mode. clearEurUsdAggregator() on a fresh,
+    // never-configured handler still works exactly as before (a no-op on the aggregator itself,
+    // which was already unset), explicitly locking in raw-USD mode.
+    it('clearEurUsdAggregator locks raw-USD mode and returns raw USD feed prices (bootstrap-time, USD product)', async () => {
       const handler = await deployAssetHandler();
       const assetFeed = await deployMockAggregator();
-      const eurUsdFeed = await deployMockAggregator();
       const asset = ethers.Wallet.createRandom().address;
       const now = BigInt((await ethers.provider.getBlock('latest'))!.timestamp);
 
       await assetFeed.setData(1n * 10n ** 8n, now, false);
-      await eurUsdFeed.setData(125_000_000n, now, false);
 
       await handler.initialize([{ asset, assetType: 2n, aggregator: await assetFeed.getAddress() }]);
       await handler.setChainlinkTimeout(asset, ASSET_TIMEOUT);
-      await handler.setEurUsdAggregator(await eurUsdFeed.getAddress(), ASSET_TIMEOUT);
-      expect(await handler.getUSDPrice(asset)).to.equal(8n * 10n ** 17n);
+      expect(await handler.getUSDPrice(asset)).to.equal(1n * 10n ** 18n);
 
       await expect(handler.clearEurUsdAggregator())
         .to.emit(handler, 'ClearedEurUsdAggregator')
-        .withArgs(await eurUsdFeed.getAddress());
+        .withArgs(ethers.ZeroAddress);
       expect(await handler.eurUsdAggregator()).to.equal(ethers.ZeroAddress);
       expect(await handler.eurUsdTimeout()).to.equal(0n);
+      expect(await handler.eurUsdModeLocked()).to.equal(true);
       expect(await handler.getUSDPrice(asset)).to.equal(1n * 10n ** 18n);
     });
 
@@ -285,6 +289,50 @@ describe('AssetHandler', () => {
       await expect(handler.connect(other).clearEurUsdAggregator())
         .to.be.revertedWithCustomError(handler, 'OwnableUnauthorizedAccount')
         .withArgs(other.address);
+    });
+
+    // FNA-40: the EUR/USD valuation basis must be a single, permanent bootstrap-time decision —
+    // toggling it later (after any pool may have recorded real accounting activity in the old
+    // basis) would reprice existing FUSD supply, accountedAssets, and pending queued withdrawals
+    // to a different unit without migrating any of them.
+    describe('FNA-40: eurUsdModeLocked — the mode is a one-time, permanent decision', () => {
+      it('locks after the first setEurUsdAggregator call — a later set or clear reverts', async () => {
+        const handler = await deployAssetHandler();
+        const feed = await deployMockAggregator();
+        const otherFeed = await deployMockAggregator();
+        await handler.initialize([]);
+
+        expect(await handler.eurUsdModeLocked()).to.equal(false);
+        await handler.setEurUsdAggregator(await feed.getAddress(), ASSET_TIMEOUT);
+        expect(await handler.eurUsdModeLocked()).to.equal(true);
+
+        await expect(
+          handler.setEurUsdAggregator(await otherFeed.getAddress(), ASSET_TIMEOUT),
+        ).to.be.revertedWith('Frgmnt: eur/usd mode locked');
+        await expect(handler.clearEurUsdAggregator()).to.be.revertedWith(
+          'Frgmnt: eur/usd mode locked',
+        );
+        // The originally-configured feed is untouched by the rejected calls.
+        expect(await handler.eurUsdAggregator()).to.equal(await feed.getAddress());
+      });
+
+      it('locks after the first clearEurUsdAggregator call (USD-only bootstrap) — a later set reverts', async () => {
+        const handler = await deployAssetHandler();
+        const feed = await deployMockAggregator();
+        await handler.initialize([]);
+
+        expect(await handler.eurUsdModeLocked()).to.equal(false);
+        await handler.clearEurUsdAggregator();
+        expect(await handler.eurUsdModeLocked()).to.equal(true);
+
+        await expect(
+          handler.setEurUsdAggregator(await feed.getAddress(), ASSET_TIMEOUT),
+        ).to.be.revertedWith('Frgmnt: eur/usd mode locked');
+        await expect(handler.clearEurUsdAggregator()).to.be.revertedWith(
+          'Frgmnt: eur/usd mode locked',
+        );
+        expect(await handler.eurUsdAggregator()).to.equal(ethers.ZeroAddress);
+      });
     });
   });
 

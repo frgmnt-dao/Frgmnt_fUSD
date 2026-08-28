@@ -186,6 +186,18 @@ async function main() {
     );
     nonce++;
     console.log('AssetHandler EUR/USD conversion configured');
+  } else {
+    // FNA-40: locks the valuation basis in raw-USD mode permanently, before any pool exists to
+    // record accounting in it — setEurUsdAggregator()/clearEurUsdAggregator() both become
+    // uncallable after this, closing the "global conversion-mode change desyncs live pool
+    // accounting" risk for this deployment for good. A no-op on the aggregator itself (it was
+    // never set), but the locking side effect is the whole point here.
+    await sendTxWithRetry(
+      () => assetHandler.clearEurUsdAggregator(txOpts()),
+      'AssetHandler.clearEurUsdAggregator (lock USD mode)',
+    );
+    nonce++;
+    console.log('AssetHandler locked in raw-USD mode');
   }
 
   // FNA-01: AssetHandler.initialize() runs __Ownable_init(msg.sender), so without this the
