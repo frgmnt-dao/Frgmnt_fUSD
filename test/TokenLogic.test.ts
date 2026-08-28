@@ -955,6 +955,115 @@ describe('TokenLogic (fEURO)', () => {
     });
   });
 
+  // FNA-55: _updateCooldownTimestamp()'s weighted-average mint timestamp used to floor its
+  // division, so a mint could be split into pieces small enough that each one's contribution to
+  // the numerator rounded away entirely — cooldownPrincipal kept growing while
+  // cooldownTimestamp stood still, letting a large, already-matured principal "launder" a fresh
+  // mint's own cooldown through many tiny calls. Uses a dedicated harness
+  // (TestTokenLogicCooldown) rather than real deposits/mints, since the adversarial split needs
+  // many calls that must all share the exact same block.timestamp — real transactions each mine
+  // their own (strictly increasing) block.
+  describe('FNA-55: split mints cannot produce an earlier cooldown expiry than one equivalent mint', () => {
+    async function deployHarness() {
+      const [, , , user, other] = await ethers.getSigners();
+      const Harness = await ethers.getContractFactory('TestTokenLogicCooldown');
+      const harness = await Harness.deploy();
+      await harness.waitForDeployment();
+      return { harness, user, other };
+    }
+
+    // The split and single-mint comparison must share the exact same block.timestamp, or a
+    // one-second drift between them (Hardhat auto-mines each transaction into its own,
+    // strictly-later block by default) would corrupt the hand-derived expected numbers below.
+    // Disabling automine and mining both calls together guarantees that.
+    async function splitAndSingleAtSameTimestamp(
+      sendSplit: () => Promise<any>,
+      sendSingle: () => Promise<any>,
+      timestamp: number,
+    ) {
+      await time.setNextBlockTimestamp(timestamp);
+      await ethers.provider.send('evm_setAutomine', [false]);
+      await sendSplit();
+      await sendSingle();
+      await ethers.provider.send('evm_mine', []);
+      await ethers.provider.send('evm_setAutomine', [true]);
+    }
+
+    it('the finding\'s own adversarial split (amount = (principal - 1) / elapsed each step) lands strictly later than the single mint, not earlier', async () => {
+      // Same adversarial shape as the finding's PoC, scaled down to small integers so the exact
+      // result can be hand-checked: seed principal=100 at T0, "now" is 99 seconds later.
+      // Pre-fix, floor((100-1)/99) = 1, and each 1-unit split's own time contribution (99*1=99)
+      // rounded away against a 101-unit denominator — 20 such splits left the timestamp at T0
+      // exactly while an equivalent single mint of 20 correctly advanced it to T0+16. Reverting
+      // this fix and re-running this test reproduces exactly that: splitTs stuck at T0 instead
+      // of the T0+20 asserted below.
+      const { harness, user, other } = await deployHarness();
+      const T0 = (await time.latest()) + 1_000_000;
+      await harness.seedCooldown(await user.getAddress(), 100n, T0);
+      await harness.seedCooldown(await other.getAddress(), 100n, T0);
+
+      const now = T0 + 99;
+
+      // 20 splits of 1 unit each, recomputed against the (unmoved) principal every step —
+      // mirrors the finding's own iterative amount = (principal - 1) / elapsed formula, which
+      // stays at 1 here since principal only grows from 100 to 119 over the loop (still < 200).
+      const amounts = Array.from({ length: 20 }, () => 1n);
+      const userAddress = await user.getAddress();
+      const otherAddress = await other.getAddress();
+      await splitAndSingleAtSameTimestamp(
+        () => harness.splitMintForTest(userAddress, amounts),
+        // Single equivalent mint of the same total (20), same block/timestamp.
+        () => harness.mintForTest(otherAddress, 20n),
+        now,
+      );
+
+      expect(await harness.cooldownPrincipal(await user.getAddress())).to.equal(120n);
+      expect(await harness.cooldownPrincipal(await other.getAddress())).to.equal(120n);
+
+      // Hand-derived via the same ceilDiv recursion: split lands at T0+20 (each of the 20 steps'
+      // rounding-up error compounds), single lands at T0+17 (one ceilDiv(99*20, 120) step). The
+      // split is no longer able to undercut the single mint's cooldown expiry — if anything, the
+      // repeated rounding-up costs the split user *more* delay, never less.
+      const splitTs = await harness.cooldownTimestamp(await user.getAddress());
+      const singleTs = await harness.cooldownTimestamp(await other.getAddress());
+      expect(splitTs).to.equal(BigInt(T0 + 20));
+      expect(singleTs).to.equal(BigInt(T0 + 17));
+      expect(splitTs).to.be.gte(singleTs);
+    });
+
+    it('holds for an arbitrary (non-adversarial) split too: many uneven pieces still never land earlier than one equivalent mint', async () => {
+      const { harness, user, other } = await deployHarness();
+      const T0 = (await time.latest()) + 1_000_000;
+      await harness.seedCooldown(await user.getAddress(), 800_000n, T0);
+      await harness.seedCooldown(await other.getAddress(), 800_000n, T0);
+
+      const now = T0 + 85_600;
+
+      // 10 uneven pieces summing to 240,000 (matching the finding's own total-added figure).
+      const amounts = [30_000n, 12_345n, 987n, 60_013n, 1n, 45_654n, 20_000n, 39_999n, 1_000n, 30_001n];
+      const total = amounts.reduce((a, b) => a + b, 0n);
+      expect(total).to.equal(240_000n);
+
+      const userAddress = await user.getAddress();
+      const otherAddress = await other.getAddress();
+      await splitAndSingleAtSameTimestamp(
+        () => harness.splitMintForTest(userAddress, amounts),
+        () => harness.mintForTest(otherAddress, total),
+        now,
+      );
+
+      expect(await harness.cooldownPrincipal(await user.getAddress())).to.equal(1_040_000n);
+      expect(await harness.cooldownPrincipal(await other.getAddress())).to.equal(1_040_000n);
+
+      const splitTs = await harness.cooldownTimestamp(await user.getAddress());
+      const singleTs = await harness.cooldownTimestamp(await other.getAddress());
+      expect(splitTs).to.be.gte(singleTs);
+      // Single mint is exactly one ceilDiv step: ceilDiv(85_600 * 240_000, 1_040_000).
+      const expectedSingleOffset = (85_600n * 240_000n + 1_040_000n - 1n) / 1_040_000n;
+      expect(singleTs).to.equal(BigInt(T0) + expectedSingleOffset);
+    });
+  });
+
   // FNA-27: PoolLogic is cooldown-exempt as both sender and recipient, so staking/unstaking
   // moves fUSD in and out without the ordinary cooldown-transfer check ever running. Staking the
   // user's FULL balance leaves cooldownTimestamp untouched (the `!exemptRecipient` guard on the

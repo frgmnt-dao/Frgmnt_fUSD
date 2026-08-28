@@ -34,6 +34,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import "./interfaces/IPoolManagerLogic.sol";
 import "./interfaces/IPoolLogic.sol";
 
@@ -641,9 +642,19 @@ contract TokenLogic is
             return (amount, block.timestamp);
         }
 
-        // Weighted average: (oldTs * oldBal + now * newMint) / (oldBal + newMint)
-        uint256 newTimestamp =
-            (prevTimestamp * prevPrincipal + block.timestamp * amount) / newPrincipal;
+        // Weighted average: (oldTs * oldBal + now * newMint) / (oldBal + newMint), rounded UP.
+        // FNA-55: rounding down here let a mint be split into many small enough pieces that each
+        // one's contribution to the numerator rounds away entirely, leaving cooldownTimestamp
+        // unchanged while cooldownPrincipal keeps growing — letting a large, already-matured
+        // principal "launder" a fresh, still-cooling mint through many tiny calls. Rounding up
+        // instead means every call can only ever overestimate the true weighted average, so no
+        // sequence of splits can produce an earlier cooldown expiry than one equivalent mint (see
+        // the FNA-55 regression test in TokenLogic.test.ts for the inductive argument this relies
+        // on: each step's rounding error only ever adds to, never cancels, the next).
+        uint256 newTimestamp = Math.ceilDiv(
+            prevTimestamp * prevPrincipal + block.timestamp * amount,
+            newPrincipal
+        );
         return (newPrincipal, newTimestamp);
     }
 
