@@ -707,6 +707,31 @@ describe('Utility libraries', () => {
         // Using net-realizable (80): fairFusd = 50*80/100 = 40, portion = 40*1e18/80 = 0.5e18.
         expect(portion).to.equal(ethers.parseUnits('0.5', 18));
       });
+
+      // FNA-38: a coexisting finalized-but-unclaimed request's FUSD is still counted in
+      // totalSupply() (not burned until claim) but its backing asset already left active NAV —
+      // must be excluded from totalClaims too, or it double-counts the same value.
+      it('excludes finalizedUnclaimedFusd from totalClaims, giving the true fair share instead of an over-haircut', async () => {
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
+        // totalSupply = 90: Bob's remaining 40 + Alice's still-unburned, finalized-but-unclaimed 50.
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('40', 18)); // Bob's remaining claim
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18)); // Alice's unburned, finalized FUSD
+        await assetGuard18.setBalance(ethers.parseUnits('50', 18)); // pool's own remaining (unreserved) value
+        await fundCalcPool.setFinalizedUnclaimedFusd(ethers.parseUnits('50', 18)); // Alice's finalized, unclaimed
+
+        const netFusd = ethers.parseUnits('10', 18); // Bob's own withdrawal
+        const withdrawableFundValue = ethers.parseUnits('50', 18);
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          withdrawableFundValue,
+        );
+        // Old (buggy) formula: totalClaims = totalSupply(90) + netFusd(10) = 100 -> fairFusd =
+        // 10*50/100 = 5, portion = 0.1e18. Fixed: totalClaims = (90 - 50) + 10 = 50 -> fairFusd =
+        // 10*50/50 = 10 (full par), portion = 10*1e18/50 = 0.2e18.
+        expect(portion).to.equal(ethers.parseUnits('0.2', 18));
+      });
     });
 
     describe('computeFinalizeAssetAmount', () => {
@@ -864,6 +889,28 @@ describe('Utility libraries', () => {
         // Using gross (100) would give effectiveFusd = 50*100/100 = 50 (no haircut). Using
         // net-realizable (80): effectiveFusd = 50*80/100 = 40.
         expect(assetAmount).to.equal(ethers.parseUnits('40', 18));
+      });
+
+      // FNA-38: a coexisting finalized-but-unclaimed request's FUSD is still counted in
+      // totalSupply() (not burned until claim) but its backing asset already left active NAV —
+      // must be excluded from totalClaims too, or it double-counts the same value and understates
+      // this finalize's own fair share.
+      it('excludes finalizedUnclaimedFusd from totalClaims, giving the true fair share instead of an over-haircut', async () => {
+        const { fund, fundCalcPool, assetGuard18, assetAddr } = await setupPool();
+        // totalSupply = 100 (from setupPool's own manager mint) includes an already-finalized,
+        // unclaimed 40 on top of this request's own 50 — only 60 of real fund value remains.
+        await assetGuard18.setBalance(ethers.parseUnits('60', 18));
+        await fundCalcPool.setFinalizedUnclaimedFusd(ethers.parseUnits('40', 18));
+
+        const assetAmount = await fund.computeFinalizeAssetAmount(
+          await fundCalcPool.getAddress(),
+          assetAddr,
+          ethers.parseUnits('50', 18),
+        );
+        // Old (buggy) formula: totalClaims = 100 -> denom = max(60,100) = 100 -> effectiveFusd =
+        // 50*60/100 = 30. Fixed: totalClaims = 100 - 40 = 60 -> denom = max(60,60) = 60 ->
+        // effectiveFusd = 50*60/60 = 50 (full par — fundValue exactly matches true active claims).
+        expect(assetAmount).to.equal(ethers.parseUnits('50', 18));
       });
     });
   });

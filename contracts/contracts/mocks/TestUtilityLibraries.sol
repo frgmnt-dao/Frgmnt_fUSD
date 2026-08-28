@@ -63,6 +63,9 @@ contract TestPoolLogicForFundCalc {
     // computeImmediateWithdrawPortion/computeFinalizeAssetAmount must add to totalClaims.
     uint256 public totalRewardAccrued;
     uint256 public totalRewardHarvested;
+    // FNA-38: lets a test simulate a coexisting finalized-but-unclaimed request's FUSD that
+    // computeImmediateWithdrawPortion/computeFinalizeAssetAmount must exclude from totalClaims.
+    uint256 public finalizedUnclaimedFusd;
 
     function setFusd(address _fusd) external {
         fusd = _fusd;
@@ -82,6 +85,10 @@ contract TestPoolLogicForFundCalc {
 
     function setTotalRewardHarvested(uint256 amount) external {
         totalRewardHarvested = amount;
+    }
+
+    function setFinalizedUnclaimedFusd(uint256 amount) external {
+        finalizedUnclaimedFusd = amount;
     }
 }
 

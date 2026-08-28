@@ -294,14 +294,7 @@ library FundCalculationLibrary {
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
         uint256 completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
-        // FNA-34: totalSupply() alone omits reward FUSD the protocol is already committed to
-        // minting via harvest() but hasn't minted yet — a real outstanding claim against the
-        // pool just like any staker's already-minted balance. Omitting it understated
-        // totalClaims, giving a withdrawing user a more favorable (less haircut) ratio than
-        // fair, at unharvested stakers' expense.
-        uint256 totalClaims = IERC20(IPoolLogic(pool).fusd()).totalSupply() +
-            netFusd +
-            (IPoolLogic(pool).totalRewardAccrued() - IPoolLogic(pool).totalRewardHarvested());
+        uint256 totalClaims = _activeTotalClaims(pool) + netFusd;
         uint256 fairFusd = _applyClaimsHaircut(netFusd, completeFundValue, totalClaims);
         // The fair share can still exceed what's actually liquid right now (a temporary
         // liquidity gap, distinct from insolvency). netFusd has already been burned by the
@@ -312,6 +305,21 @@ library FundCalculationLibrary {
         // share.
         if (fairFusd > withdrawableFundValue) return 0;
         portion = (fairFusd * 1e18) / withdrawableFundValue;
+    }
+
+    /// @notice FNA-38: fUSD.totalSupply() plus the unharvested reward claim (FNA-34), minus
+    ///         finalizedUnclaimedFusd — the shared "active claims" base both
+    ///         computeImmediateWithdrawPortion() (which adds its own request's netFusd back on
+    ///         top, since it was already burned by the time this runs) and
+    ///         computeFinalizeAssetAmount() (used as-is: the request currently being finalized
+    ///         hasn't been added to finalizedUnclaimedFusd yet, so it's still correctly counted
+    ///         as active here) haircut a queued or immediate withdrawal against. See
+    ///         finalizedUnclaimedFusd's own docs on PoolLogic for why it must be excluded.
+    function _activeTotalClaims(address pool) private view returns (uint256) {
+        uint256 claims = IERC20(IPoolLogic(pool).fusd()).totalSupply() +
+            (IPoolLogic(pool).totalRewardAccrued() - IPoolLogic(pool).totalRewardHarvested());
+        uint256 finalizedUnclaimed = IPoolLogic(pool).finalizedUnclaimedFusd();
+        return claims > finalizedUnclaimed ? claims - finalizedUnclaimed : 0;
     }
 
     function _applyClaimsHaircut(
@@ -334,20 +342,19 @@ library FundCalculationLibrary {
     ///      _withdrawableFundValue(), reading reservedAssetBalance via IPoolLogic's public getter
     ///      instead of direct storage access; the price conversion mirrors fusdToAssetAmount()
     ///      above.
-    /// @dev KNOWN LIMITATION (tracked, not fixed — see FNA-05 follow-up): `totalClaims` here is
-    ///      IERC20(fusd).totalSupply(), which still includes the FUSD locked by any *other*
-    ///      request that has already been finalized but not yet claimed, even though that
-    ///      request's backing assets are already excluded from `fundValue` via
-    ///      reservedAssetBalance. That asymmetry under-pays later finalizers relative to their
-    ///      true pro-rata share for as long as earlier reservations sit unclaimed — e.g. two equal
-    ///      100-FUSD claims against a 100-value pool: the first finalizer correctly gets 50, but a
-    ///      second finalize before the first is claimed gets only 25 instead of its true 50 share.
-    ///      This is conservative (it can only under-pay, never over-pay, so it cannot reintroduce
-    ///      FNA-05's first-redeemer bank-run), and self-corrects once outstanding reservations are
-    ///      claimed. Note this does NOT apply to computeImmediateWithdrawPortion: its extraction is
-    ///      re-multiplied by the *raw* (non-reservation-netted) asset balance inside the AssetGuard,
-    ///      which cancels the netting and yields the true pro-rata share directly — do not "fix"
-    ///      that path the same way, or it will start over-paying.
+    /// @dev FNA-38: `totalClaims` excludes finalizedUnclaimedFusd (see _activeTotalClaims() and
+    ///      finalizedUnclaimedFusd's own docs on PoolLogic) — any *other* request already
+    ///      Finalized/FinalizedEscrowed but not yet Claimed has had its backing assets excluded
+    ///      from `fundValue` via reservedAssetBalance/escrow since the moment it was finalized,
+    ///      so its still-unburned FUSD must be excluded from the claims denominator the same way,
+    ///      or it double-counts the same value and understates this (and every other still-
+    ///      active) claim's fair share. An earlier version of this function left this asymmetry
+    ///      unfixed here specifically, reasoning that computeImmediateWithdrawPortion() didn't
+    ///      need the same fix since its extraction is re-multiplied by the AssetGuard's own
+    ///      reservation-netted balance, "cancelling" the netting — that premise was wrong:
+    ///      ERC20Guard.withdrawProcessing() nets by *subtracting* the reservation from balance,
+    ///      not by using the raw balance, so no cancellation occurs and the same asymmetry hits
+    ///      the immediate path too (fixed identically there — see its own docs).
     /// @param pool The PoolLogic address (for poolManagerLogic(), fusd(), and
     ///        reservedAssetBalance()).
     /// @param asset The asset this queued withdrawal will pay out in.
@@ -365,16 +372,10 @@ library FundCalculationLibrary {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
-        // FNA-34: same reasoning as computeImmediateWithdrawPortion above — totalSupply() alone
-        // omits reward FUSD the protocol is already committed to minting via harvest() but
-        // hasn't minted yet. Applied here too: leaving only this path fixed would just move the
-        // exploit from immediate to queued withdrawals, since either path lets a withdrawer
-        // dodge a fair share of the pool's real outstanding claims.
         uint256 effectiveFusd = _applyClaimsHaircut(
             grossFusd,
             _withdrawableFundValue(pool, poolManagerLogic, false),
-            IERC20(IPoolLogic(pool).fusd()).totalSupply() +
-                (IPoolLogic(pool).totalRewardAccrued() - IPoolLogic(pool).totalRewardHarvested())
+            _activeTotalClaims(pool)
         );
         if (effectiveFusd == 0) return 0;
 
