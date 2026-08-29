@@ -28,13 +28,22 @@ import "../../interfaces/IAaveV4TokenizationManager.sol";
 ///      debt, no liquidation risk, and therefore no afterTxGuard / ITxTrackingGuard
 ///      implementation here.
 ///
-///      Every operation requires the target vault to be:
-///       1) registered as a supported asset on the pool (`isSupportedAsset`), AND
-///       2) explicitly whitelisted for this pool in `AaveV4TokenizationManager`.
-///      Both checks are required — (1) alone would let the pool manager expose the pool to an
-///      arbitrary, unvetted ERC-4626-shaped contract, since `changeAssets()` is callable by the
-///      pool manager (or trader). (2) is owned by the protocol owner (intended to be the
-///      Timelock), independent of the pool manager.
+///      Every operation requires the target vault to be registered as a supported asset on the
+///      pool (`isSupportedAsset`) — otherwise the pool manager could expose the pool to an
+///      arbitrary, unvetted ERC-4626-shaped contract via `changeAssets()`. Beyond that, the
+///      `AaveV4TokenizationManager` allowlist check differs by direction (FNA-51):
+///       - Deposit/mint (`_handleDeposit`, `_handleMint`) require the vault to be in the
+///         protocol owner's ACTIVE allowlist (`isValidPoolVault`) — new exposure may only go
+///         into vaults currently sanctioned by governance.
+///       - Withdraw/redeem (`_handleWithdraw`, `_handleRedeem`) require only that the vault be
+///         TRACKED (`isTrackedPoolVault`), a superset that also includes vaults the protocol
+///         owner has since delisted. Gating these on the active allowlist instead — as a single
+///         shared check once did — would mean a delisted vault could never be unwound through
+///         this manual execTransaction path either, contradicting
+///         AaveV4TokenizationAssetGuard's own automatic withdrawProcessing() (which never
+///         consults either allowlist) and leaving the position stuck until governance re-adds
+///         the vault. See AaveV4TokenizationManager's contract-level documentation for why
+///         tracked/active are governed by two separate mappings.
 contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     /*//////////////////////////////////////////////////////////////////////////
                                 FUNCTION SELECTORS
@@ -116,25 +125,49 @@ contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTyp
 
         require(msg.sender == poolLogic, "AaveV4TokenizationGuard: not pool logic");
 
-        require(
-            IHasSupportedAsset(_poolManagerLogic).isSupportedAsset(to),
-            "AaveV4TokenizationGuard: vault not enabled"
-        );
-        require(
-            IAaveV4TokenizationManager(aaveV4TokenizationManager).isValidPoolVault(poolLogic, to),
-            "AaveV4TokenizationGuard: vault not whitelisted"
-        );
-
+        // FNA-51: the allowlist check (active vs. tracked) now differs by direction, so it
+        // moved into each handler below instead of running unconditionally here — see the
+        // contract-level @dev for why.
         bytes4 method = getMethod(data);
         bytes memory params = getParams(data);
 
-        if (method == SEL_DEPOSIT) txType = _handleDeposit(poolLogic, to, params);
-        else if (method == SEL_MINT) txType = _handleMint(poolLogic, to, params);
-        else if (method == SEL_WITHDRAW) txType = _handleWithdraw(poolLogic, to, params);
-        else if (method == SEL_REDEEM) txType = _handleRedeem(poolLogic, to, params);
+        if (method == SEL_DEPOSIT) txType = _handleDeposit(poolLogic, to, _poolManagerLogic, params);
+        else if (method == SEL_MINT) txType = _handleMint(poolLogic, to, _poolManagerLogic, params);
+        else if (method == SEL_WITHDRAW)
+            txType = _handleWithdraw(poolLogic, to, _poolManagerLogic, params);
+        else if (method == SEL_REDEEM) txType = _handleRedeem(poolLogic, to, _poolManagerLogic, params);
         else txType = uint16(TransactionType.NotUsed);
 
         return (txType, false);
+    }
+
+    /// @dev Entry-side validation (FNA-51): the vault must be a registered supported asset of
+    ///      the pool AND actively whitelisted by the protocol owner. See the contract-level
+    ///      documentation above for why deposit/mint use the active (not tracked) set.
+    function _requireActiveVault(address poolManagerLogic, address poolLogic, address vault) internal view {
+        require(
+            IHasSupportedAsset(poolManagerLogic).isSupportedAsset(vault),
+            "AaveV4TokenizationGuard: vault not enabled"
+        );
+        require(
+            IAaveV4TokenizationManager(aaveV4TokenizationManager).isValidPoolVault(poolLogic, vault),
+            "AaveV4TokenizationGuard: vault not whitelisted"
+        );
+    }
+
+    /// @dev Exit-side validation (FNA-51): the vault must still be a registered supported asset
+    ///      of the pool, but only needs to be TRACKED, not actively whitelisted — see the
+    ///      contract-level documentation above for why a delisted vault must still be exitable
+    ///      through this manual path.
+    function _requireTrackedVault(address poolManagerLogic, address poolLogic, address vault) internal view {
+        require(
+            IHasSupportedAsset(poolManagerLogic).isSupportedAsset(vault),
+            "AaveV4TokenizationGuard: vault not enabled"
+        );
+        require(
+            IAaveV4TokenizationManager(aaveV4TokenizationManager).isTrackedPoolVault(poolLogic, vault),
+            "AaveV4TokenizationGuard: vault not tracked"
+        );
     }
 
     /*//////////////////////////////////////////////////////////////////////////
@@ -146,9 +179,11 @@ contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTyp
     function _handleDeposit(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (uint256 assets, address receiver) = abi.decode(params, (uint256, address));
+        _requireActiveVault(poolManagerLogic, poolLogic, vault);
         require(receiver == poolLogic, "AaveV4TokenizationGuard: receiver != pool");
 
         emit AaveV4TokenizationDepositEvt(poolLogic, vault, assets, block.timestamp);
@@ -159,9 +194,11 @@ contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTyp
     function _handleMint(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (uint256 shares, address receiver) = abi.decode(params, (uint256, address));
+        _requireActiveVault(poolManagerLogic, poolLogic, vault);
         require(receiver == poolLogic, "AaveV4TokenizationGuard: receiver != pool");
 
         emit AaveV4TokenizationMintEvt(poolLogic, vault, shares, block.timestamp);
@@ -173,12 +210,14 @@ contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTyp
     function _handleWithdraw(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (uint256 assets, address receiver, address owner) = abi.decode(
             params,
             (uint256, address, address)
         );
+        _requireTrackedVault(poolManagerLogic, poolLogic, vault);
         require(receiver == poolLogic, "AaveV4TokenizationGuard: receiver != pool");
         require(owner == poolLogic, "AaveV4TokenizationGuard: owner != pool");
 
@@ -190,12 +229,14 @@ contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTyp
     function _handleRedeem(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (uint256 shares, address receiver, address owner) = abi.decode(
             params,
             (uint256, address, address)
         );
+        _requireTrackedVault(poolManagerLogic, poolLogic, vault);
         require(receiver == poolLogic, "AaveV4TokenizationGuard: receiver != pool");
         require(owner == poolLogic, "AaveV4TokenizationGuard: owner != pool");
 

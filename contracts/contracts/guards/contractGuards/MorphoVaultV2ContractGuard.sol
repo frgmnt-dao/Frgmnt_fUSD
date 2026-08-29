@@ -29,14 +29,23 @@ import "../../interfaces/IMorphoVaultV2Manager.sol";
 ///      `afterTxGuard` health-factor-style post-check, because there is no risk metric that
 ///      a deposit/withdraw/redeem/forceDeallocate call could push below a safe threshold.
 ///
-///      Every operation requires the target vault to be:
-///       1) registered as a supported asset on the pool (`isSupportedAsset`), AND
-///       2) explicitly whitelisted for this pool in `MorphoVaultV2Manager`.
-///      Both checks are required — (1) alone would let the pool manager expose the pool to
-///      an arbitrary, unvetted ERC-4626-shaped contract, since `changeAssets()` is callable by
-///      the pool manager (or trader). (2) is owned by the protocol owner (intended to be the
-///      Timelock), independent of the pool manager, mirroring the two-key model
-///      `MorphoBlueManager` already provides for Morpho Blue markets.
+///      Every operation requires the target vault to be registered as a supported asset on the
+///      pool (`isSupportedAsset`) — otherwise the pool manager could expose the pool to an
+///      arbitrary, unvetted ERC-4626-shaped contract via `changeAssets()`. Beyond that, the
+///      `MorphoVaultV2Manager` allowlist check differs by direction (FNA-51):
+///       - Deposit/mint (`_handleDeposit`, `_handleMint`) require the vault to be in the
+///         protocol owner's ACTIVE allowlist (`isValidPoolVault`) — new exposure may only go
+///         into vaults currently sanctioned by governance.
+///       - Exit-side operations (`_handleWithdraw`, `_handleRedeem`, `_handleForceDeallocate`,
+///         and therefore `_handleMulticall`, which only ever dispatches to those) require only
+///         that the vault be TRACKED (`isTrackedPoolVault`), a superset that also includes
+///         vaults the protocol owner has since delisted. Gating these on the active allowlist
+///         instead — as a single shared check once did — would mean a delisted vault could never
+///         be unwound through this manual execTransaction path either, contradicting
+///         MorphoVaultV2AssetGuard's own automatic withdrawProcessing() (which never consults
+///         either allowlist) and leaving the position stuck until governance re-adds the vault.
+///         See MorphoVaultV2Manager's contract-level documentation for why tracked/active are
+///         governed by two separate mappings.
 ///
 ///      deposit/mint/withdraw/redeem additionally require the vault's own underlying asset
 ///      (`IERC4626(vault).asset()`) to itself be a supported asset of this pool. The vault
@@ -169,18 +178,12 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
 
         require(msg.sender == poolLogic, "MorphoVaultV2Guard: not pool logic");
 
-        // The target vault must be both a registered supported asset of the pool AND
-        // explicitly whitelisted by the protocol owner. See contract-level @dev for why
-        // both checks are required.
-        require(
-            IHasSupportedAsset(_poolManagerLogic).isSupportedAsset(to),
-            "MorphoVaultV2Guard: vault not enabled"
-        );
-        require(
-            IMorphoVaultV2Manager(morphoVaultV2Manager).isValidPoolVault(poolLogic, to),
-            "MorphoVaultV2Guard: vault not whitelisted"
-        );
-
+        // FNA-51: the allowlist check (active vs. tracked) now differs by direction, so it
+        // moved into each handler below instead of running unconditionally here — see the
+        // contract-level @dev for why. `isSupportedAsset` alone would let the pool manager
+        // expose the pool to an arbitrary, unvetted contract, but it stays common to every
+        // operation, so each handler's own _requireActiveVault/_requireTrackedVault call covers
+        // it too.
         bytes4 method = getMethod(data);
         bytes memory params = getParams(data);
 
@@ -205,7 +208,36 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
                      INTERNAL HANDLERS — PER VAULT V2 OPERATION
     //////////////////////////////////////////////////////////////////////////*/
 
-    /// @dev The vault being a supported+whitelisted asset (checked in txGuard) says nothing
+    /// @dev Entry-side validation (FNA-51): the vault must be a registered supported asset of
+    ///      the pool AND actively whitelisted by the protocol owner. See the contract-level
+    ///      documentation above for why deposit/mint use the active (not tracked) set.
+    function _requireActiveVault(address poolManagerLogic, address poolLogic, address vault) internal view {
+        require(
+            IHasSupportedAsset(poolManagerLogic).isSupportedAsset(vault),
+            "MorphoVaultV2Guard: vault not enabled"
+        );
+        require(
+            IMorphoVaultV2Manager(morphoVaultV2Manager).isValidPoolVault(poolLogic, vault),
+            "MorphoVaultV2Guard: vault not whitelisted"
+        );
+    }
+
+    /// @dev Exit-side validation (FNA-51): the vault must still be a registered supported asset
+    ///      of the pool, but only needs to be TRACKED, not actively whitelisted — see the
+    ///      contract-level documentation above for why a delisted vault must still be exitable
+    ///      through this manual path.
+    function _requireTrackedVault(address poolManagerLogic, address poolLogic, address vault) internal view {
+        require(
+            IHasSupportedAsset(poolManagerLogic).isSupportedAsset(vault),
+            "MorphoVaultV2Guard: vault not enabled"
+        );
+        require(
+            IMorphoVaultV2Manager(morphoVaultV2Manager).isTrackedPoolVault(poolLogic, vault),
+            "MorphoVaultV2Guard: vault not tracked"
+        );
+    }
+
+    /// @dev The vault being a supported+whitelisted asset (checked above) says nothing
     ///      about its *underlying* token: a vault can be registered without its underlying
     ///      ever being added to this pool's own supportedAssets. Since totalFundValue() only
     ///      sums value over supportedAssets, converting between vault shares (counted) and the
@@ -231,6 +263,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         bytes memory params
     ) internal returns (uint16) {
         (uint256 assets, address receiver) = abi.decode(params, (uint256, address));
+        _requireActiveVault(poolManagerLogic, poolLogic, vault);
         require(receiver == poolLogic, "MorphoVaultV2Guard: receiver != pool");
         _requireUnderlyingSupported(poolManagerLogic, vault);
 
@@ -246,6 +279,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         bytes memory params
     ) internal returns (uint16) {
         (uint256 shares, address receiver) = abi.decode(params, (uint256, address));
+        _requireActiveVault(poolManagerLogic, poolLogic, vault);
         require(receiver == poolLogic, "MorphoVaultV2Guard: receiver != pool");
         _requireUnderlyingSupported(poolManagerLogic, vault);
 
@@ -265,6 +299,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
             params,
             (uint256, address, address)
         );
+        _requireTrackedVault(poolManagerLogic, poolLogic, vault);
         require(receiver == poolLogic, "MorphoVaultV2Guard: receiver != pool");
         require(owner == poolLogic, "MorphoVaultV2Guard: owner != pool");
         _requireUnderlyingSupported(poolManagerLogic, vault);
@@ -284,6 +319,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
             params,
             (uint256, address, address)
         );
+        _requireTrackedVault(poolManagerLogic, poolLogic, vault);
         require(receiver == poolLogic, "MorphoVaultV2Guard: receiver != pool");
         require(owner == poolLogic, "MorphoVaultV2Guard: owner != pool");
         _requireUnderlyingSupported(poolManagerLogic, vault);
@@ -311,12 +347,16 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     function _handleForceDeallocate(
         address poolLogic,
         address vault,
+        address poolManagerLogic,
         bytes memory params
     ) internal returns (uint16) {
         (address adapter, , uint256 assets, address onBehalf) = abi.decode(
             params,
             (address, bytes, uint256, address)
         );
+        // FNA-51: forceDeallocate is only ever a means to an atomic exit (see FNA-46 below), so
+        // it uses the same tracked (not active) check as withdraw/redeem.
+        _requireTrackedVault(poolManagerLogic, poolLogic, vault);
         require(onBehalf == poolLogic, "MorphoVaultV2Guard: onBehalf != pool");
         require(
             IMorphoVaultV2(vault).isAdapter(adapter),
@@ -358,7 +398,7 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
                 getMethod(calls[i]) == SEL_FORCE_DEALLOCATE,
                 "MorphoVaultV2Guard: only forceDeallocate legs allowed"
             );
-            _handleForceDeallocate(poolLogic, vault, getParams(calls[i]));
+            _handleForceDeallocate(poolLogic, vault, poolManagerLogic, getParams(calls[i]));
         }
 
         bytes memory lastCall = calls[length - 1];
