@@ -311,12 +311,17 @@ describe('PoolManagerLogic', () => {
     });
 
     it('updates existing assets, keeps sorted order, and removes from the middle', async () => {
-      const { contract, manager, mockAssetHandler, tokenA } = await loadFixture(setupFixture);
+      const { contract, manager, mockAssetHandler, mockGovernance, guard, tokenA } =
+        await loadFixture(setupFixture);
 
       const high = ethers.Wallet.createRandom().address;
       const mid = ethers.Wallet.createRandom().address;
       await mockAssetHandler.addAsset(high, 3, DUMMY_AGGREGATOR);
       await mockAssetHandler.addAsset(mid, 2, DUMMY_AGGREGATOR);
+      // FNA-52: _removeAsset() now requires a resolvable guard (see below) — types 2 and 3 need
+      // one registered, same as type 1 already has via the fixture, or removing `mid` reverts.
+      await mockGovernance.setAssetGuard(2, await guard.getAddress());
+      await mockGovernance.setAssetGuard(3, await guard.getAddress());
 
       await contract.connect(manager).changeAssets(
         [
@@ -351,6 +356,54 @@ describe('PoolManagerLogic', () => {
       await contract.connect(owner).changeAssets([{ asset: noGuardAsset, isDeposit: true }], []);
       expect(await contract.isSupportedAsset(noGuardAsset)).to.equal(true);
       expect(await contract.assetBalance(noGuardAsset)).to.equal(0n);
+    });
+
+    // FNA-52: _removeAsset() previously skipped removeAssetCheck() entirely whenever
+    // getAssetGuard() couldn't resolve a guard (e.g. AssetHandler.removeAsset() was called
+    // before the pool-level removal, zeroing assetTypes(_asset)) — silently allowing removal
+    // with no safety check at all, even if the asset still held an open position. Reproduces
+    // that exact sequencing scenario against MockAssetHandler's own removeAsset(), which also
+    // zeroes assetTypes (and priceAggregators), matching the real AssetHandler.
+    describe('FNA-52: removing an asset with an unresolvable guard must fail closed', () => {
+      it('reverts NoAssetGuard when AssetHandler.removeAsset() is called before the pool-level removal', async () => {
+        const { contract, manager, mockAssetHandler, tokenA } = await loadFixture(setupFixture);
+
+        // tokenA is already a supported asset (added in setupFixture) with a real guard at
+        // assetType 1. Simulate the finding's exact bad sequence: the operator removes it from
+        // AssetHandler FIRST, which (like the real contract) zeroes assetTypes(tokenA).
+        await mockAssetHandler.removeAsset(tokenA);
+        expect(await contract.getAssetType(tokenA)).to.equal(0n);
+
+        await expect(
+          contract.connect(manager).changeAssets([], [tokenA]),
+        ).to.be.revertedWithCustomError(contract, 'NoAssetGuard');
+
+        // Still supported — the removal never went through, unlike the pre-fix fail-open
+        // behavior that would have popped it from supportedAssets with zero safety check.
+        expect(await contract.isSupportedAsset(tokenA)).to.equal(true);
+      });
+
+      it('recovers once the asset type/guard registration is restored, matching the finding\'s own recommended sequence', async () => {
+        const { contract, manager, mockAssetHandler, tokenA, tokenB } =
+          await loadFixture(setupFixture);
+        // tokenA is the fixture's only deposit asset — add a second one so removing tokenA
+        // doesn't separately trip the unrelated "at least one deposit asset" invariant.
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: true }], []);
+
+        await mockAssetHandler.removeAsset(tokenA);
+        await expect(
+          contract.connect(manager).changeAssets([], [tokenA]),
+        ).to.be.revertedWithCustomError(contract, 'NoAssetGuard');
+
+        // Restore the registration (assetType 1 already has a real guard from setupFixture).
+        await mockAssetHandler.addAsset(tokenA, 1, DUMMY_AGGREGATOR);
+
+        await expect(contract.connect(manager).changeAssets([], [tokenA])).to.emit(
+          contract,
+          'AssetRemoved',
+        );
+        expect(await contract.isSupportedAsset(tokenA)).to.equal(false);
+      });
     });
   });
 

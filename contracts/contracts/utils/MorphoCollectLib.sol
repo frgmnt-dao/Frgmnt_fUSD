@@ -101,7 +101,11 @@ library MorphoCollectLib {
         address pool,
         uint256 portion
     ) external view returns (DebtPlan[] memory plans, bool hasDebt) {
-        Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
+        // FNA-52: reads the tracked set, not the active allowlist — a delisted-but-still-open
+        // market must remain valued/withdrawable/repayable, not silently drop out of NAV and
+        // debt/withdrawal planning the moment governance revokes new exposure to it. See
+        // MorphoBlueManager's contract-level documentation.
+        Id[] memory mids = IMorphoBlueManager(morphoManager).getTrackedPoolMarkets(pool);
         plans = new DebtPlan[](mids.length);
 
         uint256 n;
@@ -154,7 +158,11 @@ library MorphoCollectLib {
         address pool,
         uint256 portion
     ) external view returns (SupplyPlan[] memory plans) {
-        Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
+        // FNA-52: reads the tracked set, not the active allowlist — a delisted-but-still-open
+        // market must remain valued/withdrawable/repayable, not silently drop out of NAV and
+        // debt/withdrawal planning the moment governance revokes new exposure to it. See
+        // MorphoBlueManager's contract-level documentation.
+        Id[] memory mids = IMorphoBlueManager(morphoManager).getTrackedPoolMarkets(pool);
         plans = new SupplyPlan[](mids.length);
 
         uint256 n;
@@ -205,7 +213,11 @@ library MorphoCollectLib {
         address pool,
         uint256 portion
     ) external view returns (CollateralPlan[] memory plans) {
-        Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
+        // FNA-52: reads the tracked set, not the active allowlist — a delisted-but-still-open
+        // market must remain valued/withdrawable/repayable, not silently drop out of NAV and
+        // debt/withdrawal planning the moment governance revokes new exposure to it. See
+        // MorphoBlueManager's contract-level documentation.
+        Id[] memory mids = IMorphoBlueManager(morphoManager).getTrackedPoolMarkets(pool);
         plans = new CollateralPlan[](mids.length);
 
         uint256 n;
@@ -280,7 +292,11 @@ library MorphoCollectLib {
         address morpho,
         address pool
     ) private view returns (uint256 totalCollateralUsd18, uint256 totalDebtUsd18) {
-        Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
+        // FNA-52: reads the tracked set, not the active allowlist — a delisted-but-still-open
+        // market must remain valued/withdrawable/repayable, not silently drop out of NAV and
+        // debt/withdrawal planning the moment governance revokes new exposure to it. See
+        // MorphoBlueManager's contract-level documentation.
+        Id[] memory mids = IMorphoBlueManager(morphoManager).getTrackedPoolMarkets(pool);
         address factory = IPoolLogic(pool).factory();
         MarketState memory marketState;
         Position memory p;

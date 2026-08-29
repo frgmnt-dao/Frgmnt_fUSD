@@ -13,7 +13,13 @@ library MorphoChecksLib {
     error PositionNotEmpty();
 
     function removeAssetCheck(address morpho, address morphoManager, address pool) internal view {
-        Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
+        // FNA-52: the tracked set, not the active allowlist — a delisted market must stay
+        // enumerable here for as long as it may still hold an open position. Checking only the
+        // active list would make this pass (silently) for a market a manager can no longer even
+        // see, letting the pool-level asset removal above proceed while real Morpho debt/
+        // collateral in that now-invisible market is left behind, unrecognized. See
+        // MorphoBlueManager's contract-level documentation.
+        Id[] memory mids = IMorphoBlueManager(morphoManager).getTrackedPoolMarkets(pool);
         for (uint256 i; i < mids.length; i++) {
             Position memory p = IMorpho(morpho).position(mids[i], pool);
             if (p.collateral != 0 || p.borrowShares != 0 || p.supplyShares != 0) {
@@ -28,7 +34,11 @@ library MorphoChecksLib {
         address pool,
         address token
     ) internal view returns (bool) {
-        Id[] memory mids = IMorphoBlueManager(morphoManager).getPoolMarkets(pool);
+        // FNA-52: the tracked set, not the active allowlist — a delisted market must stay
+        // enumerable here for as long as it may still hold an open position referencing `token`,
+        // or this would incorrectly report `token` as safe to un-support. See
+        // MorphoBlueManager's contract-level documentation.
+        Id[] memory mids = IMorphoBlueManager(morphoManager).getTrackedPoolMarkets(pool);
 
         for (uint256 i; i < mids.length; i++) {
             Position memory p = IMorpho(morpho).position(mids[i], pool);

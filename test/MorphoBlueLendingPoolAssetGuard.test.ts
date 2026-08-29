@@ -322,6 +322,38 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     return { id, mp };
   }
 
+  // FNA-52: registers a market as TRACKED-ONLY — never added to the active allowlist at all —
+  // rather than setupMarket()+delisting. MockMorphoBlueManager's setPoolMarkets() is
+  // additive-only for the active list, so it can't itself simulate a market that was in the
+  // active enumeration and then dropped out; registering tracked-only reproduces the same end
+  // state (in the tracked set, absent from the active one) a real delisting leaves behind.
+  async function setupTrackedOnlyMarket(
+    morpho: any,
+    morphoManager: any,
+    poolAddress: string,
+    loanToken: string,
+    collateralToken: string,
+    totals = {
+      totalSupplyAssets: 1_000_000n,
+      totalSupplyShares: 1_000_000n,
+      totalBorrowAssets: 1_000_000n,
+      totalBorrowShares: 1_000_000n,
+    },
+  ) {
+    const mp = marketParams(loanToken, collateralToken);
+    const id = await morpho.marketId(mp);
+    await morpho.setMarket(mp, [
+      totals.totalSupplyAssets,
+      totals.totalSupplyShares,
+      totals.totalBorrowAssets,
+      totals.totalBorrowShares,
+      0n,
+      0n,
+    ]);
+    await morphoManager.setTrackedPoolMarket(poolAddress, id, true);
+    return { id, mp };
+  }
+
   it('getBalance returns 0 when no Morpho positions', async () => {
     const { guard } = await deploy();
     const pool = await deployPool();
@@ -377,6 +409,35 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
 
     await morpho.setPosition(id, poolAddress, 500_000n, 100_000n, ethers.parseEther('2'));
 
+    expect(await guard.getBalance(poolAddress, ethers.ZeroAddress)).to.be.gt(0n);
+    await expect(guard.removeAssetCheck(poolAddress, ethers.ZeroAddress)).to.be.reverted;
+    expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await usdc.getAddress())).to.equal(false);
+    expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await weth.getAddress())).to.equal(false);
+  });
+
+  // FNA-52: MorphoCollectLib's getBalance/getDeficit/collectDebts/collectSupplies/
+  // collectCollaterals previously enumerated getPoolMarkets() (the active allowlist), so
+  // delisting a market with an open position made it invisible to NAV, debt planning, and the
+  // pool-level removal-safety check all at once — not just to the manual execTransaction path
+  // (see MorphoBlueContractGuard's own FNA-52 tests). Reproduces that exact scenario end-to-end
+  // through the real asset guard.
+  it('FNA-52: getBalance and removal checks still reflect a non-empty position for a tracked-but-delisted market', async () => {
+    const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+    const pool = await deployAssetPool([usdc, weth]);
+    const poolAddress = await pool.getAddress();
+    const { id } = await setupTrackedOnlyMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      await usdc.getAddress(),
+      await weth.getAddress(),
+    );
+    await morpho.setPosition(id, poolAddress, 500_000n, 100_000n, ethers.parseEther('2'));
+    expect(await morphoManager.isValidPoolMarket(poolAddress, id)).to.equal(false);
+    expect(await morphoManager.isTrackedPoolMarket(poolAddress, id)).to.equal(true);
+
+    // Valuation and removal safety must see this position despite it never being (or no longer
+    // being) on the active allowlist.
     expect(await guard.getBalance(poolAddress, ethers.ZeroAddress)).to.be.gt(0n);
     await expect(guard.removeAssetCheck(poolAddress, ethers.ZeroAddress)).to.be.reverted;
     expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await usdc.getAddress())).to.equal(false);
@@ -533,6 +594,39 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
 
     expect(withdrawAsset).to.equal(await usdc.getAddress());
     expect(withdrawBalance).to.equal(0n);
+    expect(txs.length).to.equal(1);
+    expect(txs[0].to).to.equal(morphoAddr);
+  });
+
+  // FNA-52: collectDebts (via withdrawProcessing's flashloan planning) previously enumerated
+  // the active allowlist, so a delisted market's outstanding debt would silently drop out of
+  // debt planning — the withdrawal would proceed as if that debt didn't exist, rather than
+  // building the flashloan transaction needed to repay it first.
+  it('FNA-52: withdrawProcessing still plans repayment for a tracked-but-delisted debt market', async () => {
+    const { guard, morpho, morphoManager, morphoAddr, usdc, weth } = await deploy();
+    const pool = await deployAssetPool([usdc, weth]);
+    const poolAddress = await pool.getAddress();
+    const { id } = await setupTrackedOnlyMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      await usdc.getAddress(),
+      await weth.getAddress(),
+    );
+    await morpho.setPosition(id, poolAddress, 0n, 500_000n, 0n);
+    expect(await morphoManager.isValidPoolMarket(poolAddress, id)).to.equal(false);
+    expect(await morphoManager.isTrackedPoolMarket(poolAddress, id)).to.equal(true);
+
+    const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
+      poolAddress,
+      ethers.ZeroAddress,
+      ethers.parseUnits('1', 18),
+      ethers.Wallet.createRandom().address,
+    );
+
+    // Same outcome as the non-delisted case above: the debt is still planned for, not silently
+    // dropped.
+    expect(withdrawAsset).to.equal(await usdc.getAddress());
     expect(txs.length).to.equal(1);
     expect(txs[0].to).to.equal(morphoAddr);
   });
