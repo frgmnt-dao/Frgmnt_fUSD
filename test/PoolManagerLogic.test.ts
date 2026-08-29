@@ -405,6 +405,57 @@ describe('PoolManagerLogic', () => {
         expect(await contract.isSupportedAsset(tokenA)).to.equal(false);
       });
     });
+
+    // FNA-53: removeTokenCheck() was already implemented by seven guards, but only ever
+    // actually invoked from ERC20Guard.removeAssetCheck()'s own loop — so the cross-asset
+    // dependency check only ran when the asset being REMOVED happened to be ERC20Guard-typed.
+    // Removing any composite/position asset (which all inherit ClosedAssetGuard instead, whose
+    // removeAssetCheck() only checks its own pool balance) skipped it entirely. Moved into
+    // _removeAsset() itself so it runs for every removal uniformly.
+    describe('FNA-53: central cross-asset dependency check on every removal', () => {
+      it('reverts AssetStillReferenced when another supported asset\'s guard reports the candidate is still in use', async () => {
+        const { contract, manager, guard, tokenB } = await loadFixture(setupFixture);
+        // tokenB shares assetType 1 (and therefore the same `guard` instance) with tokenA —
+        // simplest way to make some *other* supported asset's guard object to the removal.
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+        await guard.setRemoveTokenCheckResult(false);
+
+        await expect(
+          contract.connect(manager).changeAssets([], [tokenB]),
+        ).to.be.revertedWithCustomError(contract, 'AssetStillReferenced');
+        expect(await contract.isSupportedAsset(tokenB)).to.equal(true);
+      });
+
+      it('succeeds when every other guard reports the candidate is not referenced', async () => {
+        const { contract, manager, tokenB } = await loadFixture(setupFixture);
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+
+        await expect(contract.connect(manager).changeAssets([], [tokenB])).to.emit(
+          contract,
+          'AssetRemoved',
+        );
+      });
+
+      it('does not block removal on a different supported asset whose own guard is unresolvable', async () => {
+        const { contract, manager, mockAssetHandler, tokenB } = await loadFixture(setupFixture);
+        const noGuardAsset = ethers.Wallet.createRandom().address;
+        // assetType 99 has no guard ever registered in Governance — getAssetGuard() resolves
+        // to address(0) for it, so the central loop must skip it rather than block removal.
+        await mockAssetHandler.addAsset(noGuardAsset, 99, DUMMY_AGGREGATOR);
+        await contract.connect(manager).changeAssets(
+          [
+            { asset: noGuardAsset, isDeposit: false },
+            { asset: tokenB, isDeposit: false },
+          ],
+          [],
+        );
+
+        await expect(contract.connect(manager).changeAssets([], [tokenB])).to.emit(
+          contract,
+          'AssetRemoved',
+        );
+      });
+    });
   });
 
   // ========================================================================================

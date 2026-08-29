@@ -407,23 +407,11 @@ describe('ERC20Guard', () => {
     // no revert = success
   });
 
-  it('removeAssetCheck reverts when another asset guard reports the token is in use', async () => {
-    const { guard, poolManager, token } = await deployMocks();
-    const pool = await poolManager.getAddress();
-    const protocolAsset = ethers.Wallet.createRandom().address;
-
-    const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
-    const protocolGuard = await MockAssetGuard.deploy(18);
-    await protocolGuard.waitForDeployment();
-    await protocolGuard.setRemoveTokenCheckResult(false);
-
-    await poolManager.setSupportedAsset(protocolAsset, false);
-    await poolManager.setAssetGuard(protocolAsset, await protocolGuard.getAddress());
-
-    await expect(
-      guard.removeAssetCheck(pool, await token.getAddress()),
-    ).to.be.revertedWithCustomError(guard, 'UsedAsset');
-  });
+  // FNA-53: the cross-asset dependency check formerly here (asking every other supported
+  // asset's guard whether it still depends on this token via removeTokenCheck()) moved to
+  // PoolManagerLogic._removeAsset() itself, so it runs for every removal regardless of the
+  // candidate's own guard type — see PoolManagerLogic.test.ts's own FNA-53 coverage.
+  // removeAssetCheck() here now only ever checks this guard's own pool balance.
 
   it('removeTokenCheck returns true for a plain ERC20 token', async () => {
     const { guard, poolManager, token } = await deployMocks();

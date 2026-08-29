@@ -117,6 +117,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     error AssetNotSupported();
     error PreValuedAssetNotDepositable();
     error NoAssetGuard();
+    error AssetStillReferenced();
 
     modifier onlyFactoryOwner() {
         require(msg.sender == factoryOwner, "only factoryOwner allowed");
@@ -432,6 +433,36 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     ///      is the same either way: restore the asset's type/guard registration in
     ///      AssetHandler/Governance, then retry, exactly as the finding's own recommended
     ///      sequence already requires before any removal.
+    /// @notice FNA-53: centralizes the cross-asset dependency check every asset removal must
+    ///         pass, regardless of the candidate's own guard type.
+    /// @dev Before this, `removeTokenCheck()` — already implemented by seven guards
+    ///      (ERC20Guard, ClosedAssetGuard and every guard built on it: Aave V3/V4 lending,
+    ///      Morpho Blue, Morpho Vault V2, Aave V4 Tokenization/Spoke, Uniswap V3) — was only
+    ///      ever actually invoked from ERC20Guard.removeAssetCheck()'s own loop, so the check
+    ///      only ran when the asset being REMOVED was itself ERC20Guard-typed (a plain token).
+    ///      Removing anything else (a lending position, a vault share, a Uniswap V3 position
+    ///      manager) skipped it entirely, since every other guard here inherits ClosedAssetGuard,
+    ///      whose removeAssetCheck() only checks its own pool balance — never asking any other
+    ///      guard whether it still depends on the asset being removed. A composite ERC-20 (e.g.
+    ///      a Morpho Vault V2 share) used as a Uniswap V3 position leg could therefore be removed
+    ///      from supportedAssets while an open Uniswap V3 NFT still referenced it as token0/
+    ///      token1 — UniswapV3AssetGuard then silently skips that leg in getBalance() without
+    ///      reporting the reading as incomplete (FNA-53). Looping here instead of inside
+    ///      ERC20Guard makes the check run for every removal uniformly; ERC20Guard.
+    ///      removeAssetCheck() no longer duplicates it.
+    function _requireNotReferencedByOtherAssets(address _asset) internal view {
+        Asset[] memory assets = supportedAssets;
+        uint256 len = assets.length;
+        for (uint256 i; i < len; ++i) {
+            address otherAsset = assets[i].asset;
+            address otherGuard = getAssetGuard(otherAsset);
+            if (otherGuard == address(0)) continue;
+            if (!IAssetGuard(otherGuard).removeTokenCheck(poolLogic, otherAsset, _asset)) {
+                revert AssetStillReferenced();
+            }
+        }
+    }
+
     function _removeAsset(address _asset) internal {
         if (!isSupportedAsset(_asset)) revert AssetNotSupported();
 
@@ -440,6 +471,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         // Don't rely on on-chain wallet balance as a safe-removal condition.
         // Let the guard decide using protocol-aware checks (including external positions).
         IAssetGuard(guard).removeAssetCheck(poolLogic, _asset);
+        _requireNotReferencedByOtherAssets(_asset);
 
         uint256 idx = assetPosition[_asset] - 1;
         uint256 len = supportedAssets.length;

@@ -18,7 +18,6 @@ import "../../interfaces/guards/IAssetGuard.sol";
 import "../../interfaces/guards/IGuard.sol";
 import "../../interfaces/IERC20Extended.sol";
 import "../../interfaces/IPoolManagerLogic.sol";
-import "../../interfaces/IHasSupportedAsset.sol";
 import "../../interfaces/IHasGuardInfo.sol";
 import "../../interfaces/IManaged.sol";
 import "../../interfaces/ITransactionTypes.sol";
@@ -31,7 +30,6 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
 
     error UnsupportedApproval();
     error NonZeroAssetBalance();
-    error UsedAsset();
     error ApprovalExceedsUnreservedBalance();
 
     // -------------------------------------------------------------------------
@@ -184,27 +182,15 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
     /**
      * @notice Prevent asset removal if a non-zero balance remains in the pool.
      * @dev Enforced by guards registry before unregistering this asset.
+     * @dev FNA-53: the cross-asset dependency loop that used to live here (asking every other
+     *      supported asset's guard whether it still depends on `asset` via removeTokenCheck())
+     *      moved to PoolManagerLogic._removeAsset() itself, so it runs for every removal
+     *      regardless of the candidate's own guard type, not only when the candidate happens to
+     *      be ERC20Guard-typed. See that function's own documentation.
      */
     function removeAssetCheck(address pool, address asset) public view virtual override {
         if (getBalance(pool, asset) != 0) {
             revert NonZeroAssetBalance();
-        }
-
-        address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
-        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic)
-            .getSupportedAssets();
-
-        address token;
-        address guard;
-
-        for (uint256 i = 0; i < supportedAssets.length; ++i) {
-            token = supportedAssets[i].asset;
-            guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(token);
-            if (guard != address(0)) {
-                if (!IAssetGuard(guard).removeTokenCheck(pool, token, asset)) {
-                    revert UsedAsset();
-                }
-            }
         }
     }
 
