@@ -118,6 +118,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     error PreValuedAssetNotDepositable();
     error NoAssetGuard();
     error AssetStillReferenced();
+    error CannotAddFusdAsAsset();
 
     modifier onlyFactoryOwner() {
         require(msg.sender == factoryOwner, "only factoryOwner allowed");
@@ -357,6 +358,14 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         if (!validateAsset(asset)) revert InvalidAsset();
 
         if (_isPool[asset]) revert CannotAddPoolAsset();
+
+        // FNA-23: fusd is the fund's accounting unit, not a collateral asset. Listing it as a
+        // supported asset of its own backing pool would leave fUSD reserved for finalized cash
+        // withdrawals unring-fenced from the pool's general fUSD balance, spendable by ordinary
+        // guarded operations. poolLogic can be unset only during initial wiring (FNA-09), before
+        // any real asset is ever added, so skip the check rather than reverting in that window.
+        if (poolLogic != address(0) && asset == IPoolLogic(poolLogic).fusd())
+            revert CannotAddFusdAsAsset();
 
         address guard = getAssetGuard(asset);
         if (guard != address(0)) {

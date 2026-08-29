@@ -456,6 +456,31 @@ describe('PoolManagerLogic', () => {
         );
       });
     });
+
+    describe('FNA-23: fusd cannot be added as a supported asset of its own pool', () => {
+      it('reverts CannotAddFusdAsAsset when adding fusd itself', async () => {
+        const { contract, manager, poolLogic, mockAssetHandler } = await loadFixture(
+          setupFixture,
+        );
+        const fusd = ethers.Wallet.createRandom().address;
+        await poolLogic.setFusd(fusd);
+        await mockAssetHandler.addAsset(fusd, 1, DUMMY_AGGREGATOR);
+
+        await expect(
+          contract.connect(manager).changeAssets([{ asset: fusd, isDeposit: true }], []),
+        ).to.be.revertedWithCustomError(contract, 'CannotAddFusdAsAsset');
+        expect(await contract.isSupportedAsset(fusd)).to.equal(false);
+      });
+
+      it('does not affect adding an unrelated asset when fusd is unset (poolLogic default)', async () => {
+        const { contract, manager, tokenB } = await loadFixture(setupFixture);
+        // poolLogic.fusd() defaults to address(0) in the mock — must not accidentally block
+        // every addition by comparing against the zero address.
+        await expect(
+          contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []),
+        ).to.emit(contract, 'AssetAdded');
+      });
+    });
   });
 
   // ========================================================================================
