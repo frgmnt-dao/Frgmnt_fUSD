@@ -681,19 +681,14 @@ describe('MorphoBlueContractGuard', () => {
     ).to.be.revertedWith('MorphoGuard: unsupported collateralToken');
   });
 
-  it('reverts with invalid markets for every guarded Morpho action', async () => {
+  it('reverts with invalid markets for every entry-side guarded Morpho action (active allowlist)', async () => {
     const ctx = await setup();
+    // FNA-52: entry-side operations (new exposure) stay gated on the active allowlist —
+    // unaffected by tracked status, which defaults to false here (never separately set).
     await ctx.morphoManager.setAllMarketsValid(ctx.poolLogicAddr, false);
     const borrower = '0x3000000000000000000000000000000000000003';
     const calls = [
       ctx.morphoIface.encodeFunctionData('supply', [ctx.marketParams, 100n, 0n, ctx.poolLogicAddr, '0x']),
-      ctx.morphoIface.encodeFunctionData('withdraw', [
-        ctx.marketParams,
-        200n,
-        50n,
-        ctx.poolLogicAddr,
-        ctx.poolLogicAddr,
-      ]),
       ctx.morphoIface.encodeFunctionData('borrow', [
         ctx.marketParams,
         300n,
@@ -701,18 +696,11 @@ describe('MorphoBlueContractGuard', () => {
         ctx.poolLogicAddr,
         ctx.poolLogicAddr,
       ]),
-      ctx.morphoIface.encodeFunctionData('repay', [ctx.marketParams, 400n, 5n, ctx.poolLogicAddr, '0x']),
       ctx.morphoIface.encodeFunctionData('supplyCollateral', [
         ctx.marketParams,
         500n,
         ctx.poolLogicAddr,
         '0x',
-      ]),
-      ctx.morphoIface.encodeFunctionData('withdrawCollateral', [
-        ctx.marketParams,
-        600n,
-        ctx.poolLogicAddr,
-        ctx.poolLogicAddr,
       ]),
       ctx.morphoIface.encodeFunctionData('liquidate', [ctx.marketParams, borrower, 700n, 5n, '0x']),
     ];
@@ -722,6 +710,90 @@ describe('MorphoBlueContractGuard', () => {
         ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, data),
       ).to.be.revertedWith('MorphoGuard: no valid marketParams');
     }
+  });
+
+  it('reverts with untracked markets for every exit-side guarded Morpho action (FNA-52)', async () => {
+    const ctx = await setup();
+    // setup() defaults every market to active (and therefore tracked, since active implies
+    // tracked) via the wildcard — override both off here so this market was never even tracked,
+    // a distinct case from tracked-but-delisted (see the "survives delisting" test below).
+    await ctx.morphoManager.setAllMarketsValid(ctx.poolLogicAddr, false);
+    const calls = [
+      ctx.morphoIface.encodeFunctionData('withdraw', [
+        ctx.marketParams,
+        200n,
+        50n,
+        ctx.poolLogicAddr,
+        ctx.poolLogicAddr,
+      ]),
+      ctx.morphoIface.encodeFunctionData('repay', [ctx.marketParams, 400n, 5n, ctx.poolLogicAddr, '0x']),
+      ctx.morphoIface.encodeFunctionData('withdrawCollateral', [
+        ctx.marketParams,
+        600n,
+        ctx.poolLogicAddr,
+        ctx.poolLogicAddr,
+      ]),
+    ];
+
+    for (const data of calls) {
+      await expect(
+        ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, data),
+      ).to.be.revertedWith('MorphoGuard: market not tracked');
+    }
+  });
+
+  it('FNA-52: exit-side operations still succeed once the market is delisted, since it remains tracked', async () => {
+    const ctx = await setup();
+    // Simulates delisting: active is off, but the market is still explicitly tracked (as the
+    // real MorphoBlueManager would leave it, since setPoolMarkets() never untracks on its own).
+    await ctx.morphoManager.setAllMarketsValid(ctx.poolLogicAddr, false);
+    await ctx.morphoManager.setAllMarketsTracked(ctx.poolLogicAddr, true);
+
+    const withdrawData = ctx.morphoIface.encodeFunctionData('withdraw', [
+      ctx.marketParams,
+      200n,
+      50n,
+      ctx.poolLogicAddr,
+      ctx.poolLogicAddr,
+    ]);
+    await expect(
+      ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, withdrawData),
+    ).to.emit(ctx.guard, 'MorphoWithdrawEvt');
+
+    const repayData = ctx.morphoIface.encodeFunctionData('repay', [
+      ctx.marketParams,
+      400n,
+      5n,
+      ctx.poolLogicAddr,
+      '0x',
+    ]);
+    await expect(
+      ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, repayData),
+    ).to.emit(ctx.guard, 'MorphoRepayEvt');
+
+    const withdrawCollData = ctx.morphoIface.encodeFunctionData('withdrawCollateral', [
+      ctx.marketParams,
+      600n,
+      ctx.poolLogicAddr,
+      ctx.poolLogicAddr,
+    ]);
+    await expect(
+      ctx.guard
+        .connect(ctx.poolLogicSigner)
+        .txGuard(ctx.poolManagerAddr, ctx.morphoAddress, withdrawCollData),
+    ).to.emit(ctx.guard, 'MorphoWithdrawCollEvt');
+
+    // Entry-side operations remain blocked — delisting still prevents new exposure.
+    const supplyData = ctx.morphoIface.encodeFunctionData('supply', [
+      ctx.marketParams,
+      100n,
+      0n,
+      ctx.poolLogicAddr,
+      '0x',
+    ]);
+    await expect(
+      ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, supplyData),
+    ).to.be.revertedWith('MorphoGuard: no valid marketParams');
   });
 
   it('flashLoan returns NotUsed txType (not implemented in this guard version)', async () => {

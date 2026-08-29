@@ -116,6 +116,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     error InvalidAsset();
     error AssetNotSupported();
     error PreValuedAssetNotDepositable();
+    error NoAssetGuard();
 
     modifier onlyFactoryOwner() {
         require(msg.sender == factoryOwner, "only factoryOwner allowed");
@@ -417,15 +418,28 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         emit AssetAdded(poolLogic, manager, asset, isDeposit);
     }
 
+    /// @dev FNA-52: requires a resolvable guard before allowing removal, rather than silently
+    ///      skipping removeAssetCheck() when one can't be found. getAssetGuard() resolves
+    ///      through AssetHandler.assetTypes(_asset) -> Governance.assetGuards(assetType) — if an
+    ///      operator calls AssetHandler.removeAsset() (which zeroes assetTypes(_asset)) before
+    ///      removing the asset from this pool's own supportedAssets, this guard lookup would
+    ///      otherwise go straight to address(0), and the balance/position check that's supposed
+    ///      to block removing an asset with an open position never runs at all — the exact gap
+    ///      the finding describes for a Morpho loan token, but not specific to Morpho: it applies
+    ///      to any asset whose type mapping is cleared ahead of the pool-level removal. An
+    ///      unresolvable guard means this contract has no way to verify the asset is actually
+    ///      safe to unlist, so it must block the removal rather than assume it's fine — recovery
+    ///      is the same either way: restore the asset's type/guard registration in
+    ///      AssetHandler/Governance, then retry, exactly as the finding's own recommended
+    ///      sequence already requires before any removal.
     function _removeAsset(address _asset) internal {
         if (!isSupportedAsset(_asset)) revert AssetNotSupported();
 
         address guard = getAssetGuard(_asset);
-        if (guard != address(0)) {
-            // Don't rely on on-chain wallet balance as a safe-removal condition.
-            // Let the guard decide using protocol-aware checks (including external positions).
-            IAssetGuard(guard).removeAssetCheck(poolLogic, _asset);
-        }
+        if (guard == address(0)) revert NoAssetGuard();
+        // Don't rely on on-chain wallet balance as a safe-removal condition.
+        // Let the guard decide using protocol-aware checks (including external positions).
+        IAssetGuard(guard).removeAssetCheck(poolLogic, _asset);
 
         uint256 idx = assetPosition[_asset] - 1;
         uint256 len = supportedAssets.length;

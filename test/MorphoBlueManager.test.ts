@@ -120,4 +120,112 @@ describe('MorphoBlueManager', () => {
     expect(await manager.isValidPoolMarket(pool, id1)).to.equal(true);
     expect(await manager.getPoolMarketsLength(pool)).to.equal(1n);
   });
+
+  // -----------------------------------------------------------------------
+  // FNA-52: trackedPoolMarkets / pruneTrackedMarket
+  // -----------------------------------------------------------------------
+  describe('FNA-52: tracked markets survive delisting', () => {
+    async function deployWithMorpho() {
+      const base = await deploy();
+      const MorphoFactory = await ethers.getContractFactory('MockMorphoBlue');
+      const morpho = await MorphoFactory.deploy();
+      await morpho.waitForDeployment();
+      const morphoAddr = await morpho.getAddress();
+      const pool = ethers.Wallet.createRandom().address;
+      return { ...base, morpho, morphoAddr, pool };
+    }
+
+    it('setPoolMarkets also tracks newly-authorized markets', async () => {
+      const { manager } = await deploy();
+      const pool = ethers.Wallet.createRandom().address;
+      const id1 = mkId(1);
+      const id2 = mkId(2);
+
+      await manager.setPoolMarkets(pool, [id1, id2]);
+
+      expect(await manager.isTrackedPoolMarket(pool, id1)).to.equal(true);
+      expect(await manager.isTrackedPoolMarket(pool, id2)).to.equal(true);
+      expect(await manager.getTrackedPoolMarketsLength(pool)).to.equal(2n);
+      const tracked = await manager.getTrackedPoolMarkets(pool);
+      expect([...tracked]).to.have.members([id1, id2]);
+    });
+
+    it('delisting a market clears isValidPoolMarket but leaves it tracked', async () => {
+      const { manager } = await deploy();
+      const pool = ethers.Wallet.createRandom().address;
+      const id1 = mkId(1);
+      const id2 = mkId(2);
+
+      await manager.setPoolMarkets(pool, [id1, id2]);
+      await manager.setPoolMarkets(pool, [id2]); // delist id1
+
+      expect(await manager.isValidPoolMarket(pool, id1)).to.equal(false);
+      expect(await manager.isTrackedPoolMarket(pool, id1)).to.equal(true);
+      expect(await manager.getTrackedPoolMarketsLength(pool)).to.equal(2n);
+    });
+
+    it('pruneTrackedMarket reverts if the market was never tracked', async () => {
+      const { manager, pool, morphoAddr } = await deployWithMorpho();
+      const id1 = mkId(1);
+      await expect(manager.pruneTrackedMarket(pool, morphoAddr, id1)).to.be.revertedWith(
+        'Not tracked',
+      );
+    });
+
+    it('pruneTrackedMarket reverts while the market is still actively allowed', async () => {
+      const { manager, pool, morphoAddr } = await deployWithMorpho();
+      const id1 = mkId(1);
+      await manager.setPoolMarkets(pool, [id1]);
+
+      await expect(manager.pruneTrackedMarket(pool, morphoAddr, id1)).to.be.revertedWith(
+        'Still active',
+      );
+    });
+
+    it('pruneTrackedMarket reverts if the pool still holds a nonzero position', async () => {
+      const { manager, morpho, pool, morphoAddr } = await deployWithMorpho();
+      const id1 = mkId(1);
+      await manager.setPoolMarkets(pool, [id1]);
+      await manager.setPoolMarkets(pool, []); // delist, now tracked-but-inactive
+      await morpho.setPosition(id1, pool, 0n, 0n, 100n); // nonzero collateral
+
+      await expect(manager.pruneTrackedMarket(pool, morphoAddr, id1)).to.be.revertedWith(
+        'Market not empty',
+      );
+    });
+
+    it('pruneTrackedMarket removes an empty, delisted market and emits TrackedMarketPruned', async () => {
+      const { manager, morpho, pool, morphoAddr } = await deployWithMorpho();
+      const id1 = mkId(1);
+      const id2 = mkId(2);
+      await manager.setPoolMarkets(pool, [id1, id2]);
+      await manager.setPoolMarkets(pool, [id2]); // delist id1
+      await morpho.setPosition(id1, pool, 0n, 0n, 0n);
+
+      await expect(manager.pruneTrackedMarket(pool, morphoAddr, id1))
+        .to.emit(manager, 'TrackedMarketPruned')
+        .withArgs(pool, id1);
+
+      expect(await manager.isTrackedPoolMarket(pool, id1)).to.equal(false);
+      expect(await manager.getTrackedPoolMarketsLength(pool)).to.equal(1n);
+      const tracked = await manager.getTrackedPoolMarkets(pool);
+      expect([...tracked]).to.deep.equal([id2]);
+    });
+
+    it('re-adding a pruned market via setPoolMarkets re-tracks it', async () => {
+      const { manager, morpho, pool, morphoAddr } = await deployWithMorpho();
+      const id1 = mkId(1);
+      await manager.setPoolMarkets(pool, [id1]);
+      await manager.setPoolMarkets(pool, []);
+      await morpho.setPosition(id1, pool, 0n, 0n, 0n);
+      await manager.pruneTrackedMarket(pool, morphoAddr, id1);
+      expect(await manager.isTrackedPoolMarket(pool, id1)).to.equal(false);
+
+      await manager.setPoolMarkets(pool, [id1]);
+
+      expect(await manager.isValidPoolMarket(pool, id1)).to.equal(true);
+      expect(await manager.isTrackedPoolMarket(pool, id1)).to.equal(true);
+      expect(await manager.getTrackedPoolMarketsLength(pool)).to.equal(1n);
+    });
+  });
 });

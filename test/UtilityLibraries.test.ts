@@ -1193,7 +1193,7 @@ describe('Utility libraries', () => {
       await morpho.setMarket(marketParams, [1_000_000n, 1_000_000n, 1_000_000n, 1_000_000n, 0n, 0n]);
       await morphoManager.setPoolMarkets(pool, [marketId]);
       await morpho.setPosition(marketId, pool, position[0], position[1], position[2]);
-      return { morphoChecks, morpho, morphoManager, token6, token18, pool };
+      return { morphoChecks, morpho, morphoManager, token6, token18, pool, marketId };
     }
 
     it('passes asset removal for empty positions and rejects non-empty positions', async () => {
@@ -1212,6 +1212,48 @@ describe('Utility libraries', () => {
           nonEmpty.pool,
         ),
       ).to.be.revertedWithCustomError(nonEmpty.morphoChecks, 'PositionNotEmpty');
+    });
+
+    // FNA-52: removeAssetCheck/removeTokenCheck previously enumerated getPoolMarkets() (the
+    // active allowlist) instead of the tracked set. Delisting a market with an open position
+    // would make it invisible to these checks entirely — silently reporting "empty"/"removable"
+    // for a market that still holds real collateral/supply/debt. Registers the market as
+    // TRACKED-ONLY (never added to the active allowlist at all) via setTrackedPoolMarket()
+    // directly, rather than setPoolMarkets()+delisting — this mock's setPoolMarkets() is
+    // additive-only for the active list, so it can't itself simulate a market that was in the
+    // active enumeration and then dropped out of it; registering tracked-only reproduces the
+    // same end state (in the tracked set, absent from the active one) that a real delisting
+    // leaves behind.
+    it('FNA-52: still detects a non-empty position for a tracked-but-delisted market (removeAssetCheck reads the tracked set, not the active allowlist)', async () => {
+      const { morphoChecks, morpho, morphoManager, token6, token18, trader } =
+        await loadFixture(deployLibrariesFixture);
+      const pool = await trader.getAddress();
+      const marketParams: [string, string, string, string, bigint] = [
+        await token6.getAddress(),
+        await token18.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+        ethers.parseEther('0.8'),
+      ];
+      const marketId = await morpho.marketId(marketParams);
+      await morpho.setMarket(marketParams, [1_000_000n, 1_000_000n, 1_000_000n, 1_000_000n, 0n, 0n]);
+      await morpho.setPosition(marketId, pool, 1n, 0n, 0n);
+
+      // Tracked but never actively allowlisted — the state a real delisting (setPoolMarkets()
+      // omitting this market from a replacement list) leaves behind.
+      await morphoManager.setTrackedPoolMarket(pool, marketId, true);
+      expect(await morphoManager.isValidPoolMarket(pool, marketId)).to.equal(false);
+      expect(await morphoManager.isTrackedPoolMarket(pool, marketId)).to.equal(true);
+
+      // The position is still open, so removal must still be blocked despite never (or no
+      // longer) being on the active allowlist.
+      await expect(
+        morphoChecks.removeAssetCheck(
+          await morpho.getAddress(),
+          await morphoManager.getAddress(),
+          pool,
+        ),
+      ).to.be.revertedWithCustomError(morphoChecks, 'PositionNotEmpty');
     });
 
     it('checks token removability across collateral, supply, borrow, and unrelated tokens', async () => {

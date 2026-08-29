@@ -32,6 +32,22 @@ import { SharesMathLib } from "@morpho-org/morpho-blue/src/libraries/SharesMathL
 
 /// @title MorphoBlueContractGuard
 /// @notice Guard for Morpho Blue core operations, enforcing Frgmnt security rules.
+/// @dev The `MorphoBlueManager` market allowlist check differs by direction (FNA-52):
+///       - Entry-side operations (`_handleSupply`, `_handleBorrow`, `_handleSupplyCollateral`,
+///         `_handleLiquidate`) require the market to be in the protocol owner's ACTIVE allowlist
+///         (`isValidPoolMarket`) — new exposure (more supply, more debt, more collateral, or an
+///         opportunistic liquidation of someone else's position) may only go into markets
+///         currently sanctioned by governance.
+///       - Exit-side operations (`_handleWithdraw`, `_handleRepay`, `_handleWithdrawCollateral`)
+///         require only that the market be TRACKED (`isTrackedPoolMarket`), a superset that also
+///         includes markets the protocol owner has since delisted. Gating these on the active
+///         allowlist instead — as a single shared check once did — would mean a delisted
+///         market's debt could never be repaid nor its supply/collateral withdrawn through this
+///         manual execTransaction path, contradicting `MorphoCollectLib`'s own valuation and
+///         debt/withdrawal-planning functions (which already read the tracked set) and leaving
+///         the position stuck until governance re-adds the market. See `MorphoBlueManager`'s
+///         contract-level documentation for why tracked/active are governed by two separate
+///         mappings.
 contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITransactionTypes {
     /// @notice Morpho Blue Manager contract
     address public immutable morphoManager;
@@ -282,8 +298,8 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 
         Id marketParamsId = MarketParamsLib.id(mp);
         require(
-            IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
-            "MorphoGuard: no valid marketParams"
+            IMorphoBlueManager(morphoManager).isTrackedPoolMarket(poolLogic, marketParamsId),
+            "MorphoGuard: market not tracked"
         );
         require(mgr.isSupportedAsset(mp.loanToken), "MorphoGuard: unsupported loanToken");
         require(onBehalf == poolLogic, "MorphoGuard: onBehalf != pool");
@@ -347,8 +363,8 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 
         Id marketParamsId = MarketParamsLib.id(mp);
         require(
-            IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
-            "MorphoGuard: no valid marketParams"
+            IMorphoBlueManager(morphoManager).isTrackedPoolMarket(poolLogic, marketParamsId),
+            "MorphoGuard: market not tracked"
         );
 
         require(mgr.isSupportedAsset(mp.loanToken), "MorphoGuard: unsupported loanToken");
@@ -396,8 +412,8 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
 
         Id marketParamsId = MarketParamsLib.id(mp);
         require(
-            IMorphoBlueManager(morphoManager).isValidPoolMarket(poolLogic, marketParamsId),
-            "MorphoGuard: no valid marketParams"
+            IMorphoBlueManager(morphoManager).isTrackedPoolMarket(poolLogic, marketParamsId),
+            "MorphoGuard: market not tracked"
         );
 
         require(
