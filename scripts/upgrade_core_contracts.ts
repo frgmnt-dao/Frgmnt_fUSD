@@ -81,6 +81,14 @@ import { ethers, upgrades } from 'hardhat';
 //      cover the current live fUSD totalSupply (~97,188.41 as of 2026-08-06) with
 //      room left for actual new deposits — 500,000 leaves ~402,811.59 of headroom.
 //
+// A THIRD, UNRELATED GOVERNANCE_SAFE CALL (FNA-50), added to the same eoaBatch below but not
+// bundled with any upgrade: AssetHandler.setSequencerUptimeFeed() — confirmed still unset on
+// the live proxy (2026-08-30), which makes the sequencer-down grace-period check in
+// _checkSequencerUp() a permanent no-op. Unlike the two migration calls above, this doesn't
+// need atomicity with the AssetHandler upgrade — setSequencerUptimeFeed() already exists on
+// the CURRENT live implementation — so it's issued as its own plain transaction directly
+// against the proxy rather than through upgradeAndCall's data parameter.
+//
 // LIBRARY LINKING: PoolLogic links FundCalculationLibrary, PoolTxExecutor, and
 // CallResultChecker at compile time. The first two changed since audit and are
 // redeployed here; CallResultChecker is unchanged (confirmed via diff) and reused.
@@ -127,6 +135,19 @@ const EXISTING_CALL_RESULT_CHECKER = '0x1574827fF626CD70eE5c2AD8fA20Ccf4e999156c
 // Product decision, confirmed 2026-08-06: 500,000 fUSD. Comfortably above the live
 // totalSupply (~97,188.41 as of 2026-08-06), leaving ~402,811.59 of new deposit headroom.
 const NEW_DEPOSIT_FUSD_CAP = ethers.parseUnits('500000', 18); // 18-decimal fUSD units
+
+// FNA-50: confirmed via direct eth_call against the live AssetHandler proxy (2026-08-30) that
+// sequencerUptimeFeed() is still the zero address — the sequencer-down grace-period check has
+// been a silent no-op since deployment. This is Chainlink's canonical L2 Sequencer Uptime Feed
+// for Base (see docs/deployments.md). setSequencerUptimeFeed() is an ordinary onlyOwner call on
+// AssetHandler itself (already present on the CURRENT live implementation, predating this
+// upgrade — "FRG-52"), not part of the upgrade's storage/logic changes, so it does not need to
+// be bundled into upgradeAndCall's post-upgrade data: a plain GOVERNANCE_SAFE transaction
+// directly against the proxy (added to eoaBatch below) is simpler and avoids the transparent
+// proxy's admin-vs-owner msg.sender distinction entirely (GOVERNANCE_SAFE is AssetHandler's own
+// Ownable owner, confirmed on-chain, not the ProxyAdmin contract that would otherwise appear as
+// msg.sender if this were bundled through ASSET_HANDLER_PROXY_ADMIN.upgradeAndCall instead).
+const SEQUENCER_UPTIME_FEED = '0xBCF85224fc0756B9Fa45aA7892530B47e10b6433';
 
 async function main() {
   if (NEW_DEPOSIT_FUSD_CAP === 0n) {
@@ -225,6 +246,7 @@ async function main() {
   // no window where the proxy is upgraded but the pool is left non-functional.
   // -----------------------------------------------------------------------
   const assetHandlerAdmin = await ethers.getContractAt('ProxyAdmin', ASSET_HANDLER_PROXY_ADMIN, signer);
+  const assetHandler = await ethers.getContractAt('AssetHandler', ASSET_HANDLER_PROXY, signer);
   const poolManagerLogicAdmin = await ethers.getContractAt(
     'ProxyAdmin',
     POOL_MANAGER_LOGIC_PROXY_ADMIN,
@@ -263,6 +285,13 @@ async function main() {
     initializeAutoCompoundingCalldata,
   ]);
 
+  // FNA-50: plain call on the AssetHandler proxy itself, NOT routed through
+  // ASSET_HANDLER_PROXY_ADMIN — see the SEQUENCER_UPTIME_FEED comment above for why.
+  const setSequencerUptimeFeedCalldata = assetHandler.interface.encodeFunctionData(
+    'setSequencerUptimeFeed',
+    [SEQUENCER_UPTIME_FEED],
+  );
+
   if (process.env.SEND === '1') {
     console.log('\nSEND=1 set — signing and broadcasting all four upgrades directly with the local signer.');
     await (
@@ -281,6 +310,7 @@ async function main() {
     await (
       await poolLogicAdmin.upgradeAndCall(POOL_LOGIC_PROXY, newPoolLogicImplAddress, initializeAutoCompoundingCalldata)
     ).wait();
+    await (await assetHandler.setSequencerUptimeFeed(SEQUENCER_UPTIME_FEED)).wait();
     console.log('Done.');
     return;
   }
@@ -296,7 +326,7 @@ async function main() {
   const eoaBatch = {
     signer: GOVERNANCE_SAFE,
     note:
-      'GOVERNANCE_SAFE is a single EOA, not a multisig — these two transactions must ' +
+      'GOVERNANCE_SAFE is a single EOA, not a multisig — these three transactions must ' +
       'be reviewed and signed directly by whoever holds that key, e.g. via a hardware ' +
       'wallet.',
     transactions: [
@@ -311,6 +341,18 @@ async function main() {
         to: POOL_MANAGER_LOGIC_PROXY_ADMIN,
         value: '0',
         data: poolManagerLogicUpgradeCalldata,
+      },
+      {
+        // FNA-50: a plain call directly on the AssetHandler PROXY (not its ProxyAdmin) —
+        // GOVERNANCE_SAFE is AssetHandler's own Ownable owner, confirmed on-chain. Order
+        // relative to the AssetHandler upgrade above doesn't matter: setSequencerUptimeFeed()
+        // already exists on the currently-live implementation.
+        description:
+          'AssetHandler: set L2 sequencer uptime feed (FNA-50 — currently unset, disabling ' +
+          'the sequencer-down grace period entirely)',
+        to: ASSET_HANDLER_PROXY,
+        value: '0',
+        data: setSequencerUptimeFeedCalldata,
       },
     ],
   };

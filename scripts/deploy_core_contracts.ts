@@ -37,6 +37,15 @@ const TIMELOCK_DELAY_SECONDS = 48n * 60n * 60n;
 const EUR_USD_TIMEOUT_SECONDS = 24n * 60n * 60n;
 const EUR_USD_FEED = process.env.EUR_USD_FEED ?? '';
 
+// FNA-50: Chainlink's canonical L2 Sequencer Uptime Feed for Base (see docs/deployments.md).
+// AssetHandler.initialize() never configures this, and setSequencerUptimeFeed() is onlyOwner,
+// so without setting it here — before ownership moves to GOVERNANCE_SAFE — the sequencer-down
+// grace-period check in _checkSequencerUp() is a silent no-op until a separate owner
+// transaction enables it. Set unconditionally, not product-gated like EUR_USD_FEED: Base is
+// this deployment's only target chain regardless of PRODUCT.
+const SEQUENCER_UPTIME_FEED =
+  process.env.SEQUENCER_UPTIME_FEED ?? '0xBCF85224fc0756B9Fa45aA7892530B47e10b6433';
+
 const INITIAL_ASSETS: { asset: string; assetType: number; aggregator: string }[] = [];
 
 // ============================================================
@@ -86,6 +95,7 @@ async function main() {
   assertAddress('GOVERNANCE_SAFE', GOVERNANCE_SAFE);
   assertAddress('POOL_MANAGER_ADDRESS', POOL_MANAGER_ADDRESS);
   assertAddress('EMERGENCY_ADDRESS', EMERGENCY_ADDRESS);
+  assertAddress('SEQUENCER_UPTIME_FEED', SEQUENCER_UPTIME_FEED);
 
   let eurUsdFeed: Awaited<ReturnType<typeof validateEurUsdFeed>> | undefined;
   if (PRODUCT === 'EUR') {
@@ -199,6 +209,26 @@ async function main() {
     nonce++;
     console.log('AssetHandler locked in raw-USD mode');
   }
+
+  // FNA-50: make the L2 sequencer uptime grace-period check a deployment invariant instead of
+  // an opt-in the operator can forget — set here, while the deployer still owns AssetHandler,
+  // and verify it actually landed before ownership moves anywhere. Failing the whole deploy
+  // script here is deliberate: a deployment that "succeeds" with this silently unset is the
+  // exact bug this finding describes.
+  await sendTxWithRetry(
+    () => assetHandler.setSequencerUptimeFeed(SEQUENCER_UPTIME_FEED, txOpts()),
+    'AssetHandler.setSequencerUptimeFeed',
+  );
+  nonce++;
+  const configuredSequencerFeed = await assetHandler.sequencerUptimeFeed();
+  if (configuredSequencerFeed.toLowerCase() !== SEQUENCER_UPTIME_FEED.toLowerCase()) {
+    throw new Error(
+      `AssetHandler.sequencerUptimeFeed() is ${configuredSequencerFeed} after ` +
+        `setSequencerUptimeFeed, expected ${SEQUENCER_UPTIME_FEED} — aborting before ` +
+        'ownership transfer',
+    );
+  }
+  console.log('AssetHandler sequencer uptime feed configured:', configuredSequencerFeed);
 
   // FNA-01: AssetHandler.initialize() runs __Ownable_init(msg.sender), so without this the
   // deployer key — not GOVERNANCE_SAFE — would end up owning price-feed configuration
