@@ -110,4 +110,107 @@ describe('AaveV4TokenizationManager', () => {
     expect(await manager.isValidPoolVault(poolA, vault)).to.equal(true);
     expect(await manager.isValidPoolVault(poolB, vault)).to.equal(false);
   });
+
+  // -----------------------------------------------------------------------
+  // FNA-51: trackedPoolVaults / pruneTrackedVault
+  // -----------------------------------------------------------------------
+  describe('FNA-51: tracked vaults survive delisting', () => {
+    async function deployWithVault() {
+      const base = await deploy();
+      const VaultFactory = await ethers.getContractFactory('MockAaveV4TokenizationSpoke');
+      const underlying = ethers.Wallet.createRandom().address;
+      const vault = await VaultFactory.deploy(underlying);
+      await vault.waitForDeployment();
+      const vaultAddr = await vault.getAddress();
+      const pool = ethers.Wallet.createRandom().address;
+      return { ...base, vault, vaultAddr, pool };
+    }
+
+    it('setPoolVaults also tracks newly-authorized vaults', async () => {
+      const { manager } = await deploy();
+      const pool = ethers.Wallet.createRandom().address;
+      const vault1 = ethers.Wallet.createRandom().address;
+      const vault2 = ethers.Wallet.createRandom().address;
+
+      await manager.setPoolVaults(pool, [vault1, vault2]);
+
+      expect(await manager.isTrackedPoolVault(pool, vault1)).to.equal(true);
+      expect(await manager.isTrackedPoolVault(pool, vault2)).to.equal(true);
+      expect(await manager.getTrackedPoolVaultsLength(pool)).to.equal(2n);
+      const tracked = await manager.getTrackedPoolVaults(pool);
+      expect([...tracked]).to.have.members([vault1, vault2]);
+    });
+
+    it('delisting a vault clears isValidPoolVault but leaves it tracked', async () => {
+      const { manager } = await deploy();
+      const pool = ethers.Wallet.createRandom().address;
+      const vault1 = ethers.Wallet.createRandom().address;
+      const vault2 = ethers.Wallet.createRandom().address;
+
+      await manager.setPoolVaults(pool, [vault1, vault2]);
+      await manager.setPoolVaults(pool, [vault2]); // delist vault1
+
+      expect(await manager.isValidPoolVault(pool, vault1)).to.equal(false);
+      expect(await manager.isTrackedPoolVault(pool, vault1)).to.equal(true);
+      expect(await manager.getTrackedPoolVaultsLength(pool)).to.equal(2n);
+    });
+
+    it('pruneTrackedVault reverts if the vault was never tracked', async () => {
+      const { manager, pool, vaultAddr } = await deployWithVault();
+      await expect(manager.pruneTrackedVault(pool, vaultAddr)).to.be.revertedWith('Not tracked');
+    });
+
+    it('pruneTrackedVault reverts while the vault is still actively allowed', async () => {
+      const { manager, pool, vaultAddr } = await deployWithVault();
+      await manager.setPoolVaults(pool, [vaultAddr]);
+
+      await expect(manager.pruneTrackedVault(pool, vaultAddr)).to.be.revertedWith('Still active');
+    });
+
+    it('pruneTrackedVault reverts if the pool still holds a nonzero share balance', async () => {
+      const { manager, vault, pool, vaultAddr } = await deployWithVault();
+      await manager.setPoolVaults(pool, [vaultAddr]);
+      await manager.setPoolVaults(pool, []); // delist, now tracked-but-inactive
+      await vault.mintShares(pool, 100n);
+
+      await expect(manager.pruneTrackedVault(pool, vaultAddr)).to.be.revertedWith(
+        'Vault not empty',
+      );
+    });
+
+    it('pruneTrackedVault removes an empty, delisted vault and emits TrackedVaultPruned', async () => {
+      const { manager, pool, vaultAddr } = await deployWithVault();
+      const VaultFactory = await ethers.getContractFactory('MockAaveV4TokenizationSpoke');
+      const underlying2 = ethers.Wallet.createRandom().address;
+      const vault2 = await VaultFactory.deploy(underlying2);
+      await vault2.waitForDeployment();
+      const vault2Addr = await vault2.getAddress();
+
+      await manager.setPoolVaults(pool, [vaultAddr, vault2Addr]);
+      await manager.setPoolVaults(pool, [vault2Addr]); // delist vaultAddr
+
+      await expect(manager.pruneTrackedVault(pool, vaultAddr))
+        .to.emit(manager, 'TrackedVaultPruned')
+        .withArgs(pool, vaultAddr);
+
+      expect(await manager.isTrackedPoolVault(pool, vaultAddr)).to.equal(false);
+      expect(await manager.getTrackedPoolVaultsLength(pool)).to.equal(1n);
+      const tracked = await manager.getTrackedPoolVaults(pool);
+      expect([...tracked]).to.deep.equal([vault2Addr]);
+    });
+
+    it('re-adding a pruned vault via setPoolVaults re-tracks it', async () => {
+      const { manager, pool, vaultAddr } = await deployWithVault();
+      await manager.setPoolVaults(pool, [vaultAddr]);
+      await manager.setPoolVaults(pool, []);
+      await manager.pruneTrackedVault(pool, vaultAddr);
+      expect(await manager.isTrackedPoolVault(pool, vaultAddr)).to.equal(false);
+
+      await manager.setPoolVaults(pool, [vaultAddr]);
+
+      expect(await manager.isValidPoolVault(pool, vaultAddr)).to.equal(true);
+      expect(await manager.isTrackedPoolVault(pool, vaultAddr)).to.equal(true);
+      expect(await manager.getTrackedPoolVaultsLength(pool)).to.equal(1n);
+    });
+  });
 });

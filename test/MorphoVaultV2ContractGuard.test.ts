@@ -133,6 +133,136 @@ describe('MorphoVaultV2ContractGuard', () => {
   });
 
   // -----------------------------------------------------------------------
+  // FNA-51: delisting a vault must not block exiting an existing position
+  // -----------------------------------------------------------------------
+  describe('FNA-51: exit-side operations survive vault delisting', () => {
+    it('deposit still reverts once the vault is delisted (entry side stays gated on the active allowlist)', async () => {
+      const {
+        guard,
+        poolLogicSigner,
+        morphoVaultV2Manager,
+        poolManagerAddr,
+        vaultAddr,
+        poolLogicAddr,
+      } = await deploy();
+      await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, []); // delist
+
+      const data = vaultIface.encodeFunctionData('deposit', [100n, poolLogicAddr]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: vault not whitelisted');
+    });
+
+    it('mint still reverts once the vault is delisted (entry side stays gated on the active allowlist)', async () => {
+      const {
+        guard,
+        poolLogicSigner,
+        morphoVaultV2Manager,
+        poolManagerAddr,
+        vaultAddr,
+        poolLogicAddr,
+      } = await deploy();
+      await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, []); // delist
+
+      const data = vaultIface.encodeFunctionData('mint', [100n, poolLogicAddr]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: vault not whitelisted');
+    });
+
+    it('withdraw still succeeds once the vault is delisted, since it remains tracked', async () => {
+      const {
+        guard,
+        poolLogicSigner,
+        morphoVaultV2Manager,
+        poolManagerAddr,
+        vaultAddr,
+        poolLogicAddr,
+      } = await deploy();
+      await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, []); // delist
+      expect(await morphoVaultV2Manager.isValidPoolVault(poolLogicAddr, vaultAddr)).to.equal(false);
+      expect(await morphoVaultV2Manager.isTrackedPoolVault(poolLogicAddr, vaultAddr)).to.equal(true);
+
+      const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, poolLogicAddr]);
+      await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+        .to.emit(guard, 'MorphoVaultV2WithdrawEvt')
+        .withArgs(poolLogicAddr, vaultAddr, 200n, anyValue);
+    });
+
+    it('redeem still succeeds once the vault is delisted, since it remains tracked', async () => {
+      const {
+        guard,
+        poolLogicSigner,
+        morphoVaultV2Manager,
+        poolManagerAddr,
+        vaultAddr,
+        poolLogicAddr,
+      } = await deploy();
+      await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, []); // delist
+
+      const data = vaultIface.encodeFunctionData('redeem', [300n, poolLogicAddr, poolLogicAddr]);
+      await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+        .to.emit(guard, 'MorphoVaultV2RedeemEvt')
+        .withArgs(poolLogicAddr, vaultAddr, 300n, anyValue);
+    });
+
+    it('forceDeallocate-then-redeem via multicall still succeeds once the vault is delisted', async () => {
+      const {
+        guard,
+        poolLogicSigner,
+        morphoVaultV2Manager,
+        poolManagerAddr,
+        vault,
+        vaultAddr,
+        poolLogicAddr,
+        adapter,
+      } = await deploy();
+      await vault.setAdapter(adapter.address, true);
+      await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, []); // delist
+
+      const forceDeallocateCall = vaultIface.encodeFunctionData('forceDeallocate', [
+        adapter.address,
+        '0x',
+        100n,
+        poolLogicAddr,
+      ]);
+      const redeemCall = vaultIface.encodeFunctionData('redeem', [
+        300n,
+        poolLogicAddr,
+        poolLogicAddr,
+      ]);
+      const data = vaultIface.encodeFunctionData('multicall', [[forceDeallocateCall, redeemCall]]);
+
+      await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
+        .to.emit(guard, 'MorphoVaultV2RedeemEvt')
+        .withArgs(poolLogicAddr, vaultAddr, 300n, anyValue);
+    });
+
+    it('withdraw reverts "vault not tracked" for a vault that was never whitelisted at all (never tracked)', async () => {
+      const { guard, poolLogicSigner, poolManager, poolManagerAddr, poolLogicAddr } = await deploy();
+      const VaultFactory = await ethers.getContractFactory('MockMorphoVaultV2');
+      const Token = await ethers.getContractFactory('MockERC20Custom');
+      const otherUnderlying = await Token.deploy('DAI', 'DAI', 18);
+      await otherUnderlying.waitForDeployment();
+      const neverListedVault = await VaultFactory.deploy(await otherUnderlying.getAddress());
+      await neverListedVault.waitForDeployment();
+      const neverListedVaultAddr = await neverListedVault.getAddress();
+      await poolManager.setSupportedAsset(neverListedVaultAddr, true);
+      await poolManager.setSupportedAsset(await otherUnderlying.getAddress(), true);
+      // Deliberately never added to morphoVaultV2Manager.setPoolVaults for this pool.
+
+      const data = vaultIface.encodeFunctionData('withdraw', [
+        200n,
+        poolLogicAddr,
+        poolLogicAddr,
+      ]);
+      await expect(
+        callGuard(guard, poolLogicSigner, poolManagerAddr, neverListedVaultAddr, data),
+      ).to.be.revertedWith('MorphoVaultV2Guard: vault not tracked');
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // deposit
   // -----------------------------------------------------------------------
 
