@@ -53,6 +53,11 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    amount by `IHubBase.getAssetLiquidity`, so one under-liquid reserve sizes its own share
 ///    down instead of `withdraw` reverting and taking every other reserve (and every
 ///    other asset in the pool) down with it via PoolLogic's single atomic withdrawal transaction.
+///    The FNA-07 follow-up's `HubLiquidityLedger` dedupes this across reserves *within this
+///    guard's own multi-reserve loop* — it does NOT cover a separate AaveV4TokenizationAssetGuard
+///    vault drawing from the exact same `(hub, assetId)`; see that guard's own contract-level
+///    documentation for the full reasoning (a symmetric, deliberately out-of-scope gap, tracked
+///    there so it only needs stating once).
 ///  - FNA-15: `withdrawProcessing` calls `ISpoke.withdraw` directly rather than routing through
 ///    Aave's TakerPositionManager. PoolLogic always dispatches these calls from its own address,
 ///    so the position owner and the caller are the same address — Aave's own
@@ -122,6 +127,26 @@ contract AaveV4SpokeAssetGuard is
         address spoke;
         address to;
         uint256 withdrawPortion;
+    }
+
+    /// @dev CertiK FNA-07 follow-up: per-call-frame ledger of Hub-level liquidity already
+    ///      attributed to earlier reserves within the same getWithdrawableBalance() or
+    ///      withdrawProcessing() call. This guard services any number of Spokes/reserves under
+    ///      one instance, and two different reserveIds (even across different Spoke instances)
+    ///      can resolve to the same underlying (hub, assetId) pair. Without this ledger, each
+    ///      reserve independently sees the Hub's full IHubBase.getAssetLiquidity(assetId) as
+    ///      available to it alone (_capByAvailableLiquidity used to query it fresh, uncoordinated,
+    ///      per reserve), so the sum of what two reserves together attempt to withdraw could
+    ///      exceed what the Hub can actually deliver in one transaction. Sized to
+    ///      reserveIds.length — the maximum possible number of distinct (hub, assetId) pairs a
+    ///      single call can encounter — and linear-scanned: that count is small (bounded by
+    ///      AaveV4SpokeManager's per-pool reserve allowlist), so an O(n^2) scan over a
+    ///      view-only, non-security-critical-for-gas path is the simplest correct approach.
+    struct HubLiquidityLedger {
+        address[] hubs;
+        uint256[] assetIds;
+        uint256[] claimed;
+        uint256 count;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -340,8 +365,15 @@ contract AaveV4SpokeAssetGuard is
             spoke
         );
 
+        HubLiquidityLedger memory ledger = _newHubLiquidityLedger(reserveIds.length);
         for (uint256 i = 0; i < reserveIds.length; ++i) {
-            (uint256 value, ) = _reserveWithdrawableValueUsd(pool, spoke, poolManagerLogic, reserveIds[i]);
+            (uint256 value, ) = _reserveWithdrawableValueUsd(
+                pool,
+                spoke,
+                poolManagerLogic,
+                reserveIds[i],
+                ledger
+            );
             balanceUsd18 += value;
         }
     }
@@ -353,11 +385,15 @@ contract AaveV4SpokeAssetGuard is
 
     /// @dev Same fault-isolation contract as _reserveValueUsd, but values
     ///      min(suppliedAssets, availableLiquidity) instead of the full suppliedAssets claim.
+    ///      `ledger` is threaded through so two reserves sharing the same (hub, assetId) within
+    ///      this same call can't each independently claim the same Hub liquidity — see
+    ///      HubLiquidityLedger's own documentation.
     function _reserveWithdrawableValueUsd(
         address pool,
         address spoke,
         address poolManagerLogic,
-        uint256 reserveId
+        uint256 reserveId,
+        HubLiquidityLedger memory ledger
     ) internal view returns (uint256, bool) {
         uint256 suppliedAssets;
         try ISpoke(spoke).getUserSuppliedAssets(reserveId, pool) returns (uint256 a) {
@@ -368,6 +404,7 @@ contract AaveV4SpokeAssetGuard is
         if (suppliedAssets == 0) return (0, true);
 
         (address underlying, uint256 withdrawableAssets) = _capByAvailableLiquidity(
+            ledger,
             spoke,
             reserveId,
             suppliedAssets
@@ -573,9 +610,10 @@ contract AaveV4SpokeAssetGuard is
             to: to,
             withdrawPortion: withdrawPortion
         });
+        HubLiquidityLedger memory ledger = _newHubLiquidityLedger(reserveIds.length);
 
         for (uint256 i = 0; i < reserveIds.length; ++i) {
-            n = _appendReserveWithdrawTxs(ctx, reserveIds[i], txs, n);
+            n = _appendReserveWithdrawTxs(ctx, reserveIds[i], txs, n, ledger);
         }
 
         assembly {
@@ -609,12 +647,14 @@ contract AaveV4SpokeAssetGuard is
         WithdrawCtx memory ctx,
         uint256 reserveId,
         MultiTransaction[] memory txs,
-        uint256 n
+        uint256 n,
+        HubLiquidityLedger memory ledger
     ) internal view returns (uint256) {
         uint256 suppliedAssets = ISpoke(ctx.spoke).getUserSuppliedAssets(reserveId, ctx.pool);
         if (suppliedAssets == 0) return n;
 
         (address underlying, uint256 withdrawableAssets) = _capByAvailableLiquidity(
+            ledger,
             ctx.spoke,
             reserveId,
             suppliedAssets
@@ -657,6 +697,7 @@ contract AaveV4SpokeAssetGuard is
     ///      liquidity (skip this reserve, don't block the rest of the withdrawal) rather than
     ///      reverting, consistent with this fix's whole purpose.
     function _capByAvailableLiquidity(
+        HubLiquidityLedger memory ledger,
         address spoke,
         uint256 reserveId,
         uint256 suppliedAssets
@@ -673,7 +714,67 @@ contract AaveV4SpokeAssetGuard is
         } catch {
             availableLiquidity = 0;
         }
-        withdrawableAssets = suppliedAssets < availableLiquidity ? suppliedAssets : availableLiquidity;
+
+        // CertiK FNA-07 follow-up: `availableLiquidity` above is the Hub's *total* liquidity for
+        // this (hub, assetId) — not what's left after an earlier reserve in this same call
+        // already counted on some of it. _remainingHubLiquidity nets that out; recording this
+        // reserve's own claim afterwards is what makes the next reserve (if any) see a correctly
+        // reduced figure, closing the double-count CertiK flagged.
+        uint256 remaining = _remainingHubLiquidity(ledger, hub, assetId, availableLiquidity);
+        withdrawableAssets = suppliedAssets < remaining ? suppliedAssets : remaining;
+        _recordHubLiquidityClaim(ledger, hub, assetId, withdrawableAssets);
+    }
+
+    /// @dev Allocates a fresh, empty ledger sized for at most `maxEntries` distinct (hub,
+    ///      assetId) pairs — see HubLiquidityLedger's own documentation for why that bound is
+    ///      `reserveIds.length`.
+    function _newHubLiquidityLedger(
+        uint256 maxEntries
+    ) internal pure returns (HubLiquidityLedger memory ledger) {
+        ledger.hubs = new address[](maxEntries);
+        ledger.assetIds = new uint256[](maxEntries);
+        ledger.claimed = new uint256[](maxEntries);
+    }
+
+    /// @dev Returns how much of `totalAvailable` remains unclaimed by any earlier reserve
+    ///      sharing this exact (hub, assetId) pair within `ledger`. Read-only — pairs with
+    ///      _recordHubLiquidityClaim below, which the caller must invoke afterwards with the
+    ///      amount it actually decided to claim (at most this function's own return value), or
+    ///      the ledger will under-count what's left for subsequent reserves.
+    function _remainingHubLiquidity(
+        HubLiquidityLedger memory ledger,
+        address hub,
+        uint256 assetId,
+        uint256 totalAvailable
+    ) internal pure returns (uint256) {
+        for (uint256 i = 0; i < ledger.count; ++i) {
+            if (ledger.hubs[i] == hub && ledger.assetIds[i] == assetId) {
+                return totalAvailable > ledger.claimed[i] ? totalAvailable - ledger.claimed[i] : 0;
+            }
+        }
+        return totalAvailable;
+    }
+
+    /// @dev Records `amount` as claimed against (hub, assetId) in `ledger`, creating a new entry
+    ///      the first time this pair is seen. `ledger` is a memory struct passed by reference, so
+    ///      this mutation is visible to every subsequent call sharing the same ledger instance
+    ///      within the same getWithdrawableBalance()/withdrawProcessing() call.
+    function _recordHubLiquidityClaim(
+        HubLiquidityLedger memory ledger,
+        address hub,
+        uint256 assetId,
+        uint256 amount
+    ) internal pure {
+        for (uint256 i = 0; i < ledger.count; ++i) {
+            if (ledger.hubs[i] == hub && ledger.assetIds[i] == assetId) {
+                ledger.claimed[i] += amount;
+                return;
+            }
+        }
+        ledger.hubs[ledger.count] = hub;
+        ledger.assetIds[ledger.count] = assetId;
+        ledger.claimed[ledger.count] = amount;
+        ledger.count++;
     }
 
     /// @dev Resolves a reserve's underlying token, Hub, and Hub-side assetId via a raw

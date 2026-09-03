@@ -279,6 +279,32 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     return [loanToken, collateralToken, ethers.ZeroAddress, ethers.ZeroAddress, 0n];
   }
 
+  // CertiK FNA-07 follow-up test helpers: mirror Morpho Blue's real SharesMathLib exactly
+  // (confirmed against github.com/morpho-org/morpho-blue, VIRTUAL_SHARES=1e6, VIRTUAL_ASSETS=1)
+  // rather than hand-computing expected raw-asset amounts, since the virtual-shares offset is
+  // NOT negligible at the share counts these tests otherwise use (e.g. 1_000_000 supplyShares is
+  // the same order of magnitude as VIRTUAL_SHARES itself) — hand-picked "obvious" numbers like
+  // supplyShares == totalSupplyShares do NOT convert 1:1 to assets once the offset is included.
+  const VIRTUAL_SHARES = 1_000_000n;
+  const VIRTUAL_ASSETS = 1n;
+  const PORTION_DENOMINATOR = 10n ** 18n;
+
+  function toAssetsDown(shares: bigint, totalAssets: bigint, totalShares: bigint): bigint {
+    return (shares * (totalAssets + VIRTUAL_ASSETS)) / (totalShares + VIRTUAL_SHARES);
+  }
+
+  function toSharesDown(assets: bigint, totalAssets: bigint, totalShares: bigint): bigint {
+    return (assets * (totalShares + VIRTUAL_SHARES)) / (totalAssets + VIRTUAL_ASSETS);
+  }
+
+  /// Mirrors _maxSafePortion's per-market ratio exactly, for one already-identified constrained
+  /// supply market (fullSupplyAssets computed via toAssetsDown above).
+  function maxPortionForMarket(availableLiquidity: bigint, fullSupplyAssets: bigint): bigint {
+    if (fullSupplyAssets === 0n) return PORTION_DENOMINATOR;
+    if (availableLiquidity >= fullSupplyAssets) return PORTION_DENOMINATOR;
+    return (availableLiquidity * PORTION_DENOMINATOR) / fullSupplyAssets;
+  }
+
   function encodeFlashloanParams(
     withdrawPortion: bigint,
     settlementToken: string,
@@ -502,6 +528,235 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // CertiK FNA-07 follow-up: getWithdrawableBalance (liquidity-capped counterpart to
+  // getBalance()) and its uniform-ceiling effect on withdrawProcessing.
+  //
+  // Confirmed against Morpho Blue's real source (github.com/morpho-org/morpho-blue,
+  // Morpho.sol): withdraw() (the supply leg) requires
+  // market[id].totalBorrowAssets <= market[id].totalSupplyAssets, i.e. genuinely liquidity-
+  // constrained by other users' borrowing. withdrawCollateral() has NO such check — only the
+  // position's own collateral balance and resulting health factor — because Morpho Blue
+  // collateral is isolated per-position, never pooled/shared the way supply is. So only supply
+  // can ever constrain _maxSafePortion, but the resulting ceiling is still applied uniformly to
+  // debt repayment and collateral withdrawal too (see _maxSafePortion's own documentation).
+  // -----------------------------------------------------------------------
+
+  describe('CertiK FNA-07 follow-up: getWithdrawableBalance', () => {
+    it('isWithdrawableBalanceGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
+    });
+
+    it('matches getBalance() when the market has enough available supply liquidity', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+        {
+          totalSupplyAssets: 1_000_000n,
+          totalSupplyShares: 1_000_000n,
+          totalBorrowAssets: 0n,
+          totalBorrowShares: 0n,
+        },
+      );
+      await morpho.setPosition(id, poolAddress, 1_000_000n, 0n, 0n);
+
+      const full = await guard.getBalance(poolAddress, ethers.ZeroAddress);
+      expect(full).to.be.gt(0n);
+      expect(await guard.getWithdrawableBalance(poolAddress, ethers.ZeroAddress)).to.equal(full);
+    });
+
+    it('is capped below getBalance() when the market\'s available supply liquidity is insufficient', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      // Only 20% of total supply is actually available (80% borrowed out by others).
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+        {
+          totalSupplyAssets: 1_000_000n,
+          totalSupplyShares: 1_000_000n,
+          totalBorrowAssets: 800_000n,
+          totalBorrowShares: 800_000n,
+        },
+      );
+      await morpho.setPosition(id, poolAddress, 1_000_000n, 0n, 0n);
+
+      const full = await guard.getBalance(poolAddress, ethers.ZeroAddress);
+      const withdrawable = await guard.getWithdrawableBalance(poolAddress, ethers.ZeroAddress);
+
+      const fullSupplyAssets = toAssetsDown(1_000_000n, 1_000_000n, 1_000_000n);
+      const availableLiquidity = 1_000_000n - 800_000n;
+      const expectedPortion = maxPortionForMarket(availableLiquidity, fullSupplyAssets);
+      expect(expectedPortion).to.be.lt(PORTION_DENOMINATOR); // sanity: the market really constrains
+      expect(withdrawable).to.equal((full * expectedPortion) / PORTION_DENOMINATOR);
+      expect(withdrawable).to.be.lt(full);
+    });
+
+    it('is NOT capped by a pure collateral-only position, even when the market has zero available supply liquidity', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      // Default totals: supply == borrow, i.e. zero available supply liquidity in this market —
+      // but the pool holds ONLY collateral here (no supply shares), which real Morpho Blue never
+      // liquidity-constrains (confirmed against source above).
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+      );
+      await morpho.setPosition(id, poolAddress, 0n, 0n, ethers.parseEther('2'));
+
+      const full = await guard.getBalance(poolAddress, ethers.ZeroAddress);
+      expect(full).to.be.gt(0n);
+      expect(await guard.getWithdrawableBalance(poolAddress, ethers.ZeroAddress)).to.equal(full);
+    });
+  });
+
+  describe('CertiK FNA-07 follow-up: withdrawProcessing liquidity cap', () => {
+    it('no-debt case: caps BOTH supply and collateral withdrawal uniformly when only supply is under-liquid', async () => {
+      const { guard, morpho, morphoManager, morphoAddr, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      // Only 30% of supply is actually liquid; collateral itself is never liquidity-constrained,
+      // but the uniform ceiling still applies to it too — see this guard's own documentation.
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+        {
+          totalSupplyAssets: 1_000_000n,
+          totalSupplyShares: 1_000_000n,
+          totalBorrowAssets: 700_000n,
+          totalBorrowShares: 700_000n,
+        },
+      );
+      const collateral = ethers.parseEther('2');
+      await morpho.setPosition(id, poolAddress, 1_000_000n, 0n, collateral);
+
+      const [, , txs] = await guard.withdrawProcessing.staticCall(
+        poolAddress,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18), // 100% requested
+        ethers.Wallet.createRandom().address,
+      );
+
+      expect(txs.length).to.equal(2);
+      const iface = new ethers.Interface([
+        'function withdraw(tuple(address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) mp, uint256 assets, uint256 shares, address onBehalf, address receiver)',
+        'function withdrawCollateral(tuple(address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) mp, uint256 assets, address onBehalf, address receiver)',
+      ]);
+      const supplyDecoded = iface.decodeFunctionData('withdraw', txs[0].txData);
+      const collateralDecoded = iface.decodeFunctionData('withdrawCollateral', txs[1].txData);
+
+      const fullSupplyAssets = toAssetsDown(1_000_000n, 1_000_000n, 1_000_000n);
+      const availableLiquidity = 1_000_000n - 700_000n;
+      const expectedPortion = maxPortionForMarket(availableLiquidity, fullSupplyAssets);
+      expect(expectedPortion).to.be.lt(PORTION_DENOMINATOR); // sanity: the market really constrains
+
+      // Supply shares withdrawn, scaled by the capped portion (mulPortionRoundDown: floor).
+      expect(supplyDecoded[2]).to.equal((1_000_000n * expectedPortion) / PORTION_DENOMINATOR);
+      // Collateral withdrawn, scaled by the SAME capped portion — even though collateral
+      // withdrawal itself was never the constrained leg. A naive "cap only the constrained leg"
+      // design would have withdrawn the full 2 WETH here instead.
+      expect(collateralDecoded[1]).to.equal((collateral * expectedPortion) / PORTION_DENOMINATOR);
+      expect(collateralDecoded[1]).to.be.lt(collateral);
+    });
+
+    // CertiK FNA-07 follow-up, the critical invariant: when a debt-bearing position is
+    // liquidity-constrained (via an unrelated supply-only market sharing the same flashloan
+    // repayment), debt repayment and the flashloan sizing that funds it must scale down by the
+    // SAME ceiling as everything else — never left at the full, uncapped portion, or the
+    // flashloan could come back under-funded (see this guard's own documentation).
+    it('with-debt case: the SAME capped portion is applied to debt repayment and the flashloan, not just supply', async () => {
+      const { guard, morpho, morphoManager, morphoAddr, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+
+      // Market A: pure debt (no supply/collateral here) — the position being unwound.
+      const { id: debtMarketId } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+      );
+      await morpho.setPosition(debtMarketId, poolAddress, 0n, 400_000n, 0n);
+
+      // Market B: an unrelated supply-only position, only 25% liquid right now — this is the
+      // sole source of the liquidity constraint on the WHOLE unwind.
+      const { id: supplyMarketId } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await weth.getAddress(),
+        await usdc.getAddress(),
+        {
+          totalSupplyAssets: ethers.parseEther('1'),
+          totalSupplyShares: ethers.parseEther('1'),
+          totalBorrowAssets: ethers.parseEther('0.75'),
+          totalBorrowShares: ethers.parseEther('0.75'),
+        },
+      );
+      await morpho.setPosition(supplyMarketId, poolAddress, ethers.parseEther('1'), 0n, 0n);
+
+      const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
+        poolAddress,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18), // 100% requested
+        ethers.Wallet.createRandom().address,
+      );
+
+      expect(withdrawAsset).to.equal(await usdc.getAddress());
+      expect(txs.length).to.equal(1);
+      expect(txs[0].to).to.equal(morphoAddr);
+
+      const morphoIface = new ethers.Interface([
+        'function flashLoan(address token, uint256 assets, bytes calldata data)',
+      ]);
+      const decoded = morphoIface.decodeFunctionData('flashLoan', txs[0].txData);
+      const [, innerParams] = ethers.AbiCoder.defaultAbiCoder().decode(
+        ['address', 'bytes'],
+        decoded[2],
+      );
+      const [fp] = ethers.AbiCoder.defaultAbiCoder().decode(
+        [
+          'tuple(uint256 withdrawPortion,address settlementToken,uint256 slippageBps,tuple(bytes32 id,tuple(address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) mp,uint256 repayBorrowShares,uint256 repayAssetsEst)[] debts,tuple(bytes32 id,tuple(address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) mp,uint256 withdrawSupplyShares,uint256 withdrawAssetsEst)[] supplies,tuple(bytes32 id,tuple(address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) mp,uint256 withdrawCollateral)[] collaterals)',
+        ],
+        innerParams,
+      );
+
+      const oneEther = ethers.parseEther('1');
+      const fullSupplyAssets = toAssetsDown(oneEther, oneEther, oneEther);
+      const availableLiquidity = oneEther - ethers.parseEther('0.75');
+      const expectedPortion = maxPortionForMarket(availableLiquidity, fullSupplyAssets);
+      expect(expectedPortion).to.be.lt(PORTION_DENOMINATOR); // sanity: the market really constrains
+      expect(expectedPortion).to.be.closeTo(ethers.parseUnits('0.25', 18), 1_000_000n); // ~25%, virtual-shares dust aside
+
+      // The portion baked into the flashloan callback params is the CAPPED ~25% (from the
+      // unrelated supply market), not the requested 100% — proving debt sizing on Market A was
+      // scaled down to match, not left uncapped while only supply on Market B shrank.
+      expect(fp.withdrawPortion).to.equal(expectedPortion);
+      // Debt repayment: 400,000 borrowShares * expectedPortion, rounded UP (mulPortionRoundUp).
+      const expectedRepay = (400_000n * expectedPortion + (PORTION_DENOMINATOR - 1n)) / PORTION_DENOMINATOR;
+      expect(fp.debts[0].repayBorrowShares).to.equal(expectedRepay);
+    });
+  });
+
   it('removeTokenCheck returns true when the token is not used by Morpho positions', async () => {
     const { guard, morpho, morphoManager, usdc, weth } = await deploy();
     const Token = await ethers.getContractFactory('MockERC20Custom');
@@ -526,12 +781,22 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const { guard, morpho, morphoManager, morphoAddr, usdc, weth } = await deploy();
     const pool = await deployAssetPool([usdc, weth]);
     const poolAddress = await pool.getAddress();
+    // CertiK FNA-07 follow-up: withdrawProcessing now caps by the market's real available supply
+    // liquidity (totalSupplyAssets - totalBorrowAssets). setupMarket()'s default totals have
+    // supply == borrow (0 available) specifically to keep unrelated tests simple — override here
+    // so this test still exercises the uncapped direct-withdraw path it's meant to.
     const { id } = await setupMarket(
       morpho,
       morphoManager,
       poolAddress,
       await usdc.getAddress(),
       await weth.getAddress(),
+      {
+        totalSupplyAssets: 1_000_000n,
+        totalSupplyShares: 1_000_000n,
+        totalBorrowAssets: 0n,
+        totalBorrowShares: 0n,
+      },
     );
     await morpho.setPosition(id, poolAddress, 1_000_000n, 0n, ethers.parseEther('2'));
 

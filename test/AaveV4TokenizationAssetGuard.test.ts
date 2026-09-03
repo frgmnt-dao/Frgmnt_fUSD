@@ -264,6 +264,82 @@ describe('AaveV4TokenizationAssetGuard', () => {
   });
 
   // -----------------------------------------------------------------------
+  // getWithdrawableBalance (CertiK FNA-07 follow-up: liquidity-capped counterpart to
+  // getBalance(), used by immediate-withdrawal NAV/portion sizing)
+  // -----------------------------------------------------------------------
+
+  describe('getWithdrawableBalance', () => {
+    it('isWithdrawableBalanceGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
+    });
+
+    it('returns 0 when the pool holds no shares', async () => {
+      const { guard, poolAddr, vaultAddr } = await deploy();
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
+    });
+
+    it('matches getBalance() when the Hub is fully liquid (no cap set)', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+
+      const shares = ethers.parseUnits('1000', 18);
+      const assetsPerShare = 1_000_000n;
+      await vault.mintShares(poolAddr, shares);
+      await vault.setAssetsPerShare(assetsPerShare);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      const full = await guard.getBalance(poolAddr, vaultAddr);
+      expect(full).to.equal(ethers.parseUnits('1000', 18));
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(full);
+    });
+
+    it('is capped below getBalance() when the Hub\'s available liquidity is below the pool\'s claim', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+
+      const shares = ethers.parseUnits('1000', 18);
+      const assetsPerShare = 1_000_000n; // 1e18 shares : 1e6 USDC, 1:1
+      await vault.mintShares(poolAddr, shares);
+      await vault.setAssetsPerShare(assetsPerShare);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      // Only 20% of the position is actually liquid right now.
+      await vault.setAvailableLiquidity(ethers.parseUnits('200', 6));
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(ethers.parseUnits('1000', 18));
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(
+        ethers.parseUnits('200', 18),
+      );
+    });
+
+    it('degrades to 0 (does not revert) when hub() fails', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      await vault.setAssetsPerShare(1_000_000n); // 1e18 shares : 1e6 USDC, 1:1
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await vault.setBrokenHub(true);
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
+      // getBalance() (the full claim) is unaffected — only the withdrawable variant degrades.
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(ethers.parseUnits('1000', 18));
+    });
+
+    it('degrades to 0 (does not revert) when the Hub liquidity query itself fails', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      await vault.setAssetsPerShare(1_000_000n);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await vault.setBrokenLiquidity(true);
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(ethers.parseUnits('1000', 18));
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // getDecimals
   // -----------------------------------------------------------------------
 
@@ -402,6 +478,27 @@ describe('AaveV4TokenizationAssetGuard', () => {
 
       expect(await vault.balanceOf(poolAddr)).to.equal(0n);
       expect(await usdc.balanceOf(poolAddr)).to.equal(ethers.parseUnits('1000', 6));
+    });
+
+    // CertiK FNA-07 follow-up: caps the requested redeem share amount by the Hub's real
+    // available liquidity, so this call never asks for more than the Hub can currently return.
+    it('caps sharesToRedeem by available liquidity when the position is not fully liquid', async () => {
+      const { guard, poolAddr, vault, vaultAddr } = await deploy();
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      // 1:1 assetsPerShare (default) — 200 USDC of liquidity == 200e18 withdrawable shares.
+      await vault.setAvailableLiquidity(ethers.parseUnits('200', 18));
+
+      const portion = ethers.parseUnits('1', 18); // 100% of the (liquidity-capped) NAV
+      const [, , txs] = await guard.withdrawProcessing(poolAddr, vaultAddr, portion, poolAddr);
+      expect(txs.length).to.equal(1);
+
+      const vaultIface = new ethers.Interface([
+        'function redeem(uint256 shares, address receiver, address owner) returns (uint256)',
+      ]);
+      const decoded = vaultIface.decodeFunctionData('redeem', txs[0].txData);
+      // Not 1000e18 (the full share balance) — capped to the liquid amount instead.
+      expect(decoded[0]).to.equal(ethers.parseUnits('200', 18));
     });
   });
 

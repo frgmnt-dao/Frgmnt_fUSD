@@ -21,6 +21,7 @@ import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckingGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IDeficitReportingGuard } from "../../interfaces/guards/IDeficitReportingGuard.sol";
+import { IWithdrawableBalanceGuard } from "../../interfaces/guards/IWithdrawableBalanceGuard.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IMorphoBlueManager } from "../../interfaces/IMorphoBlueManager.sol";
 import { IERC20Extended } from "../../interfaces/IERC20Extended.sol";
@@ -49,7 +50,8 @@ contract MorphoBlueLendingPoolAssetGuard is
     IMorphoBlueLendingPoolAssetGuard,
     ISlippageCheckingGuard,
     IPreValuedAssetGuard,
-    IDeficitReportingGuard
+    IDeficitReportingGuard,
+    IWithdrawableBalanceGuard
 {
     /// @notice Required flag for dHEDGE slippage guards
     bool public override isSlippageCheckingGuard = true;
@@ -261,6 +263,97 @@ contract MorphoBlueLendingPoolAssetGuard is
         return MorphoChecksLib.removeTokenCheck(morpho, morphoManager, pool, token);
     }
 
+    /// @notice Liquidity-capped counterpart to getBalance() — see IWithdrawableBalanceGuard.
+    /// @dev CertiK FNA-07 follow-up. Confirmed against Morpho Blue's real source
+    ///      (github.com/morpho-org/morpho-blue, Morpho.sol): `withdraw()` (the supply leg)
+    ///      requires `market[id].totalBorrowAssets <= market[id].totalSupplyAssets` after the
+    ///      withdrawal, i.e. it is genuinely liquidity-constrained by other users' borrowing.
+    ///      `withdrawCollateral()` has NO such cross-user check — only the position's own
+    ///      collateral balance and its resulting health factor — because Morpho Blue collateral
+    ///      is isolated per-position, never pooled/shared the way supply is. So only the supply
+    ///      leg can ever need this cap; see _maxSafePortion's own documentation for why the
+    ///      resulting ceiling is still applied uniformly to debt repayment and collateral
+    ///      withdrawal too, not just supply.
+    ///
+    ///      No cost-haircut layer exists for this guard yet (unlike Aave V3's FNA-35
+    ///      getNetRealizableBalance()) — this scales the plain gross getBalance() figure, not a
+    ///      net-of-unwind-cost one. Adding that haircut here is a separate, un-filed gap, not
+    ///      addressed by this fix — see the contract-level documentation comment above.
+    function getWithdrawableBalance(
+        address pool,
+        address asset
+    ) external view override returns (uint256 balanceUsd18) {
+        uint256 fullBalance = getBalance(pool, asset);
+        uint256 maxSafePortion = _maxSafePortion(pool);
+        balanceUsd18 = (fullBalance * maxSafePortion) / MorphoMathLib.PORTION_DENOMINATOR;
+    }
+
+    /// @notice See IWithdrawableBalanceGuard.
+    function isWithdrawableBalanceGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @dev Returns the single largest portion (<= PORTION_DENOMINATOR) safe to apply uniformly
+    ///      across this pool's entire Morpho Blue position — debt repayment, supply withdrawal,
+    ///      AND collateral withdrawal alike. Only iterates the supply leg (see
+    ///      getWithdrawableBalance's own documentation for why collateral never constrains this),
+    ///      but the resulting ceiling still bounds collateral/debt sizing too: this guard bundles
+    ///      every tracked market's unwind into ONE flashloan when any debt exists (see
+    ///      withdrawProcessing), repaid entirely from swapping back everything withdrawn —
+    ///      collateral AND supply together. A supply-only shortfall on one unrelated market could
+    ///      otherwise under-fund that same flashloan's repayment if debt/collateral sizing on a
+    ///      different market were left at the full, uncapped portion — a worse, harder-to-
+    ///      diagnose revert than the plain liquidity revert this fix exists to avoid. Applying one
+    ///      shared ceiling everywhere avoids that regardless of which markets are involved.
+    ///
+    ///      SECOND-PASS AUDIT NOTE (considered, deliberately not "fixed" further): Morpho Blue's
+    ///      `supply()` lets anyone credit supply shares to an arbitrary `onBehalf` address
+    ///      permissionlessly, so a third party could donate a tiny supply position onto this
+    ///      pool in any market it already tracks (including a delisted-but-still-tracked one, per
+    ///      FNA-51) that happens to be near-fully-utilized right now — zeroing this whole guard's
+    ///      contribution to *immediate* withdrawals until the donated shares are cleared or that
+    ///      market's liquidity recovers. Same shape and same conclusion as the equivalent note in
+    ///      AaveLendingPoolAssetGuard._maxSafePortion: a size-based dust tolerance would not
+    ///      meaningfully help (the binding constraint is a liquidity *ratio*, not the position's
+    ///      absolute size), a real fix needs USD-value weighting and a new governance-tunable
+    ///      threshold, and the practical severity is low — the queued withdrawal path never
+    ///      consults this cap at all, and the manager can clear donated dust directly via a plain
+    ///      Morpho withdraw()/withdrawCollateral() call through execTransaction at any time. Left
+    ///      as a documented, accepted residual risk rather than a code change.
+    function _maxSafePortion(address pool) internal view returns (uint256 portion) {
+        Id[] memory mids = IMorphoBlueManager(morphoManager).getTrackedPoolMarkets(pool);
+        portion = MorphoMathLib.PORTION_DENOMINATOR;
+
+        for (uint256 i; i < mids.length; i++) {
+            Position memory p = IMorpho(morpho).position(mids[i], pool);
+            if (p.supplyShares == 0) continue;
+
+            MarketParams memory mp = IMorpho(morpho).idToMarketParams(mids[i]);
+            (
+                uint256 totalSupplyAssets,
+                uint256 totalSupplyShares,
+                uint256 totalBorrowAssets,
+
+            ) = MorphoCollectLib._getAccruedMarketTotals(morpho, mp);
+
+            uint256 fullSupplyAssets = SharesMathLib.toAssetsDown(
+                p.supplyShares,
+                totalSupplyAssets,
+                totalSupplyShares
+            );
+            if (fullSupplyAssets == 0) continue;
+
+            uint256 availableLiquidity = totalSupplyAssets > totalBorrowAssets
+                ? totalSupplyAssets - totalBorrowAssets
+                : 0;
+            if (availableLiquidity >= fullSupplyAssets) continue; // doesn't constrain
+
+            uint256 maxPortionForThisMarket = (availableLiquidity *
+                MorphoMathLib.PORTION_DENOMINATOR) / fullSupplyAssets;
+            if (maxPortionForThisMarket < portion) portion = maxPortionForThisMarket;
+        }
+    }
+
     /*//////////////////////////////////////////////////////////////
                       WITHDRAW PROCESSING
   //////////////////////////////////////////////////////////////*/
@@ -278,16 +371,28 @@ contract MorphoBlueLendingPoolAssetGuard is
         }
         if (to == address(0)) revert ToZero();
 
+        // CertiK FNA-07 follow-up: never request more supply from any market than it can
+        // currently pay out — see _maxSafePortion's own documentation for why this single,
+        // uniform ceiling is also applied to debt repayment and collateral withdrawal, not just
+        // supply. getWithdrawableBalance() already sized the caller's requested withdrawPortion
+        // against this same ceiling at the NAV level; recomputing it here keeps this function
+        // correct on its own, against live on-chain state at execution time.
+        uint256 effectivePortion = withdrawPortion;
+        {
+            uint256 maxSafe = _maxSafePortion(pool);
+            if (maxSafe < effectivePortion) effectivePortion = maxSafe;
+        }
+
         // Collect debt and supply plans
         (MorphoCollectLib.DebtPlan[] memory debts, bool hasDebt) = _collectDebts(
             pool,
-            withdrawPortion
+            effectivePortion
         );
-        MorphoCollectLib.SupplyPlan[] memory supplies = _collectSupplies(pool, withdrawPortion);
+        MorphoCollectLib.SupplyPlan[] memory supplies = _collectSupplies(pool, effectivePortion);
 
         MorphoCollectLib.CollateralPlan[] memory collaterals = _collectCollaterals(
             pool,
-            withdrawPortion
+            effectivePortion
         );
 
         // No debt → direct withdraw
@@ -306,7 +411,7 @@ contract MorphoBlueLendingPoolAssetGuard is
         );
 
         FlashloanParams memory fp = FlashloanParams({
-            withdrawPortion: withdrawPortion,
+            withdrawPortion: effectivePortion,
             settlementToken: settlementToken,
             slippageBps: defaultSlippageBps,
             debts: debts,

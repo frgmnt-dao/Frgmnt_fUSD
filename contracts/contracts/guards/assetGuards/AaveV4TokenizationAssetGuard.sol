@@ -9,12 +9,15 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 
 import { IAaveV4TokenizationManager } from "../../interfaces/IAaveV4TokenizationManager.sol";
+import { ITokenizationSpoke } from "../../interfaces/aave/v4/ITokenizationSpoke.sol";
+import { IHubBase } from "../../interfaces/aave/v4/IHubBase.sol";
 import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
+import { IWithdrawableBalanceGuard } from "../../interfaces/guards/IWithdrawableBalanceGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -36,11 +39,30 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    AaveV4TokenizationManager whitelist — a vault must remain valuable and exitable even if
 ///    governance later revokes it from the whitelist; only *new* exposure
 ///    (AaveV4TokenizationContractGuard, and `addAssetCheck` below) is gated by the whitelist.
+///  - CertiK FNA-07 follow-up: `getWithdrawableBalance`/`withdrawProcessing` cap the redeemable
+///    share amount by `IHubBase.getAssetLiquidity` for this vault's `(hub, assetId)` — see
+///    `_capSharesByAvailableLiquidity`. Unlike Morpho Vault V2 (whose only liquidity signal,
+///    `maxRedeem()`, canonically always returns 0 — see MorphoVaultV2AssetGuard's own FNA-25
+///    documentation for why that guard's equivalent cap was removed rather than kept),
+///    `IHubBase.getAssetLiquidity` is a real, non-reverting liquidity read with no known false
+///    -zero failure mode, so this cap does not carry that same risk.
+///  - KNOWN RESIDUAL GAP (not fixed here): this cap is only aware of *this guard's own* vault.
+///    A TokenizationSpoke deposits directly into a Hub, and a pool could separately also hold an
+///    AaveV4SpokeAssetGuard reserve drawing from the *same* underlying `(hub, assetId)` — the two
+///    guards are separate contracts with no shared state, so within one withdrawal transaction
+///    each could independently see the Hub's full liquidity as available and, together, attempt
+///    to withdraw more than the Hub can actually deliver. AaveV4SpokeAssetGuard's own ledger
+///    (see HubLiquidityLedger) only dedupes *within* its own multi-reserve loop, not across guard
+///    contracts. Closing this fully needs a pool-level, cross-guard liquidity ledger shared for
+///    the duration of one withdrawal transaction — a materially larger change than either
+///    guard's own per-instance fix, deliberately out of scope here and left as a tracked
+///    follow-up rather than silently unaddressed.
 contract AaveV4TokenizationAssetGuard is
     ClosedAssetGuard,
     IAddAssetCheckGuard,
     IPreValuedAssetGuard,
-    IIncompleteValuationGuard
+    IIncompleteValuationGuard,
+    IWithdrawableBalanceGuard
 {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -182,7 +204,18 @@ contract AaveV4TokenizationAssetGuard is
         address pool,
         address asset
     ) internal view returns (uint256 balanceUsd18, bool complete) {
-        uint256 shares = IERC20(asset).balanceOf(pool);
+        return _valueShares(pool, asset, IERC20(asset).balanceOf(pool));
+    }
+
+    /// @dev Shared USD-valuation logic for an arbitrary share amount, factored out of
+    ///      _valuePosition so the liquidity-capped path below (_valueWithdrawablePosition) can
+    ///      reuse the exact same failure-path handling without disagreeing about which failures
+    ///      count as "incomplete" — same pattern as MorphoVaultV2AssetGuard._valueShares.
+    function _valueShares(
+        address pool,
+        address asset,
+        uint256 shares
+    ) internal view returns (uint256 balanceUsd18, bool complete) {
         if (shares == 0) return (0, true);
 
         address underlying;
@@ -226,6 +259,78 @@ contract AaveV4TokenizationAssetGuard is
         }
 
         return ((underlyingAmount * price) / (10 ** underlyingDecimals), true);
+    }
+
+    /// @notice Liquidity-capped counterpart to getBalance() — see IWithdrawableBalanceGuard.
+    /// @dev Values min(shares, _capSharesByAvailableLiquidity(shares)) — the share amount this
+    ///      vault could actually redeem right now, not just the pool's full claim (FNA-07
+    ///      follow-up). Shares the exact same capped-share figure withdrawProcessing() below
+    ///      actually redeems, so NAV/portion sizing and execution can never disagree.
+    /// @param pool Pool holding the vault shares.
+    /// @param asset Address of the Aave V4 TokenizationSpoke instance.
+    /// @return balanceUsd18 USD value of the pool's *withdrawable* share balance, 18 decimals.
+    function getWithdrawableBalance(
+        address pool,
+        address asset
+    ) external view override returns (uint256 balanceUsd18) {
+        (balanceUsd18, ) = _valueWithdrawablePosition(pool, asset);
+    }
+
+    /// @notice See IWithdrawableBalanceGuard.
+    function isWithdrawableBalanceGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    function _valueWithdrawablePosition(
+        address pool,
+        address asset
+    ) internal view returns (uint256, bool) {
+        uint256 shares = IERC20(asset).balanceOf(pool);
+        return _valueShares(pool, asset, _capSharesByAvailableLiquidity(asset, shares));
+    }
+
+    /// @dev Caps `shares` by the Hub's real available liquidity for this vault's underlying,
+    ///      converted into an equivalent share amount via convertToShares — mirrors
+    ///      AaveV4SpokeAssetGuard's asset-unit liquidity cap, adapted for TokenizationSpoke's
+    ///      ERC-4626 (share-denominated) redeem() interface. Any failure along the way (hub()/
+    ///      assetId() unresolvable, the Hub liquidity read itself reverting, or convertToShares
+    ///      reverting) degrades to a withdrawable amount of 0 for this vault rather than
+    ///      reverting — consistent with this guard's existing fault-isolation stance elsewhere.
+    function _capSharesByAvailableLiquidity(
+        address vault,
+        uint256 shares
+    ) internal view returns (uint256) {
+        if (shares == 0) return 0;
+
+        address hub;
+        uint256 assetId;
+        try ITokenizationSpoke(vault).hub() returns (address h) {
+            hub = h;
+        } catch {
+            return 0;
+        }
+        try ITokenizationSpoke(vault).assetId() returns (uint256 a) {
+            assetId = a;
+        } catch {
+            return 0;
+        }
+
+        uint256 availableLiquidity;
+        try IHubBase(hub).getAssetLiquidity(assetId) returns (uint256 l) {
+            availableLiquidity = l;
+        } catch {
+            return 0;
+        }
+        if (availableLiquidity == 0) return 0;
+
+        uint256 withdrawableShares;
+        try IERC4626(vault).convertToShares(availableLiquidity) returns (uint256 s) {
+            withdrawableShares = s;
+        } catch {
+            return 0;
+        }
+
+        return shares < withdrawableShares ? shares : withdrawableShares;
     }
 
     /// @notice AssetGuard balances are always expressed in USD (18 decimals).
@@ -316,10 +421,11 @@ contract AaveV4TokenizationAssetGuard is
     ///      exactly one underlying asset, so the single-`withdrawAsset` pattern is sufficient —
     ///      there is no multi-underlying aggregation problem to work around here.
     ///
-    ///      This intentionally only calls `redeem()` — it does not fall back to any alternate
-    ///      liquidity source if the Hub's available liquidity for this asset is insufficient. If
-    ///      `redeem()` reverts for that reason, the withdrawal reverts; this is the same risk
-    ///      class as an Aave V3/Morpho Blue market being fully utilized today.
+    ///      CertiK FNA-07 follow-up: `sharesToRedeem` is now sized against
+    ///      `_capSharesByAvailableLiquidity`'s output, not the full share balance — see the
+    ///      contract-level @dev above for the mechanism and its known residual (cross-guard,
+    ///      not cross-reserve) gap. `redeem()` is therefore never asked for more than the Hub can
+    ///      currently return *through this vault specifically*.
     /// @param pool Pool address.
     /// @param asset Address of the Aave V4 TokenizationSpoke instance.
     /// @param withdrawPortion Portion to withdraw, 1e18 = 100%.
@@ -344,7 +450,8 @@ contract AaveV4TokenizationAssetGuard is
         if (withdrawAsset == address(0)) revert InvalidUnderlying();
 
         uint256 shares = IERC20(asset).balanceOf(pool);
-        uint256 sharesToRedeem = (shares * withdrawPortion) / 1e18;
+        uint256 withdrawableShares = _capSharesByAvailableLiquidity(asset, shares);
+        uint256 sharesToRedeem = (withdrawableShares * withdrawPortion) / 1e18;
 
         if (sharesToRedeem == 0) {
             txs = new MultiTransaction[](0);

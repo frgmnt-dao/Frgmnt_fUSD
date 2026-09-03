@@ -8,6 +8,7 @@ import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckin
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IUnwindCostAwareGuard } from "../../interfaces/guards/IUnwindCostAwareGuard.sol";
 import { IDeficitReportingGuard } from "../../interfaces/guards/IDeficitReportingGuard.sol";
+import { IWithdrawableBalanceGuard } from "../../interfaces/guards/IWithdrawableBalanceGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
@@ -23,7 +24,8 @@ contract AaveV3LendingPoolAssetGuard is
     ISlippageCheckingGuard,
     IPreValuedAssetGuard,
     IUnwindCostAwareGuard,
-    IDeficitReportingGuard
+    IDeficitReportingGuard,
+    IWithdrawableBalanceGuard
 {
     // -----------------------------
     // Constants
@@ -241,6 +243,10 @@ contract AaveV3LendingPoolAssetGuard is
         address pool,
         address
     ) external view override returns (uint256 balance) {
+        balance = _netRealizableBalance(pool);
+    }
+
+    function _netRealizableBalance(address pool) internal view returns (uint256 balance) {
         (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
         if (totalCollateralInUsd <= totalDebtInUsd) return 0;
         uint256 gross = totalCollateralInUsd - totalDebtInUsd;
@@ -268,6 +274,96 @@ contract AaveV3LendingPoolAssetGuard is
         uint256 premiumUsd = (priceUsd * premiumInSettlement) / (10 ** decimals);
 
         balance = gross > premiumUsd ? gross - premiumUsd : 0;
+    }
+
+    /// @notice Liquidity-capped counterpart to getBalance()/getNetRealizableBalance() — see
+    ///         IWithdrawableBalanceGuard.
+    /// @dev CertiK FNA-07 follow-up. This position is leveraged (collateral + debt unwound via a
+    ///      single flashloan), unlike the no-debt integrations (Aave V4 Spoke/Tokenization,
+    ///      Morpho Vault V2) already fixed for FNA-07 — so a per-reserve independent cap is
+    ///      unsafe here: debt repayment and collateral withdrawal are scaled by the *same*
+    ///      withdrawPortion to keep the position's health factor unchanged across a partial
+    ///      exit, and the flashloan is repaid entirely from swapping withdrawn collateral back to
+    ///      the settlement token. If one reserve's collateral withdrawal were capped below
+    ///      withdrawPortion while debt repayment (and the flashloan sized to fund it) stayed at
+    ///      the full, uncapped portion, the flashloan could come back under-funded — the
+    ///      unwind reverting for a *worse*, harder-to-diagnose reason than the plain liquidity
+    ///      revert this fix exists to avoid. See _maxSafePortion's own documentation for the
+    ///      single, uniform ceiling this guard applies instead. Value here is
+    ///      netRealizableBalance (100%, cost-haircut-adjusted) scaled by that same ceiling,
+    ///      consistent with the linear-scaling assumption already used throughout this guard's
+    ///      debt/flashloan sizing math (_collectDebtPlans, _estimateFlashAmountInSettlement).
+    function getWithdrawableBalance(
+        address pool,
+        address
+    ) external view override returns (uint256 balanceUsd18) {
+        uint256 netRealizable = _netRealizableBalance(pool);
+        uint256 maxSafePortion = _maxSafePortion(pool);
+        balanceUsd18 = (netRealizable * maxSafePortion) / PORTION_DENOMINATOR;
+    }
+
+    /// @notice See IWithdrawableBalanceGuard.
+    function isWithdrawableBalanceGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @dev Confirmed against Aave V3's real source (github.com/aave/aave-v3-core,
+    ///      AToken.burn(): `IERC20(_underlyingAsset).safeTransfer(receiverOfUnderlying, amount)`)
+    ///      that a reserve's aToken contract pays out a withdrawal from its own raw underlying
+    ///      balance — ValidationLogic.validateWithdraw() itself only checks the caller's aToken
+    ///      balance, not reserve liquidity, so the real constraint lives in this downstream
+    ///      transfer, not a named "liquidity" check. `IERC20Extended(underlying).balanceOf(aToken)`
+    ///      is therefore exactly what a withdraw() call for that reserve can pay out right now.
+    ///
+    ///      Returns the single largest portion (<= PORTION_DENOMINATOR) safe to apply uniformly
+    ///      across every reserve's collateral withdrawal (and, by extension, debt repayment —
+    ///      see getWithdrawableBalance's own documentation for why this must be one shared
+    ///      ceiling, not a per-reserve independent cap). A reserve with no aToken position never
+    ///      constrains this ceiling.
+    ///
+    ///      SECOND-PASS AUDIT NOTE (considered, deliberately not "fixed" further): because the
+    ///      ceiling is shared across every reserve, an aToken is a plain transferable ERC20, and
+    ///      anyone can permissionlessly send an arbitrary amount of it to this pool's address, a
+    ///      third party could donate a tiny aToken balance for a reserve that (a) is already one
+    ///      of this pool's supportedAssets but (b) the pool never actually chose to supply to,
+    ///      timed while that reserve's real Aave market happens to be near-fully-utilized —
+    ///      zeroing this whole guard's contribution to *immediate* withdrawals until the donated
+    ///      balance is cleared or that market's liquidity recovers. A raw-balance dust tolerance
+    ///      (the pattern AaveV4SpokeAssetGuard uses) would NOT meaningfully close this: the
+    ///      binding constraint is the availableLiquidity/aTokenBalance *ratio*, which can be 0
+    ///      regardless of how large or small aTokenBalance is, so it would only raise the
+    ///      donation cost from ~1 wei to ~1 dust-threshold wei — still economically negligible.
+    ///      A real fix would need to weight each reserve's ability to constrain the ceiling by
+    ///      its own USD value (ignoring reserves below some minimum), adding real complexity and
+    ///      a new governance-tunable threshold for a low-severity issue: this only zeroes *this
+    ///      guard's* contribution to the *immediate* withdrawal path specifically — the queued
+    ///      withdrawal path never consults this at all (see IWithdrawableBalanceGuard's own
+    ///      documentation), and the manager can clear the donated dust directly via
+    ///      execTransaction (a plain Aave withdraw() call, independent of this cap) at any time.
+    ///      Left as a documented, accepted residual risk rather than a code change.
+    function _maxSafePortion(address pool) internal view returns (uint256 portion) {
+        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
+            IPoolLogic(pool).poolManagerLogic()
+        ).getSupportedAssets();
+
+        portion = PORTION_DENOMINATOR;
+
+        for (uint256 i = 0; i < supportedAssets.length; ++i) {
+            address underlying = supportedAssets[i].asset;
+
+            address aToken = IAaveV3Pool(aaveLendingPool).getReserveAToken(underlying);
+            if (aToken == address(0)) continue;
+
+            uint256 aTokenBalance = IERC20Extended(aToken).balanceOf(pool);
+            if (aTokenBalance == 0) continue;
+
+            uint256 availableLiquidity = IERC20Extended(underlying).balanceOf(aToken);
+            if (availableLiquidity >= aTokenBalance) continue; // this reserve doesn't constrain
+
+            uint256 maxPortionForThisReserve = (availableLiquidity * PORTION_DENOMINATOR) /
+                aTokenBalance;
+            if (maxPortionForThisReserve < portion) portion = maxPortionForThisReserve;
+        }
     }
 
     function getDecimals(address) external pure override returns (uint256) {
@@ -324,14 +420,27 @@ contract AaveV3LendingPoolAssetGuard is
         require(withdrawPortion <= PORTION_DENOMINATOR, "Frgmnt: bad portion");
         require(to != address(0), "Frgmnt: to=0");
 
+        // CertiK FNA-07 follow-up: never request more of any reserve than its aToken can
+        // currently pay out — see _maxSafePortion's own documentation for why this must be one
+        // uniform ceiling applied to both debt repayment and collateral withdrawal, not an
+        // independent per-reserve cap. getWithdrawableBalance() already sized the caller's
+        // requested withdrawPortion against this same ceiling at the NAV level; recomputing it
+        // here (rather than trusting the caller) keeps this function correct on its own, exactly
+        // matching live on-chain state at execution time.
+        uint256 effectivePortion = withdrawPortion;
+        {
+            uint256 maxSafe = _maxSafePortion(pool);
+            if (maxSafe < effectivePortion) effectivePortion = maxSafe;
+        }
+
         (DebtRepayPlan[] memory repayPlans, uint256 debtAssetCount) = _collectDebtPlans(
             pool,
-            withdrawPortion
+            effectivePortion
         );
 
         // No debt: withdraw collateral and transfer to user
         if (debtAssetCount == 0) {
-            transactions = _withdrawCollateralAndTransfer(pool, withdrawPortion, to);
+            transactions = _withdrawCollateralAndTransfer(pool, effectivePortion, to);
             return (address(0), 0, transactions);
         }
 
@@ -346,7 +455,7 @@ contract AaveV3LendingPoolAssetGuard is
         );
 
         FlashloanParams memory fp;
-        fp.withdrawPortion = withdrawPortion;
+        fp.withdrawPortion = effectivePortion;
         fp.settlementToken = settlementToken;
         fp.slippageBps = slippageBps;
         fp.repayPlans = repayPlans;

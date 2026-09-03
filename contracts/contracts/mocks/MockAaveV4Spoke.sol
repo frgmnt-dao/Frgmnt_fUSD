@@ -17,6 +17,13 @@ contract MockAaveV4Spoke {
     mapping(uint256 => mapping(address => uint256)) public suppliedAssets;
     mapping(uint256 => bool) public brokenReserve;
 
+    /// @dev CertiK FNA-07 follow-up (Hub-liquidity double-count test support): by default
+    ///      `getReserve` returns `assetId = reserveId`, so every reserveId is its own distinct
+    ///      (hub, assetId) pair. Overriding lets a test put two different reserveIds on the same
+    ///      assetId, simulating two reserves that share one real Hub-level liquidity pool.
+    mapping(uint256 => uint256) public reserveAssetIdOverride;
+    mapping(uint256 => bool) public assetIdOverrideSet;
+
     mapping(uint256 => uint256) public availableLiquidity;
     mapping(uint256 => bool) public liquidityCapSet;
     mapping(uint256 => bool) public brokenLiquidity;
@@ -52,6 +59,12 @@ contract MockAaveV4Spoke {
     ///      fault-isolation on a failed Hub liquidity query.
     function setBrokenLiquidity(uint256 reserveId, bool broken) external {
         brokenLiquidity[reserveId] = broken;
+    }
+
+    /// @dev Overrides getReserve(reserveId)'s returned assetId — see reserveAssetIdOverride.
+    function setReserveAssetId(uint256 reserveId, uint256 assetId_) external {
+        reserveAssetIdOverride[reserveId] = assetId_;
+        assetIdOverrideSet[reserveId] = true;
     }
 
     /// @dev Used by mock Giver/Taker position managers to credit/debit a position.
@@ -103,7 +116,7 @@ contract MockAaveV4Spoke {
     ) external view returns (address underlying, address hub, uint256 assetId) {
         underlying = reserveUnderlying[reserveId];
         hub = address(this);
-        assetId = reserveId;
+        assetId = assetIdOverrideSet[reserveId] ? reserveAssetIdOverride[reserveId] : reserveId;
     }
 
     // ----------------- IHubBase (subset) -----------------
