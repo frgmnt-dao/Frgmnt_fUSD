@@ -46,6 +46,27 @@ contract MockAssetGuard {
         return preValued;
     }
 
+    // CertiK FNA-45 follow-up: PoolManagerLogic.getAssetPrice() dispatches to this via a typed
+    // IPreValuedAssetGuard call once isPreValuedAssetGuard() above returns true. setUnitPriceReverts
+    // lets tests exercise the fail-closed path (a guard with no meaningful unit price, or a real
+    // share whose own pricing dependency failed) — defaults to false so existing tests that only
+    // exercise assetValue()'s own shortcut (which never calls getUnitPrice() at all) are unaffected.
+    uint256 public unitPrice;
+    bool public unitPriceReverts;
+
+    function setUnitPrice(uint256 _unitPrice) external {
+        unitPrice = _unitPrice;
+    }
+
+    function setUnitPriceReverts(bool _reverts) external {
+        unitPriceReverts = _reverts;
+    }
+
+    function getUnitPrice(address /*asset*/) external view returns (uint256) {
+        require(!unitPriceReverts, "MockAssetGuard: getUnitPrice reverts");
+        return unitPrice;
+    }
+
     // PoolManagerLogic.totalFundValueWithCompleteness() checks for this via low-level call,
     // mirroring isAddAssetCheckGuard()/isPreValuedAssetGuard() above. Defaults to false so
     // existing tests that don't call setIncompleteValuationGuard() are always treated as complete.

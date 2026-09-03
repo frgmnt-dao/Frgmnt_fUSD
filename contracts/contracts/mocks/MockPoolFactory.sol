@@ -25,10 +25,11 @@ contract MockPoolFactory {
         return contractGuards[target];
     }
 
-    // FNA-45: SlippageAccumulator.assetValue() now looks up an asset's guard the same way
-    // PoolManagerLogic.assetValue() does, to detect the IPreValuedAssetGuard marker. Defaults to
-    // address(0) for every asset, so existing tests that never call setAssetGuard() keep going
-    // through the price-multiplication path unchanged.
+    // CertiK FNA-45 follow-up: SlippageAccumulator.assetValue() no longer consults an asset's
+    // guard at all (the IPreValuedAssetGuard short-circuit was removed — see that function's own
+    // docs). Kept here only so SlippageAccumulator.test.ts can register a pre-valued-marked guard
+    // and assert pricing proceeds identically to any other asset, proving the guard is genuinely
+    // no longer consulted.
     function setAssetGuard(address asset, address guard) external {
         assetGuards[asset] = guard;
     }

@@ -184,6 +184,15 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
 
+  // CertiK FNA-45 follow-up: this guard's registered "asset" (the NonfungiblePositionManager
+  // address itself) is a non-transferable pseudo-position with no meaningful per-unit price —
+  // getUnitPrice() must revert unconditionally so PoolManagerLogic.getAssetPrice()'s dispatch
+  // fails closed rather than silently returning a misleading number for it.
+  it('getUnitPrice reverts unconditionally (pseudo-asset has no unit price)', async () => {
+    const { guard } = await deployReal();
+    await expect(guard.getUnitPrice(ethers.Wallet.createRandom().address)).to.be.reverted;
+  });
+
   it('removeTokenCheck returns true when no owned NFTs', async () => {
     const { guard } = await deployReal();
 

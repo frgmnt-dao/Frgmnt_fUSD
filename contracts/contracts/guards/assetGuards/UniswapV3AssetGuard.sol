@@ -245,6 +245,15 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
         return true;
     }
 
+    /// @notice CertiK FNA-45 follow-up: this guard's registered "asset" is the
+    ///         NonfungiblePositionManager address itself — a non-transferable pseudo-position,
+    ///         not a real ERC-20 with a meaningful per-unit price. Reverts unconditionally so
+    ///         PoolManagerLogic.getAssetPrice()'s dispatch (see IPreValuedAssetGuard) fails
+    ///         closed instead of silently returning a meaningless identity price for it.
+    function getUnitPrice(address) external pure override returns (uint256) {
+        revert("Frgmnt: no unit price for pseudo-asset");
+    }
+
     /// @notice FNA-48: blocks removing this position manager from supportedAssets while ANY
     ///         Uniswap V3 NFT position remains tracked for this pool — even one that has been
     ///         fully decreased and collected down to a zero balance.

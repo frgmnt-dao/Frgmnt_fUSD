@@ -13,6 +13,7 @@ import { ITokenizationSpoke } from "../../interfaces/aave/v4/ITokenizationSpoke.
 import { IHubBase } from "../../interfaces/aave/v4/IHubBase.sol";
 import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
+import { IERC20Extended } from "../../interfaces/IERC20Extended.sol";
 import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
@@ -75,6 +76,7 @@ contract AaveV4TokenizationAssetGuard is
     error UnderlyingNotPriced();
     error UnderlyingNotSupported();
     error VaultNotWhitelisted();
+    error ZeroUnitPrice();
 
     /*//////////////////////////////////////////////////////////////
                               IMMUTABLES
@@ -333,18 +335,62 @@ contract AaveV4TokenizationAssetGuard is
         return shares < withdrawableShares ? shares : withdrawableShares;
     }
 
-    /// @notice AssetGuard balances are always expressed in USD (18 decimals).
-    /// @dev Paired in AssetHandler with the fixed $1.00 USDPriceAggregator for this asset's
-    ///      registered price feed, so PoolManagerLogic.assetValue() resolves to exactly
-    ///      `getBalance()` (price=1e18, decimals=18).
-    function getDecimals(address) external pure override returns (uint256) {
-        return 18;
+    /// @notice Returns the vault share token's own decimals.
+    /// @dev CertiK FNA-45 follow-up: previously hardcoded 18 to match the placeholder $1.00
+    ///      USDPriceAggregator this asset is registered against for PoolManagerLogic.assetValue()
+    ///      — but that shortcut never actually consults getDecimals() at all (see assetValue()'s
+    ///      own docs), so the hardcoded value served no real purpose there and was simply wrong
+    ///      for any consumer that reads a pre-valued share's decimals directly. The vault share
+    ///      is a real, transferable ERC-20 with its own genuine decimals (getUnitPrice() below
+    ///      relies on this being accurate).
+    function getDecimals(address asset) external view override returns (uint256) {
+        return IERC20Extended(asset).decimals();
     }
 
     /// @notice getBalance() already returns a fully priced base-currency value; see
     ///         IPreValuedAssetGuard and PoolManagerLogic.assetValue().
     function isPreValuedAssetGuard() external pure override returns (bool) {
         return true;
+    }
+
+    /// @notice Values one whole vault share in USD (18 decimals) — see IPreValuedAssetGuard.
+    /// @dev CertiK FNA-45 follow-up: PoolManagerLogic.getAssetPrice() dispatches here for this
+    ///      asset instead of returning AssetHandler's placeholder $1.00 identity price, so a
+    ///      caller pricing the share directly (SlippageAccumulator.assetValue(), when a share is
+    ///      routed through the guarded Uniswap router) gets its real per-unit value instead of
+    ///      treating 1 share as always worth exactly $1.
+    ///
+    ///      Deliberately reverts on any failure rather than degrading to 0/false — unlike
+    ///      getBalance()/_valueShares() above, whose fail-open design exists specifically to
+    ///      protect totalFundValue()'s pool-wide availability from one bad vault, a caller asking
+    ///      for a unit price needs a trustworthy number to act on (size a slippage bound) or
+    ///      nothing at all: silently returning 0 here would size a slippage check against zero
+    ///      value and let an arbitrarily bad trade through, the opposite of fail-closed.
+    ///
+    ///      Uses `msg.sender` as the pricing context rather than taking a separate pool/
+    ///      poolManagerLogic parameter, matching getUnitPrice(address)'s single-argument
+    ///      interface signature — the only intended caller is PoolManagerLogic.getAssetPrice()
+    ///      itself (a plain, non-delegatecall external call, so msg.sender here is exactly that
+    ///      calling PoolManagerLogic instance). assetHandler/governance are shared globally
+    ///      across every pool in this single-deployment protocol, so any PoolManagerLogic
+    ///      instance resolves the same underlying price/decimals regardless of which pool asked.
+    function getUnitPrice(address asset) external view override returns (uint256) {
+        uint256 shareDecimals = IERC20Extended(asset).decimals();
+        uint256 oneShare = 10 ** uint256(shareDecimals);
+
+        address underlying = IERC4626(asset).asset();
+        if (underlying == address(0)) revert InvalidUnderlying();
+
+        uint256 underlyingAmount = IERC4626(asset).convertToAssets(oneShare);
+
+        uint256 price = IPoolManagerLogic(msg.sender).getAssetPrice(underlying);
+        if (price == 0) revert UnderlyingNotPriced();
+
+        uint256 underlyingDecimals = IPoolManagerLogic(msg.sender).assetDecimal(underlying);
+
+        uint256 unitPrice = (underlyingAmount * price) / (10 ** underlyingDecimals);
+        if (unitPrice == 0) revert ZeroUnitPrice();
+        return unitPrice;
     }
 
     /// @notice See IIncompleteValuationGuard.

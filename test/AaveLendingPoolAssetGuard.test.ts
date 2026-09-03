@@ -357,6 +357,15 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
 
+  // CertiK FNA-45 follow-up: this guard's registered "asset" (the Aave lending pool address
+  // itself) is a non-transferable pseudo-position with no meaningful per-unit price —
+  // getUnitPrice() must revert unconditionally so PoolManagerLogic.getAssetPrice()'s dispatch
+  // fails closed rather than silently returning a misleading number for it.
+  it('getUnitPrice reverts unconditionally (pseudo-asset has no unit price)', async () => {
+    const { guard } = await deploy();
+    await expect(guard.getUnitPrice(ethers.Wallet.createRandom().address)).to.be.reverted;
+  });
+
   it('getBalance returns 0 when no Aave positions', async () => {
     const { guard, aavePool } = await deploy();
 

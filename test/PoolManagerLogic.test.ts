@@ -884,6 +884,49 @@ describe('PoolManagerLogic', () => {
       });
     });
 
+    // CertiK FNA-45 follow-up: AssetHandler's registered feed for a pre-valued asset is only a
+    // placeholder $1.00 identity aggregator — getAssetPrice() must not return that for a
+    // transferable pre-valued share (worth more or less than $1/unit). It now dispatches to the
+    // guard's own IPreValuedAssetGuard.getUnitPrice() instead, and propagates that guard's
+    // revert (rather than silently falling back to the identity price) when pricing isn't
+    // available — the concrete consumer this closes is SlippageAccumulator.assetValue()
+    // (SlippageAccumulator.test.ts), which prices a swapped asset via getAssetPrice() directly.
+    describe('getAssetPrice() dispatches to a pre-valued guard\'s getUnitPrice() (FNA-45 follow-up)', () => {
+      it('returns the guard\'s real unit price instead of AssetHandler\'s placeholder identity price', async () => {
+        const { contract, guard, mockAssetHandler, tokenA } = await loadFixture(setupFixture);
+
+        await guard.setPreValued(true);
+        await guard.setUnitPrice(ethers.parseUnits('2.5', 18));
+        // Skew the registered placeholder price away from both $1 and the real unit price — if
+        // this were still consulted, the assertion below would fail.
+        await mockAssetHandler.setPrice(tokenA, ethers.parseUnits('0.3', 18));
+
+        expect(await contract.getAssetPrice(tokenA)).to.equal(ethers.parseUnits('2.5', 18));
+      });
+
+      it('propagates the guard\'s revert instead of falling back to the placeholder identity price', async () => {
+        const { contract, guard, tokenA } = await loadFixture(setupFixture);
+
+        await guard.setPreValued(true);
+        await guard.setUnitPriceReverts(true);
+
+        await expect(contract.getAssetPrice(tokenA)).to.be.revertedWith(
+          'MockAssetGuard: getUnitPrice reverts',
+        );
+      });
+
+      it('a non-pre-valued guard is unaffected: getAssetPrice still returns AssetHandler\'s registered price', async () => {
+        const { contract, guard, mockAssetHandler, tokenA } = await loadFixture(setupFixture);
+
+        // Sanity: default MockAssetGuard state is not pre-valued.
+        expect(await guard.isPreValuedAssetGuard()).to.equal(false);
+        await guard.setUnitPrice(ethers.parseUnits('2.5', 18)); // set but must be ignored
+
+        await mockAssetHandler.setPrice(tokenA, ethers.parseUnits('1', 18));
+        expect(await contract.getAssetPrice(tokenA)).to.equal(ethers.parseUnits('1', 18));
+      });
+    });
+
     // FNA-18: a pre-valued/complex guard's getBalance() already returns a fully priced USD-18
     // figure — its registered price is a fixed $1 identity multiplier, not a real
     // per-share/per-token price. Deposit/queued-withdrawal math treats price/decimals as literal

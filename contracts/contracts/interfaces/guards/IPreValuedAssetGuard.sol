@@ -16,4 +16,16 @@ pragma solidity ^0.8.24;
 ///      conversion was already applied once inside getBalance() itself.
 interface IPreValuedAssetGuard {
     function isPreValuedAssetGuard() external pure returns (bool);
+
+    /// @notice Values one whole unit of `asset` in USD (18 decimals) — the real per-unit price
+    ///         AssetHandler's placeholder $1.00 identity aggregator cannot provide for a
+    ///         pre-valued asset (see PoolManagerLogic.getAssetPrice()'s dispatch to this
+    ///         function). A guard representing a non-transferable pseudo-position with no
+    ///         meaningful per-unit price (e.g. an Aave/Morpho lending position, a Uniswap V3 NFT
+    ///         position) must revert unconditionally rather than return a misleading number. A
+    ///         guard representing a real transferable share (e.g. an ERC-4626 vault) must revert
+    ///         if any pricing dependency fails or the resulting price is zero, never silently
+    ///         degrade — callers rely on this for solvency/slippage-sensitive math where a wrong
+    ///         nonzero answer is worse than a revert.
+    function getUnitPrice(address asset) external view returns (uint256);
 }
