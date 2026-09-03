@@ -1130,6 +1130,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       await debt.getAddress(),
     );
     await debt.mint(plAddr, 100n * 10n ** 6n);
+    // CertiK FNA-36 follow-up: withdrawProcessing now verifies the collateral being freed at
+    // this portion actually covers the flashloan repayment obligation — fund enough collateral
+    // (and its own available liquidity) so this test still exercises the flashloan-build path.
+    await aToken.mint(plAddr, 1_000n * 10n ** 6n);
+    await usdc.mint(await aToken.getAddress(), 1_000n * 10n ** 6n);
 
     const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
       plAddr,
@@ -1169,6 +1174,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       ethers.ZeroAddress,
     );
     await stableDebt.mint(plAddr, 100n * 10n ** 6n);
+    // CertiK FNA-36 follow-up: withdrawProcessing now verifies the collateral being freed at
+    // this portion actually covers the flashloan repayment obligation — fund enough collateral
+    // (and its own available liquidity) so this test still exercises the flashloan-build path.
+    await aToken.mint(plAddr, 1_000n * 10n ** 6n);
+    await usdc.mint(await aToken.getAddress(), 1_000n * 10n ** 6n);
 
     const [, , txs] = await guard.withdrawProcessing.staticCall(
       plAddr,
@@ -1261,6 +1271,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
     await wethDebt.mint(plAddr, ethers.parseEther('1'));
     await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000);
+    // CertiK FNA-36 follow-up: withdrawProcessing now verifies the collateral being freed at
+    // this portion actually covers the flashloan repayment obligation — fund enough collateral
+    // (and its own available liquidity) so this test still exercises the flashloan-build path.
+    await aToken.mint(plAddr, 1_000n * 10n ** 6n);
+    await usdc.mint(await aToken.getAddress(), 1_000n * 10n ** 6n);
 
     const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
       plAddr,
@@ -1393,6 +1408,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       await debt.getAddress(),
     );
     await debt.mint(plAddr, 100n * 10n ** 6n);
+    // CertiK FNA-36 follow-up: withdrawProcessing now verifies the collateral being freed at
+    // this portion actually covers the flashloan repayment obligation — fund enough collateral
+    // (and its own available liquidity) so this test still exercises the flashloan-build path.
+    await aToken.mint(plAddr, 1_000n * 10n ** 6n);
+    await usdc.mint(await aToken.getAddress(), 1_000n * 10n ** 6n);
 
     const [, , flashTxs] = await guard.withdrawProcessing.staticCall(
       plAddr,
@@ -1453,13 +1473,17 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
 
     await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
     await wethDebt.mint(plAddr, ethers.parseEther('1'));
-    await aToken.mint(plAddr, 500n * 10n ** 6n);
-    await wethAToken.mint(plAddr, ethers.parseEther('0.25'));
+    // Collateral ($100 USDC debt + 1 WETH @ $2000 = $2100 total debt) must exceed the flashloan's
+    // full repayment obligation, not just the raw debt, per CertiK's FNA-36 follow-up — sized well
+    // above that so this test still exercises the uncapped flashloan-unwind mechanics it's meant
+    // to.
+    await aToken.mint(plAddr, 3_000n * 10n ** 6n);
+    await wethAToken.mint(plAddr, ethers.parseEther('1.5'));
     // CertiK FNA-07 follow-up: withdrawProcessing now caps the whole unwind by whichever
     // reserve's aToken has the least available underlying — fund both fully so this test still
     // exercises the uncapped flashloan-unwind mechanics it's meant to.
-    await usdc.mint(await aToken.getAddress(), 500n * 10n ** 6n);
-    await weth.mint(await wethAToken.getAddress(), ethers.parseEther('0.25'));
+    await usdc.mint(await aToken.getAddress(), 3_000n * 10n ** 6n);
+    await weth.mint(await wethAToken.getAddress(), ethers.parseEther('1.5'));
 
     await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000);
     await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000);
@@ -1500,6 +1524,168 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     expect(callbackTxs.length).to.be.greaterThan(8);
     expect(callbackTxs.some((tx: any) => tx.to === aavePoolAddress)).to.equal(true);
     expect(callbackTxs.some((tx: any) => tx.to === swapRouterAddress)).to.equal(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // CertiK FNA-36 follow-up: withdrawProcessing() must not return a flashloan transaction for a
+  // leg whose unwind, at the actual portion being planned, is not solvent against the same
+  // configured costs (premium, route fee/slippage, buffer) getNetRealizableBalance() (FNA-35)
+  // already accounts for at the 100% level. Fails closed (empty transactions) instead.
+  // -----------------------------------------------------------------------
+  describe('CertiK FNA-36 follow-up: withdrawProcessing solvency gate', () => {
+    it('fails closed (no transactions) when collateral just misses covering the flashloan repayment obligation', async () => {
+      const { guard, dataProvider, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const Debt = await ethers.getContractFactory('MockERC20Custom');
+      const debt = await Debt.deploy('dUSDC', 'dUSDC', 6);
+      await debt.waitForDeployment();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await dataProvider.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await debt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await debt.getAddress(),
+      );
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(100); // 1%
+
+      // Same-asset debt (no swap cost involved — isolates premium/buffer specifically): 1,000
+      // USDC debt. flashAmount = 1,000 USDC (buffer 0), premium = 1% of that = 10 USDC, so the
+      // flashloan's full repayment obligation is exactly 1,010 USDC.
+      await debt.mint(plAddr, 1_000n * 10n ** 6n);
+      // Collateral: 1,005 USDC — net equity is a positive $5 (getBalance()/getNetRealizableBalance
+      // at 100% would report a non-zero figure, so the FNA-36 first-half skip in PoolLogic would
+      // NOT have fired for this position), but $1,005 does not cover the $1,010 owed back to the
+      // flashloan.
+      await aToken.mint(plAddr, 1_005n * 10n ** 6n);
+      await usdc.mint(await aToken.getAddress(), 1_005n * 10n ** 6n);
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      expect(gross).to.equal(ethers.parseUnits('5', 18));
+
+      const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
+        plAddr,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18),
+        signer.address,
+      );
+
+      expect(withdrawAsset).to.equal(ethers.ZeroAddress);
+      expect(withdrawBalance).to.equal(0n);
+      expect(txs.length).to.equal(0);
+    });
+
+    it('still builds the flashloan once collateral covers the full repayment obligation, same position otherwise', async () => {
+      const { guard, dataProvider, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const Debt = await ethers.getContractFactory('MockERC20Custom');
+      const debt = await Debt.deploy('dUSDC', 'dUSDC', 6);
+      await debt.waitForDeployment();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await dataProvider.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await debt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await debt.getAddress(),
+      );
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(100); // 1%
+
+      // Same 1,000 USDC debt / $1,010 repayment obligation as the insolvent case above, but
+      // collateral now clears it: 1,015 USDC.
+      await debt.mint(plAddr, 1_000n * 10n ** 6n);
+      await aToken.mint(plAddr, 1_015n * 10n ** 6n);
+      await usdc.mint(await aToken.getAddress(), 1_015n * 10n ** 6n);
+
+      const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
+        plAddr,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18),
+        signer.address,
+      );
+
+      expect(withdrawAsset).to.equal(await usdc.getAddress());
+      expect(txs.length).to.equal(1);
+      const decoded = aavePool.interface.decodeFunctionData('flashLoan', txs[0].txData);
+      expect(decoded[2][0]).to.equal(1_000n * 10n ** 6n); // flashAmount, no buffer configured
+    });
+
+    it('accounts for route fee and slippage on a cross-asset leg, not just the premium, when gating solvency', async () => {
+      const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      const wethDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dWETH', 'dWETH', 18));
+      await wethDebt.waitForDeployment();
+      const plAddr = await pl.getAddress();
+
+      // Exact same debt/fee/slippage/premium setup as the FNA-35 cross-asset test above: 100
+      // USDC debt (same-asset) + 1 WETH @ $2000 debt (requires a genuine settlement->debt swap).
+      // That test proved the flashloan's full repayment obligation there is exactly
+      // 2,137,160,000 raw USDC = $2,137.16 (totalMaxIn 2,116,000,000 + 1% premium 21,160,000).
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      await dataProvider.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokens(
+        await weth.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+        await wethDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
+      await aavePool.setReserveTokens(await weth.getAddress(), ethers.ZeroAddress, await wethDebt.getAddress());
+
+      await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
+      await wethDebt.mint(plAddr, ethers.parseEther('1'));
+
+      await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000); // 0.3%
+      await guard.setDefaultSlippageBps(50); // 0.5%
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(100); // 1%
+
+      // Collateral: 2,130 USDC — gross equity against the raw 2,100 USDC debt is a positive $30
+      // (getBalance() would report a non-zero figure), but that $30 doesn't cover the $37.16 the
+      // route's fee and slippage tolerance add on top of the premium, so the full repayment
+      // obligation ($2,137.16) still exceeds it. This targets withdrawProcessing()'s own
+      // independent gate: even called directly (bypassing PoolLogic's upstream skip entirely),
+      // it must not return a flashloan transaction it cannot actually settle.
+      await aToken.mint(plAddr, 2_130n * 10n ** 6n);
+      await usdc.mint(await aToken.getAddress(), 2_130n * 10n ** 6n);
+
+      const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
+        plAddr,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18),
+        signer.address,
+      );
+
+      expect(withdrawAsset).to.equal(ethers.ZeroAddress);
+      expect(withdrawBalance).to.equal(0n);
+      expect(txs.length).to.equal(0);
+    });
   });
 
   // -----------------------------------------------------------------------
