@@ -287,11 +287,12 @@ describe('MorphoVaultV2AssetGuard', () => {
   // FNA-25: canonical Morpho Vault V2's maxRedeem() unconditionally returns 0 — not a genuine
   // liquidity estimate, since the vault can't guarantee its dynamic gate/adapter simulation is
   // revert-free from a view function. Treating it as a liquidity oracle (this guard's earlier
-  // IWithdrawableBalanceGuard implementation, FNA-07) made every Morpho Vault V2 position read
-  // as fully illiquid on every immediate withdrawal, unconditionally — silently excluding real,
-  // healthy positions from NAV available for immediate exit. This guard no longer implements
-  // IWithdrawableBalanceGuard at all, so FundCalculationLibrary's fallback now treats it as
-  // fully liquid, matching its pre-FNA-07 behavior.
+  // IWithdrawableBalanceGuard implementation, FNA-07's first pass) made every Morpho Vault V2
+  // position read as fully illiquid on every immediate withdrawal, unconditionally — silently
+  // excluding real, healthy positions from NAV available for immediate exit. getBalance() (the
+  // full claim, tested here) stays unaffected either way — the liquidity-capped counterpart is
+  // getWithdrawableBalance() (CertiK FNA-07 follow-up, see its own describe block below), which
+  // now uses idle-balance capping instead of maxRedeem().
   it('getBalance() is unaffected by maxRedeem() always returning 0 (canonical Morpho Vault V2 behavior, FNA-25)', async () => {
     const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
     const shares = ethers.parseUnits('1000', 18);
@@ -309,6 +310,97 @@ describe('MorphoVaultV2AssetGuard', () => {
     const expected = expectedBalanceUsd18(shares, assetsPerShare, ethers.parseUnits('1', 18), 6n);
     expect(full).to.equal(expected);
     expect(full).to.be.gt(0n);
+  });
+
+  // -----------------------------------------------------------------------
+  // getWithdrawableBalance (CertiK FNA-07 follow-up: liquidity-capped counterpart to
+  // getBalance(), sized by the vault's own idle balance — NOT maxRedeem(), see FNA-25 above)
+  // -----------------------------------------------------------------------
+
+  describe('getWithdrawableBalance', () => {
+    it('isWithdrawableBalanceGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
+    });
+
+    it('returns 0 when the pool holds no shares', async () => {
+      const { guard, poolAddr, vaultAddr } = await deploy();
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
+    });
+
+    it('matches getBalance() when the vault\'s idle balance fully covers the position', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdc, usdcAddr } = await deploy();
+
+      const shares = ethers.parseUnits('1000', 18);
+      const assetsPerShare = 1_000_000n;
+      await vault.mintShares(poolAddr, shares);
+      await vault.setAssetsPerShare(assetsPerShare);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      // Idle balance covers the full position (1000e18 shares -> 1000 USDC at this ratio).
+      await usdc.mint(vaultAddr, ethers.parseUnits('1000', 6));
+
+      const full = await guard.getBalance(poolAddr, vaultAddr);
+      expect(full).to.equal(ethers.parseUnits('1000', 18));
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(full);
+    });
+
+    it('is capped below getBalance() when idle balance is below the full claim', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdc, usdcAddr } = await deploy();
+
+      const shares = ethers.parseUnits('1000', 18);
+      const assetsPerShare = 1_000_000n;
+      await vault.mintShares(poolAddr, shares);
+      await vault.setAssetsPerShare(assetsPerShare);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      // Only 20% of the position is actually idle right now (the rest is deployed to adapters).
+      await usdc.mint(vaultAddr, ethers.parseUnits('200', 6));
+
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(ethers.parseUnits('1000', 18));
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(
+        ethers.parseUnits('200', 18),
+      );
+    });
+
+    it('returns 0 (does not revert) when idle balance is 0', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+      // No usdc.mint(vaultAddr, ...) call — idle balance stays 0.
+
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.be.gt(0n);
+    });
+
+    it('degrades to 0 (does not revert) when asset() fails', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdc, usdcAddr } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      await usdc.mint(vaultAddr, ethers.parseUnits('1000', 18));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await vault.setBrokenAsset(true);
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
+      // getBalance() (the full claim) degrades identically here — asset() failing blocks both,
+      // unlike the idle-liquidity-specific failures below.
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+    });
+
+    it('degrades to 0 (does not revert) when convertToShares()/convertToAssets() fails', async () => {
+      const { guard, poolManager, poolAddr, vault, vaultAddr, usdc, usdcAddr } = await deploy();
+      await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
+      await usdc.mint(vaultAddr, ethers.parseUnits('1000', 18));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await vault.setBrokenConvert(true);
+      expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
+      expect(await guard.getBalance(poolAddr, vaultAddr)).to.equal(0n);
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -393,9 +485,13 @@ describe('MorphoVaultV2AssetGuard', () => {
     });
 
     it('builds a single redeem() transaction for the requested portion', async () => {
-      const { guard, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
+      const { guard, poolAddr, vault, vaultAddr, usdc, usdcAddr } = await deploy();
       const shares = ethers.parseUnits('1000', 18);
       await vault.mintShares(poolAddr, shares);
+      // CertiK FNA-07 follow-up: withdrawProcessing now caps by the vault's idle balance — fund
+      // it fully (1:1 with default assetsPerShare) so this test still exercises the full,
+      // uncapped portion math it's meant to.
+      await usdc.mint(vaultAddr, shares);
 
       const portion = ethers.parseUnits('0.5', 18); // 50%
       const [withdrawAsset, withdrawAmount, txs] = await guard.withdrawProcessing(
@@ -446,10 +542,11 @@ describe('MorphoVaultV2AssetGuard', () => {
     // FNA-25: no longer capped by maxRedeem(pool) — real Morpho Vault V2's maxRedeem() always
     // returns 0, so capping against it would zero out every redemption unconditionally (the bug
     // this fix closes), not just genuinely under-liquid ones.
-    it('redeems the full requested portion of shares regardless of maxRedeem() (FNA-25)', async () => {
-      const { guard, poolAddr, vault, vaultAddr } = await deploy();
+    it('redeems the full requested portion of shares regardless of maxRedeem() (FNA-25), when the vault genuinely has enough idle liquidity', async () => {
+      const { guard, poolAddr, vault, vaultAddr, usdc } = await deploy();
       const shares = ethers.parseUnits('1000', 18);
       await vault.mintShares(poolAddr, shares);
+      await usdc.mint(vaultAddr, shares); // fully idle-funded
       // Matches real Morpho Vault V2: maxRedeem() always reports 0, regardless of position.
       expect(await vault.maxRedeem(poolAddr)).to.equal(0n);
 
@@ -462,24 +559,54 @@ describe('MorphoVaultV2AssetGuard', () => {
       ]);
       const decoded = vaultIface.decodeFunctionData('redeem', txs[0].txData);
       // Full 1000 shares — not 0, what the old maxRedeem-capped formula would have produced
-      // against a vault whose maxRedeem() always returns 0.
+      // against a vault whose maxRedeem() always returns 0, and not capped below full either,
+      // since idle liquidity genuinely covers the whole position.
       expect(decoded[0]).to.equal(shares);
     });
 
-    it('accepted risk: the whole withdrawal reverts if the vault genuinely lacks enough underlying — same risk class as an Aave/Morpho Blue market being fully utilized', async () => {
+    // CertiK FNA-07 follow-up: this used to be titled "accepted risk: ... reverts" and asserted
+    // exactly that. It no longer does — the fix below is precisely what turns this scenario safe.
+    it('caps sharesToRedeem to what idle liquidity actually covers instead of reverting the whole withdrawal', async () => {
       const { deployer, poolAddr, vault, vaultAddr, usdc, guard } = await deploy();
       const shares = ethers.parseUnits('1000', 18);
       const assetsPerShare = 1_000_000n; // 1e18 shares -> 1e6 raw USDC units
       await vault.mintShares(poolAddr, shares);
       await vault.setAssetsPerShare(assetsPerShare);
 
-      // The vault only actually holds enough underlying to honor 20% of the position.
+      // The vault only actually holds enough idle underlying to honor 20% of the position.
       await usdc.mint(vaultAddr, ethers.parseUnits('200', 6));
 
-      const portion = ethers.parseUnits('1', 18); // 100%
+      const portion = ethers.parseUnits('1', 18); // 100% of the (liquidity-capped) NAV
       const [, , txs] = await guard.withdrawProcessing(poolAddr, vaultAddr, portion, poolAddr);
       expect(txs.length).to.equal(1);
 
+      const vaultIface = new ethers.Interface([
+        'function redeem(uint256 shares, address receiver, address owner) returns (uint256)',
+      ]);
+      const decoded = vaultIface.decodeFunctionData('redeem', txs[0].txData);
+      // Not 1000e18 (the full share balance) — capped to the idle-liquid amount instead:
+      // 200 USDC worth of shares, at 1e6 assetsPerShare -> 200e18 shares.
+      expect(decoded[0]).to.equal(ethers.parseUnits('200', 18));
+
+      // And executing it does not revert — the whole point of the cap.
+      await expect(deployer.sendTransaction({ to: txs[0].to, data: txs[0].txData })).to.not.be
+        .reverted;
+      expect(await usdc.balanceOf(poolAddr)).to.equal(ethers.parseUnits('200', 6));
+    });
+
+    it('accepted residual risk: still reverts if redeem() fails for a reason unrelated to idle liquidity (e.g. a paused/misbehaving vault)', async () => {
+      const { deployer, poolAddr, vault, vaultAddr, usdc, guard } = await deploy();
+      const shares = ethers.parseUnits('1000', 18);
+      await vault.mintShares(poolAddr, shares);
+      await usdc.mint(vaultAddr, shares); // fully idle-funded — the cap is not what fails here
+
+      const portion = ethers.parseUnits('1', 18);
+      const [, , txs] = await guard.withdrawProcessing(poolAddr, vaultAddr, portion, poolAddr);
+      expect(txs.length).to.equal(1);
+
+      // Simulate the vault itself breaking between sizing and execution (e.g. paused) — a risk
+      // this fix was never meant to address; it only closes the idle-liquidity-specific case.
+      await vault.setBrokenConvert(true);
       await expect(deployer.sendTransaction({ to: txs[0].to, data: txs[0].txData })).to.be
         .reverted;
     });

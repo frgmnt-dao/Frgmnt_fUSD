@@ -15,6 +15,7 @@ import { IHasSupportedAsset } from "../../interfaces/IHasSupportedAsset.sol";
 import { IAddAssetCheckGuard } from "../../interfaces/guards/IAddAssetCheckGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IIncompleteValuationGuard } from "../../interfaces/guards/IIncompleteValuationGuard.sol";
+import { IWithdrawableBalanceGuard } from "../../interfaces/guards/IWithdrawableBalanceGuard.sol";
 import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 
 /*//////////////////////////////////////////////////////////////
@@ -36,11 +37,16 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    MorphoVaultV2Manager whitelist — a vault must remain valuable and exitable even if
 ///    governance later revokes it from the whitelist; only *new* exposure
 ///    (MorphoVaultV2ContractGuard, and `addAssetCheck` below) is gated by the whitelist.
+///  - CertiK FNA-07 follow-up: `getWithdrawableBalance`/`withdrawProcessing` cap the redeemable
+///    share amount by the vault's own **idle** balance (`IERC20(underlying).balanceOf(vault)`)
+///    converted to shares — see `_capSharesByIdleLiquidity`'s own documentation for why this is
+///    a different, verified-safe mechanism from the one FNA-25 removed.
 contract MorphoVaultV2AssetGuard is
     ClosedAssetGuard,
     IAddAssetCheckGuard,
     IPreValuedAssetGuard,
-    IIncompleteValuationGuard
+    IIncompleteValuationGuard,
+    IWithdrawableBalanceGuard
 {
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -161,25 +167,21 @@ contract MorphoVaultV2AssetGuard is
         (balanceUsd18, ) = _valuePosition(pool, asset);
     }
 
-    /// @dev getBalance()/isValuationComplete() value the pool's full share balance.
+    /// @dev getBalance()/isValuationComplete() value the pool's full share balance — the
+    ///      liquidity-capped counterpart used for immediate-withdrawal sizing is
+    ///      getWithdrawableBalance()/_valueWithdrawablePosition() below.
     ///
-    ///      FNA-25: this guard previously also implemented IWithdrawableBalanceGuard, capping
-    ///      the liquidity-aware withdrawable balance by IERC4626(asset).maxRedeem(pool) (FNA-07).
-    ///      That was wrong for Morpho Vault V2 specifically: canonical Vault V2 implements
-    ///      maxRedeem() as a function that unconditionally returns 0 — not a genuine liquidity
-    ///      estimate, since simulating the vault's dynamic gate/adapter path from a view function
-    ///      cannot be guaranteed revert-free (see Morpho's own VaultV2.sol). Trusting it as a
-    ///      liquidity oracle made every Morpho Vault V2 position read as fully illiquid on every
-    ///      immediate withdrawal, unconditionally, regardless of whether redemption would have
-    ///      actually succeeded — silently excluding real, healthy positions from NAV available
-    ///      for immediate exit, every single time. (The repository's mock previously masked this
-    ///      by defaulting maxRedeem() to balanceOf(owner) instead of Vault V2's real always-zero
-    ///      behavior.) Removed: this guard no longer implements IWithdrawableBalanceGuard, so
-    ///      FundCalculationLibrary's fallback now treats it as fully liquid, i.e. the immediate-
-    ///      withdrawal path sizes against the same full share balance as getBalance() (this
-    ///      guard's pre-FNA-07 behavior). withdrawProcessing() below no longer caps by
-    ///      maxRedeem() either, for the same reason — see its own docs for the resulting,
-    ///      already-accepted risk (an under-liquid position can still revert its own withdrawal).
+    ///      FNA-25 history: this guard previously implemented IWithdrawableBalanceGuard capping
+    ///      by IERC4626(asset).maxRedeem(pool) (FNA-07's first pass). That was wrong for Morpho
+    ///      Vault V2 specifically: canonical Vault V2 implements maxRedeem() as a function that
+    ///      unconditionally returns 0, not a genuine liquidity estimate — confirmed directly
+    ///      against Morpho's published source (github.com/morpho-org/vault-v2,
+    ///      src/VaultV2.sol, as of 2026-09): `function maxRedeem(address) external pure returns
+    ///      (uint256) { return 0; }`, no condition. Trusting it as a liquidity oracle made every
+    ///      Morpho Vault V2 position read as fully illiquid on every immediate withdrawal,
+    ///      unconditionally, silently excluding real, healthy positions from NAV available for
+    ///      immediate exit — FNA-25 removed IWithdrawableBalanceGuard entirely rather than trust
+    ///      it.
     function _valuePosition(
         address pool,
         address asset
@@ -255,6 +257,97 @@ contract MorphoVaultV2AssetGuard is
         return ((underlyingAmount * price) / (10 ** underlyingDecimals), true);
     }
 
+    /// @notice Liquidity-capped counterpart to getBalance() — see IWithdrawableBalanceGuard.
+    /// @dev CertiK FNA-07 follow-up. Values min(shares, _capSharesByIdleLiquidity(shares)) — the
+    ///      share amount this vault could actually redeem right now without touching any
+    ///      adapter. Shares the exact same capped-share figure withdrawProcessing() below
+    ///      actually redeems, so NAV/portion sizing and execution can never disagree — same
+    ///      invariant already established for AaveV4SpokeAssetGuard/AaveV4TokenizationAssetGuard.
+    /// @param pool Pool holding the vault shares.
+    /// @param asset Address of the Morpho Vault V2 instance.
+    /// @return balanceUsd18 USD value of the pool's *withdrawable* share balance, 18 decimals.
+    function getWithdrawableBalance(
+        address pool,
+        address asset
+    ) external view override returns (uint256 balanceUsd18) {
+        (balanceUsd18, ) = _valueWithdrawablePosition(pool, asset);
+    }
+
+    /// @notice See IWithdrawableBalanceGuard.
+    function isWithdrawableBalanceGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    function _valueWithdrawablePosition(
+        address pool,
+        address asset
+    ) internal view returns (uint256, bool) {
+        uint256 shares = IERC20(asset).balanceOf(pool);
+        return _valueShares(pool, asset, _capSharesByIdleLiquidity(asset, shares));
+    }
+
+    /// @dev Caps `shares` by the vault's own **idle** balance of its underlying asset —
+    ///      `IERC20(underlying).balanceOf(vault)` — converted to an equivalent share amount via
+    ///      convertToShares(). This is deliberately NOT an attempt to estimate adapter liquidity
+    ///      (unlike AaveV4SpokeAssetGuard/AaveV4TokenizationAssetGuard's Hub-liquidity cap):
+    ///      Vault V2's adapters are curator-chosen and pluggable, with no generic way for this
+    ///      guard to inspect an arbitrary adapter's liquidity. Idle balance is instead a
+    ///      *provable* floor, confirmed directly against Morpho's published source
+    ///      (github.com/morpho-org/vault-v2, src/VaultV2.sol, as of 2026-09) — real
+    ///      redeem()/withdraw() reads
+    ///      `uint256 idleAssets = IERC20(asset).balanceOf(address(this)); if (assets >
+    ///      idleAssets && liquidityAdapter != address(0)) { deallocateInternal(...) }`, i.e. idle
+    ///      balance is drawn down FIRST and unconditionally before any adapter is ever touched,
+    ///      with no separate fee-escrow or virtual-idle accounting layered on top of that same
+    ///      raw balance. So redeeming at most this many shares is *guaranteed* to never need an
+    ///      adapter at all — it can never revert for the reason this finding is about. Everything
+    ///      beyond this floor keeps the pre-existing, already-accepted risk (redeem() reverting
+    ///      on a genuinely dry adapter) — see withdrawProcessing()'s own documentation.
+    ///
+    ///      Rounding: confirmed both convertToShares() and convertToAssets() use `mulDivDown`
+    ///      (floor) against the same (totalAssets+1, totalSupply+virtualShares) pair, so
+    ///      convertToAssets(convertToShares(idleAssets)) <= idleAssets always holds (composing
+    ///      two floor divisions can only under-, never over-, estimate) — the returned share
+    ///      figure is a safe underestimate, never an overestimate, of what idle balance can
+    ///      actually cover.
+    ///
+    ///      Fault-isolated identically to _valueShares: any failure (asset()/balanceOf()/
+    ///      convertToShares() reverting — the last of which is documented to internally call
+    ///      accrueInterestView(), a real potential revert source, not just a defensive
+    ///      precaution) degrades this vault's withdrawable amount to 0 rather than reverting,
+    ///      consistent with this guard's existing resilience stance everywhere else.
+    function _capSharesByIdleLiquidity(
+        address vault,
+        uint256 shares
+    ) internal view returns (uint256) {
+        if (shares == 0) return 0;
+
+        address underlying;
+        try IERC4626(vault).asset() returns (address u) {
+            underlying = u;
+        } catch {
+            return 0;
+        }
+        if (underlying == address(0)) return 0;
+
+        uint256 idleAssets;
+        try IERC20(underlying).balanceOf(vault) returns (uint256 b) {
+            idleAssets = b;
+        } catch {
+            return 0;
+        }
+        if (idleAssets == 0) return 0;
+
+        uint256 withdrawableShares;
+        try IERC4626(vault).convertToShares(idleAssets) returns (uint256 s) {
+            withdrawableShares = s;
+        } catch {
+            return 0;
+        }
+
+        return shares < withdrawableShares ? shares : withdrawableShares;
+    }
+
     /// @notice AssetGuard balances are always expressed in USD (18 decimals).
     /// @dev Paired in AssetHandler with the fixed $1.00 USDPriceAggregator for this asset's
     ///      registered price feed, so PoolManagerLogic.assetValue() resolves to exactly
@@ -305,10 +398,18 @@ contract MorphoVaultV2AssetGuard is
     ///      extra logic needed in this guard.
     ///
     ///      This intentionally only calls `redeem()` — it does not fall back to
-    ///      `forceDeallocate()` if the vault's liquidity adapter is dry. If `redeem()` reverts
-    ///      due to insufficient vault liquidity, the withdrawal reverts; this is the same risk
-    ///      class as an Aave/Morpho Blue market being fully utilized today, and is an accepted,
-    ///      explicit scope decision for this version of the integration.
+    ///      `forceDeallocate()` if the vault's liquidity adapter is dry (see
+    ///      MorphoVaultV2ContractGuard's own documentation for why forceDeallocate stays a
+    ///      manager-only, deliberate action rather than an automatic fallback here).
+    ///
+    ///      CertiK FNA-07 follow-up: `sharesToRedeem` is now sized against
+    ///      `_capSharesByIdleLiquidity`'s output, not the full share balance — see that
+    ///      function's own documentation for the guarantee this provides (redemption within that
+    ///      cap can never need to touch an adapter). Beyond the idle-balance floor, the
+    ///      already-accepted risk remains unchanged: if `redeem()` still reverts (a request
+    ///      sized above idle balance that ends up needing more from an adapter than it has), the
+    ///      withdrawal reverts — the same risk class as an Aave/Morpho Blue market being fully
+    ///      utilized today.
     /// @param pool Pool address.
     /// @param asset Address of the Morpho Vault V2 instance.
     /// @param withdrawPortion Portion to withdraw, 1e18 = 100%.
@@ -332,12 +433,9 @@ contract MorphoVaultV2AssetGuard is
         withdrawAsset = IERC4626(asset).asset();
         if (withdrawAsset == address(0)) revert InvalidUnderlying();
 
-        // FNA-25: no longer capped by maxRedeem(pool) — canonical Morpho Vault V2 implements
-        // maxRedeem() as a function that unconditionally returns 0, not a genuine liquidity
-        // estimate (see _valuePosition's documentation above), so withdrawPortion is now sized
-        // by the caller against this position's full share balance, same as before FNA-07.
         uint256 shares = IERC20(asset).balanceOf(pool);
-        uint256 sharesToRedeem = (shares * withdrawPortion) / 1e18;
+        uint256 withdrawableShares = _capSharesByIdleLiquidity(asset, shares);
+        uint256 sharesToRedeem = (withdrawableShares * withdrawPortion) / 1e18;
 
         if (sharesToRedeem == 0) {
             txs = new MultiTransaction[](0);

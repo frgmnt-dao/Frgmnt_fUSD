@@ -116,6 +116,22 @@ const config: HardhatUserConfig = {
         },
       },
 
+      'contracts/contracts/guards/assetGuards/AaveLendingPoolAssetGuard.sol': {
+        version: '0.8.24',
+        settings: {
+          optimizer: { enabled: true, runs: 1 },
+          viaIR: true,
+        },
+      },
+
+      'contracts/contracts/guards/assetGuards/MorphoBlueLendingPoolAssetGuard.sol': {
+        version: '0.8.24',
+        settings: {
+          optimizer: { enabled: true, runs: 1 },
+          viaIR: true,
+        },
+      },
+
       '@uniswap/v3-core/contracts/**/*.sol': {
         version: '0.7.6',
         settings: {

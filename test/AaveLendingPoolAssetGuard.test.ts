@@ -573,6 +573,212 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // CertiK FNA-07 follow-up: getWithdrawableBalance (liquidity-capped counterpart to
+  // getNetRealizableBalance) and its uniform-ceiling effect on withdrawProcessing.
+  // -----------------------------------------------------------------------
+
+  describe('CertiK FNA-07 follow-up: getWithdrawableBalance', () => {
+    it('isWithdrawableBalanceGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
+    });
+
+    it('matches getNetRealizableBalance when the aToken\'s underlying fully covers its balance', async () => {
+      const { guard, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+      const aTokenAddr = await aToken.getAddress();
+
+      await aavePool.setReserveTokens(await usdc.getAddress(), aTokenAddr, ethers.ZeroAddress);
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      // The aToken contract itself holds >= its own balance in real underlying: fully liquid.
+      await usdc.mint(aTokenAddr, 1000n * 10n ** 6n);
+
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+      expect(await guard.getWithdrawableBalance(plAddr, ethers.ZeroAddress)).to.equal(net);
+      expect(net).to.be.gt(0n);
+    });
+
+    it('is capped below getNetRealizableBalance when the aToken holds less underlying than its balance', async () => {
+      const { guard, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+      const aTokenAddr = await aToken.getAddress();
+
+      await aavePool.setReserveTokens(await usdc.getAddress(), aTokenAddr, ethers.ZeroAddress);
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      // Only 20% of this reserve is actually withdrawable right now (borrowers have the rest).
+      await usdc.mint(aTokenAddr, 200n * 10n ** 6n);
+
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+      expect(net).to.equal(ethers.parseUnits('1000', 18));
+      expect(await guard.getWithdrawableBalance(plAddr, ethers.ZeroAddress)).to.equal(
+        ethers.parseUnits('200', 18),
+      );
+    });
+
+    it('is capped by whichever reserve is most constrained across several', async () => {
+      const { guard, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const Token = await ethers.getContractFactory('MockERC20Custom');
+      const wethAToken = await Token.deploy('aWETH', 'aWETH', 18);
+      await wethAToken.waitForDeployment();
+      const wethAddr = await weth.getAddress();
+      const wethATokenAddr = await wethAToken.getAddress();
+
+      await supportAsset(pm, factory, usdc);
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+      const plAddr = await pl.getAddress();
+      const usdcAddr = await usdc.getAddress();
+      const usdcATokenAddr = await aToken.getAddress();
+
+      await aavePool.setReserveTokens(usdcAddr, usdcATokenAddr, ethers.ZeroAddress);
+      await aavePool.setReserveTokens(wethAddr, wethATokenAddr, ethers.ZeroAddress);
+
+      // USDC reserve: fully liquid (no constraint).
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      await usdc.mint(usdcATokenAddr, 1000n * 10n ** 6n);
+
+      // WETH reserve: only 10% liquid (2 of 20 WETH) — the binding constraint.
+      await wethAToken.mint(plAddr, ethers.parseUnits('20', 18));
+      await weth.mint(wethATokenAddr, ethers.parseUnits('2', 18));
+
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+      // 1000 USDC + 20 WETH * $2000 = 1000 + 40000 = 41000.
+      expect(net).to.equal(ethers.parseUnits('41000', 18));
+
+      // Ceiling is 10% (WETH's ratio) applied to the WHOLE position, not per-reserve — so even
+      // the fully-liquid USDC leg is bottlenecked down to 10% of its own value too:
+      // (1000 + 40000) * 10% = 4100, NOT 1000 + 4000 (which a naive per-reserve cap would give
+      // for the USDC leg alone since it's unconstrained).
+      expect(await guard.getWithdrawableBalance(plAddr, ethers.ZeroAddress)).to.equal(
+        ethers.parseUnits('4100', 18),
+      );
+    });
+
+    it('degrades neither getBalance nor getNetRealizableBalance — only the withdrawable variant is capped', async () => {
+      const { guard, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+      const aTokenAddr = await aToken.getAddress();
+
+      await aavePool.setReserveTokens(await usdc.getAddress(), aTokenAddr, ethers.ZeroAddress);
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      // aToken holds ZERO underlying right now — fully illiquid.
+
+      expect(await guard.getBalance(plAddr, ethers.ZeroAddress)).to.equal(
+        ethers.parseUnits('1000', 18),
+      );
+      expect(await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress)).to.equal(
+        ethers.parseUnits('1000', 18),
+      );
+      expect(await guard.getWithdrawableBalance(plAddr, ethers.ZeroAddress)).to.equal(0n);
+    });
+  });
+
+  describe('CertiK FNA-07 follow-up: withdrawProcessing liquidity cap', () => {
+    it('no-debt case: caps the withdrawn collateral amount by available liquidity', async () => {
+      const { guard, dataProvider, aavePool, usdc, aToken } = await deploy();
+      const [signer, , , to] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+      const aTokenAddr = await aToken.getAddress();
+      const usdcAddr = await usdc.getAddress();
+
+      await dataProvider.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress, ethers.ZeroAddress);
+      await aavePool.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress);
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      // Only 30% of this reserve is actually liquid right now.
+      await usdc.mint(aTokenAddr, 300n * 10n ** 6n);
+
+      // Request 100% — should still only withdraw what's actually liquid (300, not 1000).
+      const [, , txs] = await guard.withdrawProcessing.staticCall(
+        plAddr,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18),
+        to.address,
+      );
+
+      expect(txs.length).to.equal(2);
+      const decoded = aavePool.interface.decodeFunctionData('withdraw', txs[0].txData);
+      expect(decoded[1]).to.equal(300n * 10n ** 6n);
+    });
+
+    // CertiK FNA-07 follow-up, the critical invariant: when a leveraged (debt-bearing) position
+    // is liquidity-constrained, debt repayment and the flashloan sizing that funds it must scale
+    // down by the SAME ceiling as collateral withdrawal — not stay at the full, uncapped portion.
+    // Otherwise the flashloan is sized/repaid against a collateral amount larger than what
+    // actually gets withdrawn, which can under-fund the flash repayment (see this guard's own
+    // documentation on _maxSafePortion / getWithdrawableBalance for the full reasoning).
+    it('with-debt case: the SAME capped portion is applied to debt repayment and the flashloan, not just collateral', async () => {
+      const { guard, dataProvider, aavePool, usdc, aToken } = await deploy();
+      const [signer, , , to] = await ethers.getSigners();
+      const Debt = await ethers.getContractFactory('MockERC20Custom');
+      const debt = await Debt.deploy('dUSDC', 'dUSDC', 6);
+      await debt.waitForDeployment();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+      const aTokenAddr = await aToken.getAddress();
+      const usdcAddr = await usdc.getAddress();
+      const debtAddr = await debt.getAddress();
+
+      await dataProvider.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress, debtAddr);
+      await aavePool.setReserveTokens(usdcAddr, aTokenAddr, debtAddr);
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      await debt.mint(plAddr, 400n * 10n ** 6n);
+      // Only 25% of the collateral reserve is actually liquid right now.
+      await usdc.mint(aTokenAddr, 250n * 10n ** 6n);
+      await guard.setFlashAmountBufferBps(0);
+
+      const requestedPortion = ethers.parseUnits('1', 18); // 100% requested
+      const expectedEffectivePortion = ethers.parseUnits('0.25', 18); // 25% ceiling
+
+      const [, , txs] = await guard.withdrawProcessing.staticCall(
+        plAddr,
+        ethers.ZeroAddress,
+        requestedPortion,
+        to.address,
+      );
+
+      expect(txs.length).to.equal(1);
+      const decoded = aavePool.interface.decodeFunctionData('flashLoan', txs[0].txData);
+      const encodedParams = decoded[5];
+
+      const abiCoder = ethers.AbiCoder.defaultAbiCoder();
+      const [fp] = abiCoder.decode(
+        [
+          'tuple(uint256 withdrawPortion,address settlementToken,uint256 slippageBps,tuple(address underlyingAsset,uint256 repayStableAmount,uint256 repayVariableAmount)[] repayPlans)',
+        ],
+        encodedParams,
+      );
+
+      // The portion baked into the flashloan callback params is the CAPPED 25%, not the
+      // requested 100% — proving debt sizing was scaled down to match collateral, not left
+      // uncapped while only collateral shrank.
+      expect(fp.withdrawPortion).to.equal(expectedEffectivePortion);
+
+      // Debt repayment itself: 400 USDC debt * 25% = 100 USDC (rounded up per
+      // _mulPortionRoundUp, exact here since 400 * 0.25 has no remainder).
+      expect(fp.repayPlans[0].repayVariableAmount).to.equal(100n * 10n ** 6n);
+
+      // Same-token debt/settlement shortcut applies (both USDC) — flash amount is exactly the
+      // scaled-down repay amount (no buffer configured), not the amount a full-100%-portion
+      // repayment (400 USDC) would have required.
+      const flashAmount = decoded[2][0];
+      expect(flashAmount).to.equal(100n * 10n ** 6n);
+    });
+  });
+
   it('removeAssetCheck passes when no positions', async () => {
     const { guard } = await deploy();
     const PMF = await ethers.getContractFactory('MockPoolManagerLogicWithAssets');
@@ -717,6 +923,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       ethers.ZeroAddress,
     );
     await aToken.mint(plAddr, 1_000n * 10n ** 6n);
+    // CertiK FNA-07 follow-up: withdrawProcessing now caps by the aToken's real available
+    // liquidity — fund it fully so this test still exercises the uncapped portion math.
+    await usdc.mint(await aToken.getAddress(), 1_000n * 10n ** 6n);
 
     const [, , txs] = await guard.withdrawProcessing.staticCall(
       plAddr,
@@ -1124,6 +1333,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     await wethDebt.mint(plAddr, ethers.parseEther('1'));
     await aToken.mint(plAddr, 500n * 10n ** 6n);
     await wethAToken.mint(plAddr, ethers.parseEther('0.25'));
+    // CertiK FNA-07 follow-up: withdrawProcessing now caps the whole unwind by whichever
+    // reserve's aToken has the least available underlying — fund both fully so this test still
+    // exercises the uncapped flashloan-unwind mechanics it's meant to.
+    await usdc.mint(await aToken.getAddress(), 500n * 10n ** 6n);
+    await weth.mint(await wethAToken.getAddress(), ethers.parseEther('0.25'));
 
     await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000);
     await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000);

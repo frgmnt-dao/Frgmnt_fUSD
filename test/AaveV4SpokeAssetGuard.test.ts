@@ -610,6 +610,38 @@ describe('AaveV4SpokeAssetGuard', () => {
       // getBalance() (the full claim) is unaffected — only the withdrawable variant degrades.
       expect(await guard.getBalance(poolAddr, spokeAddr)).to.equal(ethers.parseUnits('1000', 18));
     });
+
+    // CertiK FNA-07 follow-up: two reserveIds resolving to the same Hub-level (hub, assetId)
+    // pair must not each independently see the Hub's full liquidity as available to them alone.
+    it('does not double-count Hub liquidity shared by two reserves pointing at the same (hub, assetId)', async () => {
+      const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
+        await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n, 2n]);
+
+      // Both reserves wrap USDC and both resolve to the same shared assetId (100).
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setReserveUnderlying(2n, usdcAddr);
+      await spoke.setReserveAssetId(1n, 100n);
+      await spoke.setReserveAssetId(2n, 100n);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await spoke.setSuppliedAssets(2n, poolAddr, ethers.parseUnits('1000', 6));
+
+      // The shared Hub pool only actually has 600 USDC free — set once, keyed by assetId 100.
+      await spoke.setAvailableLiquidity(100n, ethers.parseUnits('600', 6));
+
+      // Full claim: $1000 + $1000 = $2000.
+      expect(await guard.getBalance(poolAddr, spokeAddr)).to.equal(ethers.parseUnits('2000', 18));
+      // Without the dedup ledger this would read $1200 (each reserve independently capping at
+      // $600). With it, the two reserves' combined withdrawable claim on the one shared pool of
+      // liquidity is bounded by that pool's real size: $600 total, not $600 each.
+      expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.equal(
+        ethers.parseUnits('600', 18),
+      );
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -920,6 +952,47 @@ describe('AaveV4SpokeAssetGuard', () => {
       const erc20Iface = new ethers.Interface(['function transfer(address to, uint256 amount)']);
       const transferDecoded = erc20Iface.decodeFunctionData('transfer', txs[1].txData);
       expect(transferDecoded[1]).to.equal(cappedAmount);
+    });
+
+    // CertiK FNA-07 follow-up: the actual withdraw amounts built for two reserves sharing one
+    // Hub-level liquidity pool must together stay within that pool's real size, not each
+    // independently claim up to the full reported liquidity.
+    it('does not double-count shared Hub liquidity across two reserves\' withdraw amounts', async () => {
+      const {
+        guard,
+        aaveV4SpokeManager,
+        poolManager,
+        poolAddr,
+        spoke,
+        spokeAddr,
+        usdcAddr,
+        other,
+      } = await deploy();
+
+      await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n, 2n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setReserveUnderlying(2n, usdcAddr);
+      await spoke.setReserveAssetId(1n, 100n);
+      await spoke.setReserveAssetId(2n, 100n);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await spoke.setSuppliedAssets(2n, poolAddr, ethers.parseUnits('1000', 6));
+      await spoke.setAvailableLiquidity(100n, ethers.parseUnits('600', 6));
+
+      const portion = ethers.parseUnits('1', 18); // 100% of the (liquidity-capped) NAV
+      const [, , txs] = await guard.withdrawProcessing(poolAddr, spokeAddr, portion, other.address);
+      // Reserve 1 claims the full $600 available, leaving reserve 2 nothing to withdraw (2 txs
+      // for reserve 1's withdraw+transfer pair, 0 for reserve 2).
+      expect(txs.length).to.equal(2);
+
+      const spokeIface = new ethers.Interface([
+        'function withdraw(uint256 reserveId, uint256 amount, address onBehalfOf) returns (uint256, uint256)',
+      ]);
+      const withdrawDecoded = spokeIface.decodeFunctionData('withdraw', txs[0].txData);
+      expect(withdrawDecoded[0]).to.equal(1n); // reserve 1
+      expect(withdrawDecoded[1]).to.equal(ethers.parseUnits('600', 6));
     });
 
     it('reproduces and fixes FNA-07: a withdraw for the full supplied amount would revert on an under-liquid reserve, but the guard-generated (capped) transaction succeeds', async () => {
