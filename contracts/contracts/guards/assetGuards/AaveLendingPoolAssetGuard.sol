@@ -246,6 +246,25 @@ contract AaveV3LendingPoolAssetGuard is
         balance = _netRealizableBalance(pool);
     }
 
+    /// @dev CertiK FNA-35 follow-up: previously only deducted the flashloan premium
+    ///      (`flashAmount * premiumBps`) from gross equity, leaving the route fee, oracle
+    ///      slippage tolerance, and `flashAmountBufferBps` — all baked into `flashAmount` itself
+    ///      by `_estimateFlashAmountInSettlement` — silently unaccounted for. For a same-asset
+    ///      debt position (no swap needed) that under-deduction was small (just the buffer); for
+    ///      a cross-asset position (settlement token != debt token) it silently ignored the
+    ///      entire swap cost, exactly the gap CertiK's PoC demonstrated.
+    ///
+    ///      Fix: rather than isolate each cost component separately (fragile — a future change
+    ///      to `_estimateFlashAmountInSettlement`'s sizing could silently reopen this gap again),
+    ///      price the *whole* flashloan outlay (`flashAmount + premium`, in settlement-token
+    ///      terms) and compare it against `totalDebtInUsd` — the debt's own fair USD value,
+    ///      already subtracted above via `gross`. `flashAmount` is provably always
+    ///      >= the fair settlement-equivalent of the debt being repaid (same-asset legs
+    ///      contribute their exact repay amount pre-buffer; cross-asset legs are
+    ///      `_oracleMaxIn`-inflated by slippage/fee pre-buffer; the buffer then multiplies the
+    ///      whole sum), so the excess is exactly the combined cost of buffer + route fee +
+    ///      slippage + premium — everything the original FNA-35 recommendation asked for, in one
+    ///      conservative calculation instead of three separate ones.
     function _netRealizableBalance(address pool) internal view returns (uint256 balance) {
         (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
         if (totalCollateralInUsd <= totalDebtInUsd) return 0;
@@ -267,13 +286,18 @@ contract AaveV3LendingPoolAssetGuard is
 
         uint256 premiumBps = uint256(IAaveV3Pool(aaveLendingPool).FLASHLOAN_PREMIUM_TOTAL());
         uint256 premiumInSettlement = (flashAmount * premiumBps) / BPS_DENOMINATOR;
+        uint256 totalOutlaySettlement = flashAmount + premiumInSettlement;
 
         address factory = IPoolLogic(pool).factory();
         uint256 priceUsd = IHasAssetInfo(factory).getAssetPrice(settlementToken);
         uint256 decimals = IERC20Extended(settlementToken).decimals();
-        uint256 premiumUsd = (priceUsd * premiumInSettlement) / (10 ** decimals);
+        uint256 totalOutlayUsd = (priceUsd * totalOutlaySettlement) / (10 ** decimals);
 
-        balance = gross > premiumUsd ? gross - premiumUsd : 0;
+        uint256 unwindCostUsd = totalOutlayUsd > totalDebtInUsd
+            ? totalOutlayUsd - totalDebtInUsd
+            : 0;
+
+        balance = gross > unwindCostUsd ? gross - unwindCostUsd : 0;
     }
 
     /// @notice Liquidity-capped counterpart to getBalance()/getNetRealizableBalance() — see
