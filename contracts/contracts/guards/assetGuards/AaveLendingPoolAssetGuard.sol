@@ -400,6 +400,15 @@ contract AaveV3LendingPoolAssetGuard is
         return true;
     }
 
+    /// @notice CertiK FNA-45 follow-up: this guard's registered "asset" is the Aave lending pool
+    ///         address itself — a non-transferable pseudo-position, not a real ERC-20 with a
+    ///         meaningful per-unit price. Reverts unconditionally so PoolManagerLogic.
+    ///         getAssetPrice()'s dispatch (see IPreValuedAssetGuard) fails closed instead of
+    ///         silently returning a meaningless identity price for it.
+    function getUnitPrice(address) external pure override returns (uint256) {
+        revert("Frgmnt: no unit price for pseudo-asset");
+    }
+
     function removeAssetCheck(address pool, address) public view override {
         (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
 

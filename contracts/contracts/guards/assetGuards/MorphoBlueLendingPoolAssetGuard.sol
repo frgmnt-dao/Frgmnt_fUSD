@@ -250,6 +250,15 @@ contract MorphoBlueLendingPoolAssetGuard is
         return true;
     }
 
+    /// @notice CertiK FNA-45 follow-up: this guard's registered "asset" is the Morpho Blue
+    ///         singleton address itself — a non-transferable pseudo-position, not a real ERC-20
+    ///         with a meaningful per-unit price. Reverts unconditionally so PoolManagerLogic.
+    ///         getAssetPrice()'s dispatch (see IPreValuedAssetGuard) fails closed instead of
+    ///         silently returning a meaningless identity price for it.
+    function getUnitPrice(address) external pure override returns (uint256) {
+        revert("Frgmnt: no unit price for pseudo-asset");
+    }
+
     /// @notice Ensures no open Morpho position exists before asset removal
     function removeAssetCheck(address pool, address) public view override {
         MorphoChecksLib.removeAssetCheck(morpho, morphoManager, pool);

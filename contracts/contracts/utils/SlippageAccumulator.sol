@@ -135,28 +135,20 @@ contract SlippageAccumulator is Ownable {
     /// @notice Function to calculate an asset amount's value in usd.
     /// @param asset The asset whose price oracle exists.
     /// @param amount The amount of the `asset`.
-    /// @dev FNA-45: mirrors PoolManagerLogic.assetValue()'s IPreValuedAssetGuard short-circuit —
-    ///      a pre-valued guard's getBalance() already returns a fully priced, base-currency USD
-    ///      value, and its registered price feed is only a placeholder identity aggregator (see
-    ///      PoolManagerLogic.assetValue()'s own docs for why re-multiplying it here would
-    ///      silently double-apply pricing). Without this, a pre-valued ERC-20 share routed
-    ///      through the guarded Uniswap router would have its slippage measured against raw
-    ///      share counts instead of economic value, weakening (or, for an under-$1 share,
-    ///      tripping early) the cumulative-loss bound this contract exists to enforce. Uses the
-    ///      same `poolFactory` immutable already in scope — it is PoolManagerLogic's own address
-    ///      (see deploy_contract_guard.ts), which implements IHasGuardInfo.getAssetGuard().
+    /// @dev CertiK FNA-45 follow-up: this function previously mirrored PoolManagerLogic.
+    ///      assetValue()'s IPreValuedAssetGuard short-circuit — but that shortcut's input is an
+    ///      aggregate USD-18 guard *balance*, already fully priced; this function's input is a
+    ///      raw *token amount delta* from a swap. Returning that delta as-is silently assumed
+    ///      both 18 decimals and a unit price of exactly $1, which for a real transferable
+    ///      pre-valued share (Morpho Vault V2 / Aave V4 Tokenization) worth more or less than $1
+    ///      per share mispriced the swap even at 18 decimals — and for a hypothetical 6-decimal
+    ///      share, additionally introduced a 1e12 scaling error. Removed: `getAssetPrice()` below
+    ///      now correctly returns a real per-unit price for such a share (see
+    ///      IPreValuedAssetGuard.getUnitPrice(), which PoolManagerLogic.getAssetPrice() dispatches
+    ///      to), so pricing this asset the same way as any other now produces the right answer
+    ///      instead of reintroducing the identity-price bug this shortcut was meant to avoid.
     function assetValue(address asset, uint256 amount) public view returns (uint256 value) {
         if (amount == 0) return 0;
-
-        address guard = IHasGuardInfo(poolFactory).getAssetGuard(asset);
-        if (guard != address(0)) {
-            (bool hasFn, bytes memory data) = guard.staticcall(
-                abi.encodeWithSignature("isPreValuedAssetGuard()")
-            );
-            if (hasFn && data.length == 32 && abi.decode(data, (bool))) {
-                return amount;
-            }
-        }
 
         uint256 price = IHasAssetInfo(poolFactory).getAssetPrice(asset);
         uint8 decimals = IERC20Extended(asset).decimals();

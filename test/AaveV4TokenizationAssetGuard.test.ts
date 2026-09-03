@@ -343,15 +343,101 @@ describe('AaveV4TokenizationAssetGuard', () => {
   // getDecimals
   // -----------------------------------------------------------------------
 
-  it('getDecimals always returns 18', async () => {
-    const { guard, vaultAddr } = await deploy();
+  // CertiK FNA-45 follow-up: getDecimals() previously hardcoded 18 (matching the placeholder
+  // $1.00 identity aggregator this asset is registered against for PoolManagerLogic.assetValue(),
+  // which never actually consults it) — it now returns the share token's own real decimals.
+  it('getDecimals returns the vault share token\'s own real decimals, not a hardcoded 18', async () => {
+    const { guard, vaultAddr, usdcAddr } = await deploy();
+    // The mock vault is a plain OZ ERC20 (18 decimals) — still correct, but no longer because it
+    // was hardcoded.
     expect(await guard.getDecimals(vaultAddr)).to.equal(18n);
-    expect(await guard.getDecimals(ethers.ZeroAddress)).to.equal(18n);
+    // Proves this is a genuine passthrough, not coincidence: a 6-decimal token now reads back 6,
+    // not the old hardcoded 18.
+    expect(await guard.getDecimals(usdcAddr)).to.equal(6n);
+  });
+
+  it('getDecimals reverts for an address with no decimals() function, rather than returning a hardcoded 18', async () => {
+    const { guard } = await deploy();
+    await expect(guard.getDecimals(ethers.ZeroAddress)).to.be.reverted;
   });
 
   it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
     const { guard } = await deploy();
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // CertiK FNA-45 follow-up: getUnitPrice() — values one whole vault share in USD, so
+  // PoolManagerLogic.getAssetPrice() no longer returns the placeholder $1.00 identity price for
+  // this asset (see PoolManagerLogic.test.ts for that dispatch, and SlippageAccumulator.test.ts
+  // for the concrete consumer this closes).
+  // -----------------------------------------------------------------------
+  describe('getUnitPrice (CertiK FNA-45 follow-up)', () => {
+    it('values one whole share at a non-1:1 ratio and non-$1 underlying price, matching getBalance()\'s own arithmetic', async () => {
+      const { guard, poolManager, vault, vaultAddr, usdcAddr } = await deploy();
+
+      // 1 share (1e18) -> 1.1 USDC (1,100,000 raw 6dp units), USDC priced at $2 — same
+      // assetsPerShare convention as getBalance()'s own "computes the correct USD value" test.
+      const assetsPerShare = 1_100_000n;
+      await vault.setAssetsPerShare(assetsPerShare);
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('2', 18));
+
+      const oneShare = 10n ** 18n; // vault is an 18-decimal ERC20
+      const expected = expectedBalanceUsd18(oneShare, assetsPerShare, ethers.parseUnits('2', 18), 6n);
+      // $2.20 — sanity-check the hand math independently of the shared helper.
+      expect(expected).to.equal(ethers.parseUnits('2.2', 18));
+
+      expect(
+        await poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr),
+      ).to.equal(expected);
+    });
+
+    it('propagates the vault\'s own revert reason when asset() reverts, rather than returning a misleading price', async () => {
+      const { guard, poolManager, vault, vaultAddr } = await deploy();
+      await vault.setBrokenAsset(true);
+
+      await expect(
+        poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr),
+      ).to.be.reverted;
+    });
+
+    it('reverts InvalidUnderlying when asset() succeeds but returns the zero address', async () => {
+      const { guard, poolManager, vault, vaultAddr } = await deploy();
+      await vault.setUnderlying(ethers.ZeroAddress);
+
+      await expect(
+        poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr),
+      ).to.be.revertedWithCustomError(guard, 'InvalidUnderlying');
+    });
+
+    it('reverts UnderlyingNotPriced when the underlying has no price, rather than degrading to 0', async () => {
+      const { guard, poolManager, vaultAddr, usdcAddr } = await deploy();
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+
+      await expect(
+        poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr),
+      ).to.be.revertedWithCustomError(guard, 'UnderlyingNotPriced');
+    });
+
+    it('reverts with the underlying "no guard" message when the underlying has no registered asset guard, rather than degrading to 0', async () => {
+      const { guard, poolManager, vaultAddr, usdcAddr } = await deploy();
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+
+      await expect(
+        poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr),
+      ).to.be.revertedWith('no guard');
+    });
+
+    it('deliberately does NOT degrade like getBalance() does — a broken price feed reverts here, not 0', async () => {
+      const { guard, poolManager, vaultAddr, usdcAddr } = await deploy();
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
+      await poolManager.setBrokenPrice(usdcAddr, true);
+
+      await expect(poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr))
+        .to.be.reverted;
+    });
   });
 
   // -----------------------------------------------------------------------

@@ -150,23 +150,28 @@ describe('SlippageAccumulator', () => {
       expect(await slippageAccumulator.assetValue(srcTokenAddress, 0n)).to.equal(0n);
     });
 
-    // FNA-45: mirrors PoolManagerLogic.assetValue()'s IPreValuedAssetGuard short-circuit — a
-    // pre-valued guard's getBalance() already returns a fully priced USD value, and its
-    // registered price feed is only a placeholder identity aggregator. Without this, a
-    // pre-valued share routed through the guarded router would have its slippage measured
-    // against raw share counts instead of economic value.
-    it('returns the raw amount unchanged for an asset guarded by a pre-valued asset guard', async () => {
+    // CertiK FNA-45 follow-up: the original fix mirrored PoolManagerLogic.assetValue()'s
+    // IPreValuedAssetGuard short-circuit here, returning a pre-valued asset's raw amount
+    // unchanged — but this function's input is a raw token amount *delta* from a swap, not an
+    // already-priced aggregate guard balance like assetValue()'s is. Treating 1 raw unit as
+    // always worth exactly $1 was itself the mispricing bug for a real transferable share worth
+    // more or less than $1/unit (and would have doubly mis-scaled a 6-decimal share). The
+    // shortcut is now removed entirely: this asset must price identically to any other, via
+    // getAssetPrice() (which PoolManagerLogic now answers correctly for a pre-valued share via
+    // IPreValuedAssetGuard.getUnitPrice() — see PoolManagerLogic.test.ts for that dispatch).
+    it('prices an asset guarded by a pre-valued asset guard the same as any other asset — no identity shortcut', async () => {
       const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
       const preValuedGuard = await MockAssetGuard.connect(owner).deploy(18);
       await preValuedGuard.waitForDeployment();
       await preValuedGuard.setPreValued(true);
 
       await poolFactory.setAssetGuard(srcTokenAddress, await preValuedGuard.getAddress());
-      // A price far from 1:1 — if this were still multiplied in, the assertion below would fail.
-      await poolFactory.setPrice(srcTokenAddress, ethers.parseUnits('1.5', 8));
+      const price = ethers.parseUnits('1.5', 8);
+      await poolFactory.setPrice(srcTokenAddress, price);
 
       const amount = ethers.parseEther('2');
-      expect(await slippageAccumulator.assetValue(srcTokenAddress, amount)).to.equal(amount);
+      const expected = (amount * price) / 10n ** TOKEN_DECIMALS;
+      expect(await slippageAccumulator.assetValue(srcTokenAddress, amount)).to.equal(expected);
     });
 
     it('still multiplies by price for an asset whose guard exists but is not pre-valued (regression)', async () => {

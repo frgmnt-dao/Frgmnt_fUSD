@@ -257,6 +257,15 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
 
+  // CertiK FNA-45 follow-up: this guard's registered "asset" (the Morpho Blue singleton address
+  // itself) is a non-transferable pseudo-position with no meaningful per-unit price —
+  // getUnitPrice() must revert unconditionally so PoolManagerLogic.getAssetPrice()'s dispatch
+  // fails closed rather than silently returning a misleading number for it.
+  it('getUnitPrice reverts unconditionally (pseudo-asset has no unit price)', async () => {
+    const { guard } = await deploy();
+    await expect(guard.getUnitPrice(ethers.Wallet.createRandom().address)).to.be.reverted;
+  });
+
   // Helper: deploy a pool mock that satisfies IPoolLogic.factory()
   async function deployPool() {
     const PLF = await ethers.getContractFactory('MockPoolLogicWithManager');

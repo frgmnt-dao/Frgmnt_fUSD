@@ -12,6 +12,7 @@ import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
 import { IAddAssetCheckGuard } from "./interfaces/guards/IAddAssetCheckGuard.sol";
 import { IAssetHandler } from "./interfaces/IAssetHandler.sol";
 import { IMorphoBlueLendingPoolAssetGuard } from "./interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
+import { IPreValuedAssetGuard } from "./interfaces/guards/IPreValuedAssetGuard.sol";
 import { Managed } from "./Managed.sol";
 
 contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsset, Managed {
@@ -173,7 +174,28 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     /// @notice Return the latest price of a given asset
     /// @param _asset The address of the asset
     /// @return price The latest price of a given asset
+    /// @dev CertiK FNA-45 follow-up: AssetHandler's registered feed for a pre-valued asset is
+    ///      only a placeholder $1.00 identity aggregator (see IPreValuedAssetGuard's own docs and
+    ///      assetValue() below) — returning it here for a *transferable* pre-valued share (e.g.
+    ///      a Morpho Vault V2 / Aave V4 Tokenization share worth more or less than $1) silently
+    ///      mispriced any consumer that calls getAssetPrice() directly on the share itself,
+    ///      rather than through assetValue()'s own already-correct guard-balance short-circuit —
+    ///      SlippageAccumulator.assetValue() being the concrete case this closes. Same
+    ///      low-level-staticcall marker check as assetValue() uses; on a match, dispatches to the
+    ///      guard's own IPreValuedAssetGuard.getUnitPrice(), a plain (non-try/catch) typed call
+    ///      so a guard's revert (a non-transferable pseudo-asset with no meaningful unit price,
+    ///      or a real share whose pricing dependency failed) propagates instead of being
+    ///      swallowed — the correct fail-closed behavior for a price a caller is about to act on.
     function getAssetPrice(address _asset) external view override returns (uint256 price) {
+        address guard = getAssetGuard(_asset);
+        if (guard != address(0)) {
+            (bool hasFn, bytes memory data) = guard.staticcall(
+                abi.encodeWithSignature("isPreValuedAssetGuard()")
+            );
+            if (hasFn && data.length == 32 && abi.decode(data, (bool))) {
+                return IPreValuedAssetGuard(guard).getUnitPrice(_asset);
+            }
+        }
         price = IAssetHandler(assetHandler).getUSDPrice(_asset);
     }
 
