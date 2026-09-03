@@ -571,6 +571,128 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
 
       expect(await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress)).to.equal(0n);
     });
+
+    // CertiK FNA-35 follow-up: the original fix only deducted the flashloan premium
+    // (flashAmount * premiumBps), leaving the configured buffer — baked into flashAmount itself
+    // by _estimateFlashAmountInSettlement but never subtracted — silently unaccounted for.
+    it('deducts the configured flash-amount buffer too, not just the premium', async () => {
+      const { guard, aavePool, dataProvider, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      await usdcDebt.mint(plAddr, 400n * 10n ** 6n);
+
+      await guard.setFlashAmountBufferBps(500); // 5% buffer this time, not zeroed
+      await aavePool.setFlashloanPremiumTotal(100); // 1%
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      expect(gross).to.equal(ethers.parseUnits('600', 18)); // 1000 - 400
+
+      // flashAmount = 400 * 1.05 = 420 USDC; premium = 420 * 1% = 4.2 USDC.
+      // totalOutlay = 424.2 USDC; unwindCost = totalOutlay - debt(400) = 24.2 USDC = $24.2.
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+      expect(net).to.equal(ethers.parseUnits('575.8', 18));
+      // The old (premium-only) formula would have reported 596 (600 - 4) — strictly more than
+      // the correct 575.8, i.e. it overstated realizable value by exactly the unaccounted buffer.
+      expect(net).to.be.lt(ethers.parseUnits('596', 18));
+    });
+
+    // CertiK FNA-35 follow-up, the core gap from the CertiK PoC: for a position with debt in a
+    // DIFFERENT asset than the settlement token, the settlement->debt swap's route fee and
+    // oracle slippage tolerance were computed (inside _estimateFlashAmountInSettlement) but
+    // never subtracted from the reported value — only the flashloan premium was.
+    it('deducts route fee and slippage on a cross-asset settlement->debt swap leg, not just the premium', async () => {
+      const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      const wethDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dWETH', 'dWETH', 18));
+      await wethDebt.waitForDeployment();
+      const plAddr = await pl.getAddress();
+
+      // Collateral: 10,000 USDC. Debt: 100 USDC (same-asset, no swap) + 1 WETH @ $2000 (requires
+      // a genuine settlement(USDC)->debt(WETH) swap, since two different debt tokens force
+      // _chooseSettlementToken to fall back to preferredSettlementAsset = USDC).
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await weth.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+        await wethDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
+      await aavePool.setReserveTokens(await weth.getAddress(), ethers.ZeroAddress, await wethDebt.getAddress());
+
+      await aToken.mint(plAddr, 10_000n * 10n ** 6n);
+      await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
+      await wethDebt.mint(plAddr, ethers.parseEther('1'));
+
+      await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000); // 0.3%
+      await guard.setDefaultSlippageBps(50); // 0.5%
+      await guard.setFlashAmountBufferBps(0); // isolate the swap-cost effect specifically
+      await aavePool.setFlashloanPremiumTotal(100); // 1%
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      // 10,000 - (100 + 2000) = 7,900.
+      expect(gross).to.equal(ethers.parseUnits('7900', 18));
+
+      // WETH leg (_oracleMaxIn): fair USDC cost of 1 WETH @ $2000 = 2000 USDC = 2,000,000,000
+      // raw. effectiveSlippageExactOut = 50 + feeGrossUpBps, feeGrossUpBps = floor(3000*10000 /
+      // (1e6-3000)) = floor(30,000,000/997,000) = 30 -> effective = 80 bps.
+      // maxIn = 2,000,000,000 * 10080/10000 = 2,016,000,000 raw (2016 USDC).
+      const wethLegFairUsdc = 2_000_000_000n;
+      const feeGrossUpBps = (3000n * 10_000n) / (1_000_000n - 3000n);
+      const effectiveSlippageBps = 50n + feeGrossUpBps;
+      const wethLegMaxIn = (wethLegFairUsdc * (10_000n + effectiveSlippageBps)) / 10_000n;
+      expect(wethLegMaxIn).to.equal(2_016_000_000n);
+
+      // USDC leg is same-asset: contributes its exact 100 USDC repay amount, no inflation.
+      const totalMaxIn = wethLegMaxIn + 100_000_000n;
+      const flashAmount = totalMaxIn; // buffer = 0
+      const premium = (flashAmount * 100n) / 10_000n; // 1%
+      const totalOutlaySettlement = flashAmount + premium;
+      const totalOutlayUsd = totalOutlaySettlement * 10n ** 12n; // USDC (6dp) -> 18dp @ $1
+      const totalDebtUsd = ethers.parseUnits('2100', 18); // 100 + 2000
+      const unwindCostUsd = totalOutlayUsd - totalDebtUsd;
+      const expectedNet = ethers.parseUnits('7900', 18) - unwindCostUsd;
+
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+      expect(net).to.equal(expectedNet);
+
+      // The old (premium-only) formula would have deducted just the premium on flashAmount
+      // (~$21.16), reporting net ~$7878.84 — this fix additionally deducts the WETH leg's route
+      // fee + slippage padding (maxIn - fair value = 2,016,000,000 - 2,000,000,000 = 16 USDC =
+      // $16), the exact gap CertiK's PoC demonstrated for a cross-asset debt position.
+      const oldPremiumOnlyUsd = (flashAmount * 100n * 10n ** 12n) / 10_000n;
+      const oldFormulaNet = ethers.parseUnits('7900', 18) - oldPremiumOnlyUsd;
+      expect(net).to.be.lt(oldFormulaNet);
+      expect(oldFormulaNet - net).to.equal(ethers.parseUnits('16', 18));
+    });
   });
 
   // -----------------------------------------------------------------------
