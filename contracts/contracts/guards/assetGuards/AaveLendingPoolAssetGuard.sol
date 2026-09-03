@@ -478,6 +478,41 @@ contract AaveV3LendingPoolAssetGuard is
             slippageBps
         );
 
+        // CertiK FNA-36 follow-up: getWithdrawableBalance()/_netRealizableBalance() only gate
+        // whether the *100%*-position net-realizable value is zero (see FNA-35) — a thin-but-
+        // positive 100% position doesn't guarantee this specific effectivePortion (which may
+        // already be below the caller's requested withdrawPortion via the FNA-07 liquidity cap
+        // above) is itself solvent once _mulPortionRoundUp's rounding, the route fee/slippage
+        // tolerance and flashAmountBufferBps all apply to this portion's own repay amounts.
+        // Verify the collateral being freed at effectivePortion actually covers the full
+        // flashloan repayment obligation before committing to it; if not, fail closed for this
+        // leg (the recommendation's explicit alternative) instead of planning an unwind that
+        // reverts and, with it, the entire pro-rata withdrawal including every other healthy
+        // asset's share. Compares collateral value directly against the total outlay rather than
+        // routing through a subtracted "debt value": that term cancels out of the comparison
+        // algebraically regardless of its exact composition (stable vs variable debt, which
+        // _getBalance() and _collectDebtPlans() account for differently), so computing it here
+        // would only reintroduce that same accounting question with no effect on the result.
+        {
+            uint256 premiumBps = uint256(IAaveV3Pool(aaveLendingPool).FLASHLOAN_PREMIUM_TOTAL());
+            uint256 totalOutlaySettlement = flashAmount +
+                (flashAmount * premiumBps) /
+                BPS_DENOMINATOR;
+
+            address factory = IPoolLogic(pool).factory();
+            uint256 priceUsd = IHasAssetInfo(factory).getAssetPrice(settlementToken);
+            uint256 decimals = IERC20Extended(settlementToken).decimals();
+            uint256 totalOutlayUsd = (priceUsd * totalOutlaySettlement) / (10 ** decimals);
+
+            (uint256 totalCollateralInUsd, ) = _getBalance(pool);
+            uint256 collateralAtPortionUsd = (totalCollateralInUsd * effectivePortion) /
+                PORTION_DENOMINATOR;
+
+            if (collateralAtPortionUsd <= totalOutlayUsd) {
+                return (address(0), 0, new MultiTransaction[](0));
+            }
+        }
+
         FlashloanParams memory fp;
         fp.withdrawPortion = effectivePortion;
         fp.settlementToken = settlementToken;
