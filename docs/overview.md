@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Frgmnt fUSD is a collateral-backed stablecoin protocol deployed on Base. Users deposit whitelisted assets and receive **fUSD** — a USD-pegged ERC20 token backed 1:1 by the deposited collateral value, as priced through Chainlink oracles. The deposited collateral is pooled into a managed yield vault and deployed across integrated DeFi protocols (Aave V3, Morpho Blue, Uniswap V3). Net yield flows back to fUSD stakers in the form of **sfUSD** — a non-transferable staking receipt token.
+Frgmnt fUSD is a collateral-backed stablecoin protocol deployed on Base. Users deposit whitelisted assets and receive **fUSD** — a USD-pegged ERC20 token backed 1:1 by the deposited collateral value, as priced through Chainlink oracles. The deposited collateral is pooled into a managed yield vault and deployed across integrated DeFi protocols (Aave V3, Aave V4, Morpho Blue, Morpho Vault V2, Uniswap V3). Net yield flows back to fUSD stakers in the form of **sfUSD** — a non-transferable staking receipt token.
 
 ---
 
@@ -61,10 +61,14 @@ The protocol ships with guards for the following protocols:
 | Protocol | Integration Type |
 |----------|----------------|
 | **Aave V3** | Lending, borrowing, flash loans |
+| **Aave V4 Spoke** | Supply-only (no borrowing), Giver/Taker position managers |
+| **Aave V4 Tokenization** | ERC-4626 vault deposit/withdraw against Aave's Liquidity Hub, no debt |
 | **Morpho Blue** | Lending, borrowing, flash loans |
+| **Morpho Vault V2** | ERC-4626 vault deposit/withdraw across curator-selected adapters, no debt |
 | **Uniswap V3** | Swaps, LP positions |
+| **Merkl** | Reward claims for any Merkl-integrated protocol above |
 
-All interactions with these protocols are validated by purpose-built guard contracts before execution.
+All interactions with these protocols are validated by purpose-built guard contracts before execution — see [docs/contracts/](contracts/) for the per-contract reference.
 
 ---
 
@@ -83,3 +87,5 @@ All interactions with these protocols are validated by purpose-built guard contr
 - [Architecture](architecture.md) — System design and interaction diagrams
 - [Mechanics](mechanics.md) — Step-by-step flow documentation
 - [Security](security.md) — Trust model and risk analysis
+- [Developer Guide](developer-guide.md) — Contract layout, guard patterns, local setup
+- [docs/contracts/](contracts/) — Per-contract reference documentation

@@ -350,28 +350,39 @@ Tests are in `test/` and use Hardhat + ethers.js + Chai. Each test file correspo
 
 | Test File | Coverage |
 |-----------|---------|
-| `PoolLogic.test.ts` | Staking, unstaking, yield accrual, withdrawals |
-| `TokenLogic.test.ts` | Deposit, cooldown, minting |
-| `PoolManagerLogic.test.ts` | Asset management, fees, access control |
+| `PoolLogic.test.ts` / `PoolLogicAutoCompounding.test.ts` | Staking, unstaking, yield accrual, withdrawals, autocompounding migration |
+| `TokenLogic.test.ts` | Deposit, cooldown, minting, deposit cap |
+| `PoolManagerLogic.test.ts` | Asset management, fees, access control, guard dispatch |
 | `Governance.test.ts` | Guard registration |
-| `AaveLendingPoolGuardV3.test.ts` | Aave transaction validation |
-| `MorphoBlueContractGuard.test.ts` | Morpho transaction validation |
-| `UniswapV3RouterGuard.test.ts` | Swap validation |
-| `AssetHandler.test.ts` | Oracle price lookups |
-| `SlippageAccumulator.test.ts` | Slippage tracking |
+| `FundCalculationLibrary` coverage — see `UtilityLibraries.test.ts` | NAV/fee/withdrawal-sizing arithmetic |
+| `AaveLendingPoolAssetGuard.test.ts` / `AaveLendingPoolGuardV3.test.ts` | Aave V3 valuation/withdrawal and transaction validation |
+| `AaveV4Spoke{AssetGuard,ContractGuard,Manager}.test.ts` | Aave V4 Spoke integration (supply-only, no debt) |
+| `AaveV4Tokenization{AssetGuard,ContractGuard,Manager}.test.ts` | Aave V4 Tokenization (ERC-4626 vault) integration |
+| `MorphoBlueContractGuard.test.ts` / `MorphoBlueLendingPoolAssetGuard.test.ts` / `MorphoBlueManager.test.ts` | Morpho Blue transaction validation, valuation/withdrawal, market allowlist |
+| `MorphoVaultV2{AssetGuard,ContractGuard,Manager}.test.ts` | Morpho Vault V2 (ERC-4626 vault) integration |
+| `UniswapV3AssetGuard.test.ts` / `UniswapV3AssetGuardAdmin.test.ts` / `UniswapV3NonfungiblePositionGuard.test.ts` / `UniswapV3RouterGuard.test.ts` / `UniswapV3PriceLibrary.test.ts` | Uniswap V3 LP position valuation/withdrawal, position tracking, swap validation, TWAP pricing |
+| `MerklRewardClaimGuard.test.ts` | Cross-integration Merkl reward claims |
+| `AssetHandler.test.ts` / `USDPriceAggregator.test.ts` / `UniV3TWAPAggregator.test.ts` | Oracle price lookups and aggregator implementations |
+| `SlippageAccumulator.test.ts` / `SlippageAccumulatorUser.test.ts` | Slippage tracking |
+| `FrgmntUserActions.test.ts` | Bundled deposit-and-stake / unstake-and-withdraw user flows |
+| `Timelock.test.ts` / `Managed.test.ts` / `ClosedAssetGuard.test.ts` / `NftTrackerStorage.test.ts` | Governance delay mechanism, role management, shared base-guard behavior, NFT position tracking |
 
 ---
 
 ## Common Errors
 
-| Error | Cause |
-|-------|-------|
-| `CooldownNotExpired` | User's fUSD cooldown has not elapsed |
-| `NonTransferable` | Attempting to transfer sfUSD |
-| `AssetNotSupported` | Asset not in pool's supported list |
-| `CapExceeded` | Collateral asset deposit cap reached |
-| `MinDepositNotMet` | Deposit USD value below minimum |
-| `InvalidGuard` | Guard not registered for this contract/asset type |
-| `HealthFactorTooLow` | Post-tx health factor below 1.01 |
-| `StalePrice` | Chainlink price feed exceeds staleness timeout |
-| `SequencerDown` | L2 sequencer is offline or in grace period |
+`PoolLogic`/`PoolManagerLogic` use Solidity custom errors; `TokenLogic` and most guards still use `require()` revert strings — check the specific contract's source for its exact identifier before writing tests against it.
+
+| Error / Message | Contract | Cause |
+|-------|----------|-------|
+| `CooldownActive()` | PoolLogic | User's fUSD cooldown has not elapsed |
+| `NonTransferable()` | PoolLogic | Attempting to transfer sfUSD |
+| `AssetNotSupported()` | PoolManagerLogic / PoolLogic | Asset not in pool's supported list |
+| `"TokenLogic: deposit cap exceeded"` | TokenLogic | `protocolFusdOutstanding + fusdAmount > maxDepositFusdSupply` |
+| `"TokenLogic: below minimum deposit"` | TokenLogic | Deposit USD value below `minDepositUSD` |
+| `NoAssetGuard()` | PoolManagerLogic | Guard not registered/resolvable for this asset type (CertiK FNA-52 — fails closed, does not skip the check) |
+| `"Frgmnt: health factor too low"` | AaveLendingPoolGuardV3 / MorphoBlueContractGuard | Post-tx health factor at or below 1.01 |
+| `"Frgmnt: stale price"` (per-feed message set at registration) | AssetHandler | Chainlink price feed exceeds `chainlinkTimeouts[asset]` |
+| `"Frgmnt: sequencer down"` | AssetHandler | L2 sequencer is offline or still in the grace period |
+| `IncompleteNAV()` | PoolLogic (`checkpointFeesForDeposit`) | Active NAV reading is incomplete — a guard's transient valuation failure blocks a new deposit |
+| `WithdrawAmountTooSmall()` | PoolLogic | Requested withdrawal rounds to a fair share of 0 after the CertiK FNA-05 claims haircut |

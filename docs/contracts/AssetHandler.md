@@ -36,6 +36,7 @@ It includes L2 sequencer uptime validation (critical for Base) and per-asset sta
 | `sequencerUptimeFeed` | `address` | Chainlink L2 sequencer uptime feed address |
 | `eurUsdAggregator` | `address` | Optional Chainlink EUR/USD feed; when set, `getUSDPrice()` returns EUR-denominated prices |
 | `eurUsdTimeout` | `uint256` | Staleness threshold for the EUR/USD conversion feed, seconds |
+| `eurUsdModeLocked` | `bool` | CertiK FNA-40: set permanently by the first call to `setEurUsdAggregator()` or `clearEurUsdAggregator()` — see below |
 | `SEQUENCER_GRACE_PERIOD` | `uint256` | Fixed 3600-second grace period after sequencer restart |
 
 ---
@@ -157,7 +158,7 @@ Configures the optional EUR/USD conversion feed. Once set, `getUSDPrice()` retur
 | `feed` | `address` | Chainlink EUR/USD aggregator address |
 | `timeout` | `uint256` | Maximum acceptable age of the EUR/USD feed's data, in seconds |
 
-**Side effects:** Sets `eurUsdAggregator`, `eurUsdTimeout`. Emits `SetEurUsdAggregator`.
+**Side effects:** Sets `eurUsdAggregator`, `eurUsdTimeout`. Emits `SetEurUsdAggregator`. **Permanently sets `eurUsdModeLocked = true`** — see the one-shot lock note below.
 
 ---
 
@@ -169,7 +170,13 @@ function clearEurUsdAggregator() external onlyOwner
 
 Disables USD-to-EUR conversion; `getUSDPrice()` goes back to returning raw USD asset-feed prices.
 
-**Side effects:** Resets `eurUsdAggregator` to the zero address and `eurUsdTimeout` to 0. Emits `ClearedEurUsdAggregator`.
+**Side effects:** Resets `eurUsdAggregator` to the zero address and `eurUsdTimeout` to 0. Emits `ClearedEurUsdAggregator`. **Permanently sets `eurUsdModeLocked = true`** — see the one-shot lock note below.
+
+---
+
+### One-Shot EUR/USD Mode Lock (CertiK FNA-40)
+
+`eurUsdModeLocked` is set permanently by the **first** call to either `setEurUsdAggregator()` or `clearEurUsdAggregator()`; both functions revert if it is already `true`, so the USD/EUR valuation basis can only ever be chosen once. This registry's basis feeds every pool's NAV, deposit, fee, and withdrawal accounting — toggling it later, after any pool has recorded real activity in the old basis, would reprice existing fUSD supply, `accountedAssets`, and pending queued withdrawals to a different unit without migrating any of them, letting a pure conversion-basis change be minted as pool yield or otherwise corrupt live accounting. The intended flow is a single bootstrap-time decision (`deploy_core_contracts.ts`, called immediately after deploy, before any pool exists) — not a runtime toggle. On a live, already-deployed `AssetHandler` predating this lock, a post-upgrade call to `clearEurUsdAggregator()` is required to actually lock in the USD product's mode (see the memory note on FNA-40's closure for the mainnet-specific migration step).
 
 ---
 
