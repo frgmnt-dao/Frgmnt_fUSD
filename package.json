@@ -14,6 +14,7 @@
         "sol:format:check": "prettier --check --plugin=prettier-plugin-solidity 'contracts/**/*.sol'",
         "sol:format:write": "prettier --write --plugin=prettier-plugin-solidity 'contracts/**/*.sol'",
         "solhint": "solhint -f table 'contracts/**/*.sol'",
+        "check:contract-size": "hardhat run scripts/check-contract-size.ts",
         "format:check": "prettier --check .",
         "format:write": "prettier --write .",
         "lint:check": "eslint .",
