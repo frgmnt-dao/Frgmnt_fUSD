@@ -302,6 +302,16 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     return (shares * (totalAssets + VIRTUAL_ASSETS)) / (totalShares + VIRTUAL_SHARES);
   }
 
+  // CertiK FNA-57: mirrors Morpho Blue's real SharesMathLib.toAssetsUp exactly (ceiling
+  // division) — the guard's own _swapSettlementToDebts()/_repayDebts() both size a debt repay
+  // off this exact figure; a hand-picked round number would not reproduce the ceiling rounding
+  // that matters here.
+  function toAssetsUp(shares: bigint, totalAssets: bigint, totalShares: bigint): bigint {
+    const numerator = shares * (totalAssets + VIRTUAL_ASSETS);
+    const denominator = totalShares + VIRTUAL_SHARES;
+    return (numerator + denominator - 1n) / denominator;
+  }
+
   function toSharesDown(assets: bigint, totalAssets: bigint, totalShares: bigint): bigint {
     return (assets * (totalShares + VIRTUAL_SHARES)) / (totalAssets + VIRTUAL_ASSETS);
   }
@@ -1188,5 +1198,143 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     expect(txs.length).to.be.greaterThan(8);
     expect(txs.some((tx: any) => tx.to === morphoAddr)).to.equal(true);
     expect(txs.some((tx: any) => tx.to === swapRouter)).to.equal(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // CertiK FNA-57: _swapSettlementToDebts() must buy exactly enough debt token to cover the
+  // exact, unbuffered repay() call _repayDebts() actually makes (by shares) — not a buffered
+  // amount that Morpho never consumes and that nothing ever sweeps back to the settlement token.
+  // -----------------------------------------------------------------------
+  describe('CertiK FNA-57: exact-output debt repayment purchases no unconsumed residue', () => {
+    const exactOutputSingleIface = new ethers.Interface([
+      'function exactOutputSingle(tuple(address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 amountOut,uint256 amountInMaximum,uint160 sqrtPriceLimitX96) params) returns (uint256 amountIn)',
+    ]);
+    const repayIface = new ethers.Interface([
+      'function repay(tuple(address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) marketParams, uint256 assets, uint256 shares, address onBehalf, bytes data)',
+    ]);
+
+    it('purchases exactly toAssetsUp(repayBorrowShares), not a repayDebtBufferBps-inflated amount, for a cross-token debt leg', async () => {
+      const { guard, morpho, morphoManager, morphoAddr, swapRouter, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      const usdcAddress = await usdc.getAddress();
+      const wethAddress = await weth.getAddress();
+
+      // WETH debt, USDC settlement — a genuine cross-token leg, requiring the exact-output swap.
+      const wethMarket = await setupMarket(morpho, morphoManager, poolAddress, wethAddress, usdcAddress);
+      await guard.setUniV3Fee(usdcAddress, wethAddress, 3000);
+
+      // A distinctive, nonzero buffer — if _swapSettlementToDebts() still buffered its
+      // exact-output amount, the assertion below would catch it immediately (the pre-fix code
+      // would have produced 250,501, not 250,001 — see the hand computation below).
+      await guard.setRepayDebtBufferBps(20);
+
+      const repayBorrowShares = 500_000n;
+      const debts = [[wethMarket.id, wethMarket.mp, repayBorrowShares, 500_000n]];
+      const params = encodeFlashloanParams(
+        ethers.parseUnits('1', 18),
+        usdcAddress,
+        70n,
+        debts,
+        [],
+        [],
+      );
+
+      const txs = await guard.flashloanProcessing.staticCall(
+        poolAddress,
+        usdcAddress,
+        1_000_000n,
+        params,
+      );
+
+      const swapTx = txs.find((tx: any) => {
+        try {
+          exactOutputSingleIface.decodeFunctionData('exactOutputSingle', tx.txData);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      expect(swapTx).to.not.equal(undefined);
+      const [decodedParams] = exactOutputSingleIface.decodeFunctionData(
+        'exactOutputSingle',
+        swapTx.txData,
+      );
+
+      // Default market totals (totalBorrowAssets = totalBorrowShares = 1,000,000, see
+      // setupMarket()'s own defaults): toAssetsUp(500_000, 1_000_000, 1_000_000) =
+      // ceilDiv(500_000 * 1_000_001, 2_000_000) = ceilDiv(500_000_500_000, 2_000_000) = 250_001
+      // (not evenly divisible — the ceiling matters). The old, buffered formula would have
+      // computed (250_001 * 10_020) / 10_000 = 250_501 (floor) instead.
+      const expectedRepayAmount = toAssetsUp(repayBorrowShares, 1_000_000n, 1_000_000n);
+      expect(expectedRepayAmount).to.equal(250_001n);
+      expect(decodedParams.amountOut).to.equal(expectedRepayAmount);
+      expect(decodedParams.amountOut).to.not.equal(250_501n); // the pre-fix, buffered figure
+
+      // The actual repay() call must pull by the same repayBorrowShares Morpho was always going
+      // to consume — proving the swap buys exactly what gets spent, nothing more.
+      const repayTx = txs.find((tx: any) => {
+        try {
+          repayIface.decodeFunctionData('repay', tx.txData);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      expect(repayTx).to.not.equal(undefined);
+      const repayDecoded = repayIface.decodeFunctionData('repay', repayTx.txData);
+      expect(repayDecoded.shares).to.equal(repayBorrowShares);
+    });
+
+    it('same-token debt (no swap) is unaffected: still repays by the exact share amount', async () => {
+      const { guard, morpho, morphoManager, morphoAddr, usdc } = await deploy();
+      const pool = await deployAssetPool([usdc]);
+      const poolAddress = await pool.getAddress();
+      const usdcAddress = await usdc.getAddress();
+
+      const usdcMarket = await setupMarket(morpho, morphoManager, poolAddress, usdcAddress, usdcAddress);
+      await guard.setRepayDebtBufferBps(20);
+
+      const repayBorrowShares = 500_000n;
+      const debts = [[usdcMarket.id, usdcMarket.mp, repayBorrowShares, 500_000n]];
+      const params = encodeFlashloanParams(
+        ethers.parseUnits('1', 18),
+        usdcAddress,
+        70n,
+        debts,
+        [],
+        [],
+      );
+
+      const txs = await guard.flashloanProcessing.staticCall(
+        poolAddress,
+        usdcAddress,
+        1_000_000n,
+        params,
+      );
+
+      // No swap leg at all for a same-token debt — nothing to buffer or over-purchase.
+      const hasSwap = txs.some((tx: any) => {
+        try {
+          exactOutputSingleIface.decodeFunctionData('exactOutputSingle', tx.txData);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      expect(hasSwap).to.equal(false);
+
+      const repayTx = txs.find((tx: any) => {
+        try {
+          repayIface.decodeFunctionData('repay', tx.txData);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      expect(repayTx).to.not.equal(undefined);
+      const repayDecoded = repayIface.decodeFunctionData('repay', repayTx.txData);
+      expect(repayDecoded.shares).to.equal(repayBorrowShares);
+    });
   });
 });
