@@ -604,6 +604,23 @@ contract MorphoBlueLendingPoolAssetGuard is
     }
 
     /// @notice Swaps settlement asset into debt tokens
+    /// @dev CertiK FNA-57: `repayAmount` below is the swap's exact-output `amountOut` — it must
+    ///      equal exactly `toAssetsUp(repayBorrowShares, ...)`, matching precisely what
+    ///      `_repayDebts()` actually pulls from the pool via `repay(..., shares:
+    ///      repayBorrowShares, ...)`. Previously buffered via `_bufferedRepay()` the same as the
+    ///      flashloan-sizing estimate in `_estimateFlashAmount()` above — but that estimate uses
+    ///      `repayAssetsEst` (a pre-flashloan snapshot) and only ever sizes how much settlement
+    ///      token to *borrow*, not what a swap actually *buys*; buffering the amount bought here
+    ///      purchased more debt token than the unbuffered share-based repay ever consumed. The
+    ///      surplus isn't swept back anywhere — `_withdrawAllAssets()` below only collects
+    ///      supply/collateral legs, never a leftover debt-token balance — so it sat as an idle
+    ///      pool balance benefiting remaining holders instead of the withdrawing one, by
+    ///      approximately `repayDebtBufferBps` of the cross-token debt leg each time. Safety
+    ///      margin for the swap's own price movement stays exactly where it already was:
+    ///      `oracleMaxIn()` below still applies `fp.slippageBps` to `amountInMaximum` on the
+    ///      settlement-token *spend* side, and `_estimateFlashAmount()`'s own buffering already
+    ///      over-sizes the flashloan independently — neither of those needed to change for this
+    ///      exact-output purchase to have real safety capacity.
     function _swapSettlementToDebts(
         address pool,
         FlashloanParams memory fp
@@ -631,7 +648,6 @@ contract MorphoBlueLendingPoolAssetGuard is
                 totalBorrowAssets,
                 totalBorrowShares
             );
-            repayAmount = _bufferedRepay(repayAmount);
 
             fee = uniV3Fee[fp.settlementToken][d.mp.loanToken];
             if (fee == 0) revert FeeNotSet();
