@@ -41,7 +41,7 @@ contract MockMorphoBlueManager is IMorphoBlueManager {
         }
     }
 
-    function pruneTrackedMarket(address pool, address /* morpho */, Id market) external override {
+    function pruneTrackedMarket(address pool, Id market) external override {
         bytes32 key = Id.unwrap(market);
         require(_trackedMarkets[pool][key], "Not tracked");
         require(!_validMarkets[pool][key], "Still active");
