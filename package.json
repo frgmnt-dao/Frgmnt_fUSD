@@ -1,7 +1,10 @@
 {
-    "name": "solidity-typescript-hardhat-template",
+    "name": "frgmnt-fusd",
     "version": "1.0.0",
-    "description": "Basic Hardhat template to get you started with Solidity and TypeScript",
+    "description": "Frgmnt fUSD protocol contracts",
+    "engines": {
+        "node": ">=22.0.0 <23.0.0"
+    },
     "scripts": {
         "compile": "hardhat compile",
         "test": "hardhat test",
