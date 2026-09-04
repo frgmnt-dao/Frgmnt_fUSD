@@ -49,4 +49,18 @@ export default defineConfig([
             '@typescript-eslint/no-explicit-any': 'warn',
         },
     },
+    {
+        // Plain Node CommonJS config files (not TS, not bundled/run through Hardhat's
+        // module resolution) — the shared block above declares zero globals and
+        // `sourceType: 'module'`, which is correct for everything else in the repo but
+        // makes `module.exports` here read as an undefined global.
+        files: ['.solcover.js'],
+        languageOptions: {
+            sourceType: 'commonjs',
+            globals: {
+                module: 'writable',
+                require: 'readonly',
+            },
+        },
+    },
 ]);

@@ -39,11 +39,7 @@ describe('UniV3TWAPAggregator', () => {
     const feed = await Feed.deploy();
     await feed.waitForDeployment();
     await feed.setDecimals(options?.feedDecimals ?? 8);
-    await feed.setData(
-      options?.feedPrice ?? PRICE_2000_8,
-      options?.updatedAt ?? 123n,
-      false,
-    );
+    await feed.setData(options?.feedPrice ?? PRICE_2000_8, options?.updatedAt ?? 123n, false);
 
     const Aggregator = await ethers.getContractFactory('UniV3TWAPAggregator');
     const aggregator = await Aggregator.deploy(
@@ -68,7 +64,15 @@ describe('UniV3TWAPAggregator', () => {
       Aggregator.deploy(ethers.ZeroAddress, mainAddress, await feed.getAddress(), 0, 0, 600, 0),
     ).to.be.revertedWith('pool=0');
     await expect(
-      Aggregator.deploy(await pool.getAddress(), ethers.ZeroAddress, await feed.getAddress(), 0, 0, 600, 0),
+      Aggregator.deploy(
+        await pool.getAddress(),
+        ethers.ZeroAddress,
+        await feed.getAddress(),
+        0,
+        0,
+        600,
+        0,
+      ),
     ).to.be.revertedWith('mainToken=0');
     await expect(
       Aggregator.deploy(await pool.getAddress(), mainAddress, ethers.ZeroAddress, 0, 0, 600, 0),
@@ -77,28 +81,46 @@ describe('UniV3TWAPAggregator', () => {
       Aggregator.deploy(await pool.getAddress(), mainAddress, await feed.getAddress(), 0, 0, 0, 0),
     ).to.be.revertedWith('interval=0');
     await expect(
-      Aggregator.deploy(await pool.getAddress(), mainAddress, await feed.getAddress(), 2, 1, 600, 0),
+      Aggregator.deploy(
+        await pool.getAddress(),
+        mainAddress,
+        await feed.getAddress(),
+        2,
+        1,
+        600,
+        0,
+      ),
     ).to.be.revertedWith('invalid price limit');
     await expect(
-      Aggregator.deploy(await pool.getAddress(), pairAddress, await feed.getAddress(), 1, 0, 600, 0),
+      Aggregator.deploy(
+        await pool.getAddress(),
+        pairAddress,
+        await feed.getAddress(),
+        1,
+        0,
+        600,
+        0,
+      ),
     ).to.be.revertedWith('invalid price limit');
 
     const other = await deployToken('OTHER', 18);
     await expect(
-      Aggregator.deploy(await pool.getAddress(), await other.getAddress(), await feed.getAddress(), 0, 0, 600, 0),
+      Aggregator.deploy(
+        await pool.getAddress(),
+        await other.getAddress(),
+        await feed.getAddress(),
+        0,
+        0,
+        600,
+        0,
+      ),
     ).to.be.revertedWith('mainToken not in pool');
   });
 
   it('rejects excessive token and feed decimals', async () => {
-    await expect(deployFixture({ mainDecimals: 78 })).to.be.revertedWith(
-      'main decimals too large',
-    );
-    await expect(deployFixture({ pairDecimals: 78 })).to.be.revertedWith(
-      'pair decimals too large',
-    );
-    await expect(deployFixture({ feedDecimals: 37 })).to.be.revertedWith(
-      'feed decimals too large',
-    );
+    await expect(deployFixture({ mainDecimals: 78 })).to.be.revertedWith('main decimals too large');
+    await expect(deployFixture({ pairDecimals: 78 })).to.be.revertedWith('pair decimals too large');
+    await expect(deployFixture({ feedDecimals: 37 })).to.be.revertedWith('feed decimals too large');
   });
 
   it('returns metadata and an 8-decimal USD answer for equal-decimal feeds', async () => {
@@ -153,14 +175,10 @@ describe('UniV3TWAPAggregator', () => {
     await expect(stale.aggregator.latestRoundData()).to.be.revertedWith('stale feed');
 
     const below = await deployFixture({ lower: PRICE_2000_8 + 1n, upper: PRICE_2000_8 + 2n });
-    await expect(below.aggregator.latestRoundData()).to.be.revertedWith(
-      'answer below lower limit',
-    );
+    await expect(below.aggregator.latestRoundData()).to.be.revertedWith('answer below lower limit');
 
     const above = await deployFixture({ lower: PRICE_2000_8 - 2n, upper: PRICE_2000_8 - 1n });
-    await expect(above.aggregator.latestRoundData()).to.be.revertedWith(
-      'answer above upper limit',
-    );
+    await expect(above.aggregator.latestRoundData()).to.be.revertedWith('answer above upper limit');
   });
 
   it('reverts when cached units exceed runtime conversion bounds', async () => {
@@ -193,7 +211,7 @@ describe('UniV3TWAPAggregator', () => {
       // Default mock delta reports liquidity of exactly 600 for a 600s window — below 601.
       await expect(aggregator.latestRoundData()).to.be.revertedWith('liquidity too low');
       // Sanity: the pool itself wasn't reconfigured — this is purely the aggregator's floor.
-      expect(await pool.getAddress()).to.be.properAddress;
+      void expect(await pool.getAddress()).to.be.properAddress;
     });
 
     it('succeeds when the pool liquidity is at least the configured floor', async () => {
