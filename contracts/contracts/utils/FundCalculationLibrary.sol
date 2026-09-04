@@ -284,6 +284,25 @@ library FundCalculationLibrary {
     ///      this function already effectively duplicates (see below), so this costs one extra call
     ///      rather than plumbing a completeness flag through _withdrawableFundValue()'s two
     ///      differently-capped call sites.
+    /// @dev CertiK FNA-54 follow-up: `portion` (below) must be sized against the pool's GROSS
+    ///      withdrawable assets, not the deficit-adjusted NAV `withdrawableFundValue` itself is.
+    ///      `_withdrawProRataInternal()` applies `portion` to each guard's own reported balance —
+    ///      an underwater lending position's deficit isn't a *negative* balance any guard
+    ///      actually withdraws from (its own getBalance()/getNetRealizableBalance() already
+    ///      floors to 0), so dividing `fairFusd` by the smaller, deficit-adjusted figure inflates
+    ///      `portion` relative to what the gross assets can support: extracting
+    ///      `portion * grossAssets` ends up strictly greater than `fairFusd` whenever any
+    ///      position carries a deficit, which then fails PoolLogic's own
+    ///      `valueDelta > netFusd` sanity check — reverting `InvalidFundValue()` on every
+    ///      immediate withdrawal while any position is underwater, exactly as CertiK's follow-up
+    ///      PoC demonstrated. `totalDeficit` from the `_withdrawableFundValue()` call below is
+    ///      the same total regardless of the liquidity-capping dimension (each guard's own
+    ///      `getDeficit()` query doesn't depend on it) — adding it back to the caller-supplied,
+    ///      already-liquidity-capped `withdrawableFundValue` reconstructs the exact gross,
+    ///      liquidity-capped figure the guards actually withdraw against, with no extra
+    ///      asset-loop pass. Reconstructing this way (rather than a third `_withdrawableFundValue`
+    ///      call with `capByLiquidity=true`) is only valid because `withdrawableFundValue != 0`
+    ///      was already checked above — see the inline note where it's used.
     function computeImmediateWithdrawPortion(
         address pool,
         uint256 netFusd,
@@ -294,7 +313,18 @@ library FundCalculationLibrary {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
-        completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
+        uint256 totalDeficit;
+        {
+            uint256 grossCompleteValue;
+            (grossCompleteValue, totalDeficit) = _withdrawableFundValue(
+                pool,
+                poolManagerLogic,
+                false
+            );
+            completeFundValue = grossCompleteValue > totalDeficit
+                ? grossCompleteValue - totalDeficit
+                : 0;
+        }
         uint256 fairFusd = _applyClaimsHaircut(netFusd, completeFundValue, totalClaims);
         // The fair share can still exceed what's actually liquid right now (a temporary
         // liquidity gap, distinct from insolvency). netFusd has already been burned by the
@@ -302,9 +332,15 @@ library FundCalculationLibrary {
         // unrecoverable user loss for what is, at worst, a self-correcting shortfall — return 0
         // (PoolLogic's existing WithdrawAmountTooSmall check reverts the whole, still-atomic
         // transaction, unwinding that burn) rather than silently paying out less than the fair
-        // share.
+        // share. Compares against the deficit-adjusted (not gross) figure deliberately — this is
+        // a true liquidity/solvency comparison, apples-to-apples against `fairFusd`'s own
+        // deficit-aware basis, unlike the portion formula below which sizes against gross assets.
         if (fairFusd > withdrawableFundValue) return (0, totalClaims, completeFundValue);
-        portion = (fairFusd * 1e18) / withdrawableFundValue;
+        // withdrawableFundValue + totalDeficit == gross, liquidity-capped withdrawable assets —
+        // see this function's own doc comment above. Exact (no double-counting): withdrawableFundValue
+        // is confirmed nonzero above, so it was not itself floored to 0 by a deficit exceeding
+        // gross value, meaning gross > totalDeficit genuinely and this reconstruction is precise.
+        portion = (fairFusd * 1e18) / (withdrawableFundValue + totalDeficit);
     }
 
     /// @notice FNA-42: the accountedAssets reduction for an immediate cash withdrawal that
@@ -443,7 +479,16 @@ library FundCalculationLibrary {
         totalClaims = _activeTotalClaims(pool);
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
-        completeFundValue = _withdrawableFundValue(pool, poolManagerLogic, false);
+        {
+            (uint256 grossCompleteValue, uint256 totalDeficit) = _withdrawableFundValue(
+                pool,
+                poolManagerLogic,
+                false
+            );
+            completeFundValue = grossCompleteValue > totalDeficit
+                ? grossCompleteValue - totalDeficit
+                : 0;
+        }
         uint256 effectiveFusd = _applyClaimsHaircut(grossFusd, completeFundValue, totalClaims);
         if (effectiveFusd == 0) return (0, totalClaims, completeFundValue);
 
@@ -479,24 +524,31 @@ library FundCalculationLibrary {
         address pool,
         address poolManagerLogic
     ) external view returns (uint256) {
-        return _withdrawableFundValue(pool, poolManagerLogic, true);
+        (uint256 grossValue, uint256 totalDeficit) = _withdrawableFundValue(
+            pool,
+            poolManagerLogic,
+            true
+        );
+        return grossValue > totalDeficit ? grossValue - totalDeficit : 0;
     }
 
     /// @dev FNA-54: also sums each asset guard's IDeficitReportingGuard-reported deficit (an
-    ///      underwater lending position's debt exceeding its collateral) and subtracts the total
-    ///      from the withdrawal-sizing NAV, floored at 0 — see
-    ///      PoolManagerLogic._subtractTotalDeficit()'s own docs for the full rationale, which
-    ///      applies identically here. Checked in the same per-asset loop already resolving each
-    ///      `guard`, rather than a second pass over `assets`.
+    ///      underwater lending position's debt exceeding its collateral). Returns `grossValue`
+    ///      and `totalDeficit` separately rather than pre-netting — see the CertiK FNA-54
+    ///      follow-up note on computeImmediateWithdrawPortion() above for why portion-sizing
+    ///      needs the gross figure specifically, not `grossValue - totalDeficit`. Callers that
+    ///      just want the net, deficit-adjusted NAV (matching this function's pre-follow-up
+    ///      behavior) net it themselves — see computeWithdrawableFundValue() immediately above.
+    ///      Checked in the same per-asset loop already resolving each `guard`, rather than a
+    ///      second pass over `assets`.
     function _withdrawableFundValue(
         address pool,
         address poolManagerLogic,
         bool capByLiquidity
-    ) private view returns (uint256 value) {
+    ) private view returns (uint256 grossValue, uint256 totalDeficit) {
         IHasSupportedAsset.Asset[] memory assets = IHasSupportedAsset(poolManagerLogic)
             .getSupportedAssets();
 
-        uint256 totalDeficit;
         for (uint256 i = 0; i < assets.length; ++i) {
             address asset = assets[i].asset;
             address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
@@ -508,10 +560,9 @@ library FundCalculationLibrary {
                 if (withdrawableBalance < reserved) revert InvalidReservedBalance();
                 withdrawableBalance -= reserved;
             }
-            value += IPoolManagerLogic(poolManagerLogic).assetValue(asset, withdrawableBalance);
+            grossValue += IPoolManagerLogic(poolManagerLogic).assetValue(asset, withdrawableBalance);
             totalDeficit += _guardDeficit(pool, asset, guard);
         }
-        value = value > totalDeficit ? value - totalDeficit : 0;
     }
 
     /// @dev FNA-54: checks the IDeficitReportingGuard marker via the same low-level-staticcall

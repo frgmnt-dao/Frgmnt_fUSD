@@ -561,6 +561,59 @@ describe('Utility libraries', () => {
         expect((remainingAssets * 10_000n) / remainingClaims).to.equal(8_000n); // 80.00%
       });
 
+      // CertiK FNA-54 follow-up: reproduces the exact PoC shape from the original finding (100
+      // collateral, 90 borrowed and held directly, collateral falls to 80 → the lending sleeve
+      // is -10 but its own guard clamps to 0) at a portion small enough that the pool is NOT
+      // globally insolvent relative to claims (totalClaims well below completeFundValue) — so
+      // _applyClaimsHaircut does not fire and fairFusd == netFusd at par. This is the case
+      // CertiK's follow-up flagged: portion was still sized against the deficit-adjusted NAV
+      // even though nothing haircuts fairFusd here, so applying that portion to the guard's own
+      // gross balance (the deficit itself isn't a negative balance any guard withdraws from)
+      // extracted more than netFusd — failing PoolLogic's own valueDelta > netFusd check on
+      // every such withdrawal, not just an insolvency edge case.
+      it('sizes the extracted portion against gross assets, not deficit-adjusted NAV, when no global haircut applies (CertiK FNA-54 follow-up)', async () => {
+        const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
+        await token18.mint(await manager.getAddress(), ethers.parseUnits('10', 18)); // Bob's remaining claim
+        await assetGuard18.setBalance(ethers.parseUnits('90', 18)); // gross balance held directly by the pool
+        await assetGuard18.setDeficitReportingGuard(true);
+        await assetGuard18.setDeficit(ethers.parseUnits('10', 18)); // the underwater lending sleeve's shortfall
+
+        const netFusd = ethers.parseUnits('40', 18); // Alice's withdrawal
+        const totalClaims = ethers.parseUnits('10', 18) + netFusd; // 50 — well below completeFundValue (80)
+        const completeFundValue = ethers.parseUnits('90', 18) - ethers.parseUnits('10', 18); // 80
+        const withdrawableFundValue = completeFundValue; // fully liquid, matches PoolLogic's own figure
+
+        const portion = await fund.computeImmediateWithdrawPortion(
+          await fundCalcPool.getAddress(),
+          netFusd,
+          withdrawableFundValue,
+        );
+
+        // Sanity: confirms this test is genuinely in the "no haircut" branch, not accidentally
+        // exercising the same path as the test above.
+        expect(totalClaims).to.be.lessThan(completeFundValue);
+
+        // Old vulnerable formula: portion = netFusd*1e18/withdrawableFundValue = 40*1e18/80 =
+        // 0.5e18 — applied to the guard's real gross balance (90) extracts 45, not 40, silently
+        // over-delivering by exactly the deficit's proportional share and failing PoolLogic's
+        // downstream valueDelta > netFusd check.
+        const oldPortion = (netFusd * ethers.parseUnits('1', 18)) / withdrawableFundValue;
+        expect(oldPortion).to.equal(ethers.parseUnits('0.5', 18));
+        const oldPortionExtracted =
+          (ethers.parseUnits('90', 18) * oldPortion) / ethers.parseUnits('1', 18);
+        expect(oldPortionExtracted).to.equal(ethers.parseUnits('45', 18)); // > netFusd(40) — the bug
+
+        // Fixed formula: portion = fairFusd*1e18/(withdrawableFundValue + totalDeficit) =
+        // 40*1e18/90. Applied to the same gross 90 balance, extraction now matches netFusd up to
+        // negligible (sub-wei-of-a-cent) floor-division dust from composing two divisions — never
+        // exceeding it, unlike the old formula's real, economically-significant 5-token overshoot.
+        const expectedPortion = (netFusd * ethers.parseUnits('1', 18)) / ethers.parseUnits('90', 18);
+        expect(portion).to.equal(expectedPortion);
+        const extracted = (ethers.parseUnits('90', 18) * portion) / ethers.parseUnits('1', 18);
+        expect(extracted).to.be.lessThanOrEqual(netFusd);
+        expect(netFusd - extracted).to.be.lessThan(1000n);
+      });
+
       it('returns 0 when withdrawableFundValue is 0', async () => {
         const { fund, fundCalcPool } = await setupPool();
         expect(
@@ -729,10 +782,19 @@ describe('Utility libraries', () => {
           withdrawableFundValue,
         );
         // Ignoring the deficit would leave completeFundValue at the gross 110, which is >=
-        // totalClaims (100) and so would apply NO haircut: fairFusd = 50, portion =
-        // 50*1e18/80 = 0.625e18. Subtracting the deficit gives completeFundValue = 80 < 100,
-        // correctly triggering a haircut: fairFusd = 50*80/100 = 40, portion = 40*1e18/80 = 0.5e18.
-        expect(portion).to.equal(ethers.parseUnits('0.5', 18));
+        // totalClaims (100) and so would apply NO haircut: fairFusd = 50. Subtracting the
+        // deficit gives completeFundValue = 80 < 100, correctly triggering a haircut:
+        // fairFusd = 50*80/100 = 40.
+        //
+        // CertiK FNA-54 follow-up: portion's own denominator must be the GROSS withdrawable
+        // assets (110), not the deficit-adjusted completeFundValue (80) — _withdrawProRataInternal
+        // applies portion to each guard's own reported balance, and the deficit isn't a negative
+        // balance any guard actually withdraws from, so dividing by the smaller, net figure would
+        // extract more than fairFusd (here, portion 40*1e18/80=0.5e18 applied to the gross 110
+        // balance would withdraw 55, not 40 — the exact overextraction CertiK's PoC demonstrated).
+        // withdrawableFundValue(80) + totalDeficit(30) reconstructs the gross figure (110) the
+        // guard's own balance actually is: portion = 40*1e18/110.
+        expect(portion).to.equal((ethers.parseUnits('40', 18) * 10n ** 18n) / ethers.parseUnits('110', 18));
       });
 
       // FNA-38: a coexisting finalized-but-unclaimed request's FUSD is still counted in
