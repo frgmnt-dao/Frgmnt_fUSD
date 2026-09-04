@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
+import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
 
 contract MockAssetGuard {
     uint256 public dec;
@@ -53,6 +54,11 @@ contract MockAssetGuard {
     // exercise assetValue()'s own shortcut (which never calls getUnitPrice() at all) are unaffected.
     uint256 public unitPrice;
     bool public unitPriceReverts;
+    // CertiK FNA-56: "nesting" test support — when set, getUnitPrice() forwards to
+    // IPoolManagerLogic(msg.sender).getAssetPrice(forwardPriceToAsset) instead of returning the
+    // stored unitPrice, reproducing a pre-valued asset whose own "underlying" is itself another
+    // pre-valued asset. Zero address (the default) means "don't forward".
+    address public forwardPriceToAsset;
 
     function setUnitPrice(uint256 _unitPrice) external {
         unitPrice = _unitPrice;
@@ -62,8 +68,15 @@ contract MockAssetGuard {
         unitPriceReverts = _reverts;
     }
 
+    function setForwardPriceToAsset(address _asset) external {
+        forwardPriceToAsset = _asset;
+    }
+
     function getUnitPrice(address /*asset*/) external view returns (uint256) {
         require(!unitPriceReverts, "MockAssetGuard: getUnitPrice reverts");
+        if (forwardPriceToAsset != address(0)) {
+            return IPoolManagerLogic(msg.sender).getAssetPrice(forwardPriceToAsset);
+        }
         return unitPrice;
     }
 

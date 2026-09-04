@@ -171,6 +171,18 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         return _maximumSupportedAssetCount;
     }
 
+    /// @dev CertiK FNA-56: shared by getAssetPrice(), assetValue(), and _addAsset()'s FNA-18
+    ///      deposit check — the same low-level-staticcall marker check, previously duplicated
+    ///      three times in this file. `guard == address(0)` (no guard registered for this asset
+    ///      type) correctly reports false: there is nothing to be pre-valued.
+    function _isPreValued(address guard) internal view returns (bool) {
+        if (guard == address(0)) return false;
+        (bool hasFn, bytes memory data) = guard.staticcall(
+            abi.encodeWithSignature("isPreValuedAssetGuard()")
+        );
+        return hasFn && data.length == 32 && abi.decode(data, (bool));
+    }
+
     /// @notice Return the latest price of a given asset
     /// @param _asset The address of the asset
     /// @return price The latest price of a given asset
@@ -180,21 +192,16 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     ///      a Morpho Vault V2 / Aave V4 Tokenization share worth more or less than $1) silently
     ///      mispriced any consumer that calls getAssetPrice() directly on the share itself,
     ///      rather than through assetValue()'s own already-correct guard-balance short-circuit —
-    ///      SlippageAccumulator.assetValue() being the concrete case this closes. Same
-    ///      low-level-staticcall marker check as assetValue() uses; on a match, dispatches to the
-    ///      guard's own IPreValuedAssetGuard.getUnitPrice(), a plain (non-try/catch) typed call
-    ///      so a guard's revert (a non-transferable pseudo-asset with no meaningful unit price,
-    ///      or a real share whose pricing dependency failed) propagates instead of being
-    ///      swallowed — the correct fail-closed behavior for a price a caller is about to act on.
+    ///      SlippageAccumulator.assetValue() being the concrete case this closes. On a
+    ///      pre-valued match, dispatches to the guard's own IPreValuedAssetGuard.getUnitPrice(),
+    ///      a plain (non-try/catch) typed call so a guard's revert (a non-transferable
+    ///      pseudo-asset with no meaningful unit price, or a real share whose pricing dependency
+    ///      failed) propagates instead of being swallowed — the correct fail-closed behavior for
+    ///      a price a caller is about to act on.
     function getAssetPrice(address _asset) external view override returns (uint256 price) {
         address guard = getAssetGuard(_asset);
-        if (guard != address(0)) {
-            (bool hasFn, bytes memory data) = guard.staticcall(
-                abi.encodeWithSignature("isPreValuedAssetGuard()")
-            );
-            if (hasFn && data.length == 32 && abi.decode(data, (bool))) {
-                return IPreValuedAssetGuard(guard).getUnitPrice(_asset);
-            }
+        if (_isPreValued(guard)) {
+            return IPreValuedAssetGuard(guard).getUnitPrice(_asset);
         }
         price = IAssetHandler(assetHandler).getUSDPrice(_asset);
     }
@@ -411,13 +418,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
             // ever set — TokenLogic.configureAsset() already requires
             // poolManagerLogic.isDepositAsset() to be true first, so blocking it here is
             // sufficient without a second, redundant check on that separately-upgradeable proxy.
-            if (isDeposit) {
-                (bool isPreValued, bytes memory pvData) = guard.staticcall(
-                    abi.encodeWithSignature("isPreValuedAssetGuard()")
-                );
-                if (isPreValued && pvData.length == 32 && abi.decode(pvData, (bool))) {
-                    revert PreValuedAssetNotDepositable();
-                }
+            if (isDeposit && _isPreValued(guard)) {
+                revert PreValuedAssetNotDepositable();
             }
         }
 
@@ -566,13 +568,8 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         if (_amount == 0) return 0;
 
         address guard = getAssetGuard(_asset);
-        if (guard != address(0)) {
-            (bool hasFn, bytes memory data) = guard.staticcall(
-                abi.encodeWithSignature("isPreValuedAssetGuard()")
-            );
-            if (hasFn && data.length == 32 && abi.decode(data, (bool))) {
-                return _amount;
-            }
+        if (_isPreValued(guard)) {
+            return _amount;
         }
 
         uint256 price = IAssetHandler(assetHandler).getUSDPrice(_asset);
