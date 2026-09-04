@@ -324,6 +324,30 @@ describe('MorphoVaultV2AssetGuard', () => {
       ).to.equal(expected);
     });
 
+    // CertiK FNA-56: proves getUnitPrice()/getDecimals() work correctly for a share token that
+    // is itself 6-decimal (not just a 6-decimal underlying, already covered above) — a share
+    // with fewer decimals than its own convertToAssets() ratio assumes is exactly the case a
+    // hardcoded 18-decimal oneShare would silently mis-scale.
+    it('values one whole share correctly when the share token itself is 6-decimal, not 18', async () => {
+      const { guard, poolManager, vault, vaultAddr, usdcAddr } = await deploy();
+
+      await vault.setDecimalsOverride(6);
+      // 1 share (1e6 raw 6dp share units) -> 2 USDC (2,000,000 raw 6dp units): assetsPerShare is
+      // calibrated per 1e18 shares regardless of the share's own decimals (matches the mock's
+      // convertToAssets() formula), so 1e6 shares -> 2e6 assets requires assetsPerShare = 2e18.
+      await vault.setAssetsPerShare(ethers.parseUnits('2', 18));
+      await poolManager.setAssetGuard(usdcAddr, true, 6n);
+      await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('3', 18)); // USDC @ $3
+
+      expect(await guard.getDecimals(vaultAddr)).to.equal(6n);
+
+      // 1 share = 2 USDC = 2 * $3 = $6.
+      const expected = ethers.parseUnits('6', 18);
+      expect(
+        await poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr),
+      ).to.equal(expected);
+    });
+
     it('propagates the vault\'s own revert reason when asset() reverts, rather than returning a misleading price', async () => {
       const { guard, poolManager, vault, vaultAddr } = await deploy();
       await vault.setBrokenAsset(true);

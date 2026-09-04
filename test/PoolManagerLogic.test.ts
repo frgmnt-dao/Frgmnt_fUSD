@@ -925,6 +925,57 @@ describe('PoolManagerLogic', () => {
         await mockAssetHandler.setPrice(tokenA, ethers.parseUnits('1', 18));
         expect(await contract.getAssetPrice(tokenA)).to.equal(ethers.parseUnits('1', 18));
       });
+
+      // CertiK FNA-56: "nesting" — a pre-valued asset (e.g. a vault share) whose own "underlying"
+      // is itself a different pre-valued asset. getUnitPrice() uses `msg.sender` (the calling
+      // PoolManagerLogic instance, never the originating guard) as its pricing context — proving
+      // this holds at any nesting depth: PoolManagerLogic.getAssetPrice() is always the *direct*
+      // caller of getUnitPrice() at every level, so the chain can never accumulate a stale or
+      // wrong msg.sender no matter how deep. Exercised here via two real, differently-typed
+      // MockAssetGuard instances chained through the real PoolManagerLogic dispatch, not a mock
+      // that fakes the cascade.
+      describe('nesting: a pre-valued asset whose underlying is itself pre-valued', () => {
+        async function setupNestedAssets(fixture: any) {
+          const { mockAssetHandler, mockGovernance } = fixture;
+          const MockAssetGuard = await ethers.getContractFactory('MockAssetGuard');
+
+          const outerGuard = await MockAssetGuard.deploy(18);
+          const innerGuard = await MockAssetGuard.deploy(18);
+          const outerAsset = ethers.Wallet.createRandom().address;
+          const innerAsset = ethers.Wallet.createRandom().address;
+
+          await mockGovernance.setAssetGuard(3, await outerGuard.getAddress());
+          await mockGovernance.setAssetGuard(4, await innerGuard.getAddress());
+          await mockAssetHandler.addAsset(outerAsset, 3, DUMMY_AGGREGATOR);
+          await mockAssetHandler.addAsset(innerAsset, 4, DUMMY_AGGREGATOR);
+
+          await outerGuard.setPreValued(true);
+          await innerGuard.setPreValued(true);
+          await outerGuard.setForwardPriceToAsset(innerAsset);
+
+          return { ...fixture, outerGuard, innerGuard, outerAsset, innerAsset };
+        }
+
+        it('cascades through two levels and returns the innermost real unit price', async () => {
+          const fixture = await loadFixture(setupFixture);
+          const { contract, innerGuard, outerAsset } = await setupNestedAssets(fixture);
+
+          await innerGuard.setUnitPrice(ethers.parseUnits('42', 18));
+
+          expect(await contract.getAssetPrice(outerAsset)).to.equal(ethers.parseUnits('42', 18));
+        });
+
+        it('propagates a revert from the innermost guard through the outer dispatch', async () => {
+          const fixture = await loadFixture(setupFixture);
+          const { contract, innerGuard, outerAsset } = await setupNestedAssets(fixture);
+
+          await innerGuard.setUnitPriceReverts(true);
+
+          await expect(contract.getAssetPrice(outerAsset)).to.be.revertedWith(
+            'MockAssetGuard: getUnitPrice reverts',
+          );
+        });
+      });
     });
 
     // FNA-18: a pre-valued/complex guard's getBalance() already returns a fully priced USD-18

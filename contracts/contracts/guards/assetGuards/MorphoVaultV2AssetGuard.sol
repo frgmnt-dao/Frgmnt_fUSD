@@ -7,6 +7,7 @@ pragma solidity ^0.8.24;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IMorphoVaultV2Manager } from "../../interfaces/IMorphoVaultV2Manager.sol";
 import { IPoolManagerLogic } from "../../interfaces/IPoolManagerLogic.sol";
@@ -403,7 +404,11 @@ contract MorphoVaultV2AssetGuard is
 
         uint256 underlyingDecimals = IPoolManagerLogic(msg.sender).assetDecimal(underlying);
 
-        uint256 unitPrice = (underlyingAmount * price) / (10 ** underlyingDecimals);
+        // CertiK FNA-56: Math.mulDiv (512-bit intermediate) rather than plain
+        // (underlyingAmount * price) / 10**underlyingDecimals, so a very large vault balance
+        // priced through a high-value underlying can't overflow the intermediate product before
+        // the division brings it back into range.
+        uint256 unitPrice = Math.mulDiv(underlyingAmount, price, 10 ** underlyingDecimals);
         if (unitPrice == 0) revert ZeroUnitPrice();
         return unitPrice;
     }

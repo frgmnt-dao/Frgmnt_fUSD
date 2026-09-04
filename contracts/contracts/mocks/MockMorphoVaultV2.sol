@@ -19,8 +19,21 @@ contract MockMorphoVaultV2 is ERC20 {
     address[] public adapterList;
     mapping(address => uint256) public forceDeallocatePenalty;
 
+    // CertiK FNA-56: lets tests exercise getUnitPrice()/getDecimals() against a non-18-decimal
+    // share token, not just a non-18-decimal underlying. 0 (the default) means "use ERC20's own
+    // 18-decimal default", so existing tests that never call this are unaffected.
+    uint8 private _decimalsOverride;
+
     constructor(address underlying_) ERC20("Mock Morpho Vault V2", "mMVV2") {
         underlying = underlying_;
+    }
+
+    function setDecimalsOverride(uint8 decimals_) external {
+        _decimalsOverride = decimals_;
+    }
+
+    function decimals() public view override returns (uint8) {
+        return _decimalsOverride == 0 ? super.decimals() : _decimalsOverride;
     }
 
     // ----------------- test helpers -----------------
