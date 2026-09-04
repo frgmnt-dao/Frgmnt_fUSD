@@ -31,6 +31,26 @@ import { IMorphoBlueManager } from "../../interfaces/IMorphoBlueManager.sol";
 ///      reason.
 contract MorphoBlueManager is IMorphoBlueManager, Ownable {
     /*//////////////////////////////////////////////////////////////
+                                ERRORS
+    //////////////////////////////////////////////////////////////*/
+
+    error MorphoZero();
+
+    /*//////////////////////////////////////////////////////////////
+                              IMMUTABLES
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice CertiK FNA-52 follow-up: the real Morpho Blue core contract, fixed at deploy
+    ///         time. `pruneTrackedMarket()` below used to take this as a caller-supplied
+    ///         parameter — since the function is deliberately permissionless, anyone could pass
+    ///         a stub contract whose `position()` always returns an empty Position, untracking a
+    ///         delisted market that still holds a live position on the *real* Morpho and
+    ///         restoring the exact NAV/withdrawal-safety gap FNA-52 closed. Reading from this
+    ///         immutable instead removes that attack surface structurally — there is no longer
+    ///         any address for a caller to spoof.
+    address public immutable morpho;
+
+    /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
@@ -63,7 +83,10 @@ contract MorphoBlueManager is IMorphoBlueManager, Ownable {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor() Ownable(msg.sender) {}
+    constructor(address morpho_) Ownable(msg.sender) {
+        if (morpho_ == address(0)) revert MorphoZero();
+        morpho = morpho_;
+    }
 
     /*//////////////////////////////////////////////////////////////
                         POOL CONFIGURATION
@@ -121,8 +144,11 @@ contract MorphoBlueManager is IMorphoBlueManager, Ownable {
     ///      Requires: (1) currently tracked, (2) NOT in the active allowlist — an active market
     ///      is never prunable, since supplying/borrowing into it again with no tracking would
     ///      silently recreate this same bug, and (3) zero live position (collateral, supply
-    ///      shares, and borrow shares all zero) on `morpho` right now.
-    function pruneTrackedMarket(address pool, address morpho, Id market) external {
+    ///      shares, and borrow shares all zero) on the real `morpho` immutable right now.
+    ///      CertiK FNA-52 follow-up: `morpho` used to be a caller-supplied parameter here —
+    ///      reading the immutable instead closes the spoofed-empty-position bypass; see that
+    ///      variable's own documentation.
+    function pruneTrackedMarket(address pool, Id market) external {
         require(isTrackedPoolMarket[pool][market], "Not tracked");
         require(!isValidPoolMarket[pool][market], "Still active");
 

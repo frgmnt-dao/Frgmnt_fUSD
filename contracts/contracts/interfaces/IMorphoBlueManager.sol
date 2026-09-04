@@ -20,9 +20,12 @@ interface IMorphoBlueManager {
     ///      Reverts unless the market is currently tracked, no longer active
     ///      (isValidPoolMarket == false — an active market is never prunable, so a pool can
     ///      never lose valuation/withdrawal coverage for a market it may still supply/borrow
-    ///      into), and the pool's live position on `morpho` (the Morpho Blue core contract) in
-    ///      this market has zero collateral, supply shares, and borrow shares.
-    function pruneTrackedMarket(address pool, address morpho, Id market) external;
+    ///      into), and the pool's live position on the real Morpho Blue core contract (an
+    ///      immutable fixed at deploy time — CertiK's FNA-52 follow-up removed the earlier
+    ///      caller-supplied `morpho` parameter, which let anyone spoof an empty position via a
+    ///      stub contract and untrack a market that still held a live one) in this market has
+    ///      zero collateral, supply shares, and borrow shares.
+    function pruneTrackedMarket(address pool, Id market) external;
 
     /*//////////////////////////////////////////////////////////////
                                 GETTERS

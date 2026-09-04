@@ -20,6 +20,7 @@ const POOL_FACTORY = '0x9530E699E519D7BCF621BA7CA17e119B6865b5C7'; // PoolManage
 const UNISWAP_ROUTER = '0x2626664c2603336E57B271c5C0b26F421741e481';
 const UNI_POSITION_MANAGER = '0x03a520b32C04BF3bEEf7BEb72E919cf822Ed34f1';
 const AAVE_DATA_PROVIDER = '0x0F43731EB8d45A581f4a36DD74F5f358bc90C73A';
+const MORPHO = '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb'; // Morpho Blue core (same address deploy_asset_guards.ts uses)
 
 const DECAY_TIME = 21600; // 6h
 const MAX_CUMULATIVE_SLIPPAGE = 50000; // 5%
@@ -136,7 +137,7 @@ async function main() {
 
   console.log('\n--- Deploy MorphoBlueManager ---');
   const MorphoManager = await ethers.getContractFactory('MorphoBlueManager', signer);
-  const morphoManager = await MorphoManager.deploy(txOpts());
+  const morphoManager = await MorphoManager.deploy(MORPHO, txOpts());
   await morphoManager.waitForDeployment();
   console.log('Address:', morphoManager.target);
   nonce++;

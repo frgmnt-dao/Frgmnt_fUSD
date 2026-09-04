@@ -3,10 +3,15 @@ import { ethers } from 'hardhat';
 import { Id } from '../typechain-types/@morpho-org/morpho-blue/src/interfaces/IMorpho';
 
 describe('MorphoBlueManager', () => {
+  // CertiK FNA-52 follow-up: morpho is now a constructor-fixed immutable, not a per-call
+  // pruneTrackedMarket() parameter — every test needs a real (non-zero) address here, but most
+  // don't care what it actually points to. Tests that exercise pruneTrackedMarket()'s real
+  // position-reading behavior use deployWithMorpho() below instead, which wires a genuine
+  // MockMorphoBlue as this same immutable.
   async function deploy() {
     const [owner, other] = await ethers.getSigners();
     const Factory = await ethers.getContractFactory('MorphoBlueManager');
-    const manager = await Factory.deploy();
+    const manager = await Factory.deploy(ethers.Wallet.createRandom().address);
     await manager.waitForDeployment();
     return { manager, owner, other };
   }
@@ -16,6 +21,22 @@ describe('MorphoBlueManager', () => {
   it('deployer is owner', async () => {
     const { manager, owner } = await deploy();
     expect(await manager.owner()).to.equal(owner.address);
+  });
+
+  it('constructor reverts on zero morpho address', async () => {
+    const Factory = await ethers.getContractFactory('MorphoBlueManager');
+    await expect(Factory.deploy(ethers.ZeroAddress)).to.be.revertedWithCustomError(
+      Factory,
+      'MorphoZero',
+    );
+  });
+
+  it('constructor stores the morpho address as an immutable', async () => {
+    const morphoAddr = ethers.Wallet.createRandom().address;
+    const Factory = await ethers.getContractFactory('MorphoBlueManager');
+    const manager = await Factory.deploy(morphoAddr);
+    await manager.waitForDeployment();
+    expect(await manager.morpho()).to.equal(morphoAddr);
   });
 
   it('setPoolMarkets reverts for zero pool', async () => {
@@ -125,14 +146,23 @@ describe('MorphoBlueManager', () => {
   // FNA-52: trackedPoolMarkets / pruneTrackedMarket
   // -----------------------------------------------------------------------
   describe('FNA-52: tracked markets survive delisting', () => {
+    // CertiK FNA-52 follow-up: morpho must now be wired in at construction time, so the
+    // MockMorphoBlue has to exist before the manager does — unlike deploy()'s base case, this
+    // helper builds its own manager rather than reusing deploy()'s (which points at an unrelated
+    // random address).
     async function deployWithMorpho() {
-      const base = await deploy();
+      const [owner, other] = await ethers.getSigners();
       const MorphoFactory = await ethers.getContractFactory('MockMorphoBlue');
       const morpho = await MorphoFactory.deploy();
       await morpho.waitForDeployment();
       const morphoAddr = await morpho.getAddress();
+
+      const Factory = await ethers.getContractFactory('MorphoBlueManager');
+      const manager = await Factory.deploy(morphoAddr);
+      await manager.waitForDeployment();
+
       const pool = ethers.Wallet.createRandom().address;
-      return { ...base, morpho, morphoAddr, pool };
+      return { manager, owner, other, morpho, morphoAddr, pool };
     }
 
     it('setPoolMarkets also tracks newly-authorized markets', async () => {
@@ -165,44 +195,38 @@ describe('MorphoBlueManager', () => {
     });
 
     it('pruneTrackedMarket reverts if the market was never tracked', async () => {
-      const { manager, pool, morphoAddr } = await deployWithMorpho();
+      const { manager, pool } = await deployWithMorpho();
       const id1 = mkId(1);
-      await expect(manager.pruneTrackedMarket(pool, morphoAddr, id1)).to.be.revertedWith(
-        'Not tracked',
-      );
+      await expect(manager.pruneTrackedMarket(pool, id1)).to.be.revertedWith('Not tracked');
     });
 
     it('pruneTrackedMarket reverts while the market is still actively allowed', async () => {
-      const { manager, pool, morphoAddr } = await deployWithMorpho();
+      const { manager, pool } = await deployWithMorpho();
       const id1 = mkId(1);
       await manager.setPoolMarkets(pool, [id1]);
 
-      await expect(manager.pruneTrackedMarket(pool, morphoAddr, id1)).to.be.revertedWith(
-        'Still active',
-      );
+      await expect(manager.pruneTrackedMarket(pool, id1)).to.be.revertedWith('Still active');
     });
 
     it('pruneTrackedMarket reverts if the pool still holds a nonzero position', async () => {
-      const { manager, morpho, pool, morphoAddr } = await deployWithMorpho();
+      const { manager, morpho, pool } = await deployWithMorpho();
       const id1 = mkId(1);
       await manager.setPoolMarkets(pool, [id1]);
       await manager.setPoolMarkets(pool, []); // delist, now tracked-but-inactive
       await morpho.setPosition(id1, pool, 0n, 0n, 100n); // nonzero collateral
 
-      await expect(manager.pruneTrackedMarket(pool, morphoAddr, id1)).to.be.revertedWith(
-        'Market not empty',
-      );
+      await expect(manager.pruneTrackedMarket(pool, id1)).to.be.revertedWith('Market not empty');
     });
 
     it('pruneTrackedMarket removes an empty, delisted market and emits TrackedMarketPruned', async () => {
-      const { manager, morpho, pool, morphoAddr } = await deployWithMorpho();
+      const { manager, morpho, pool } = await deployWithMorpho();
       const id1 = mkId(1);
       const id2 = mkId(2);
       await manager.setPoolMarkets(pool, [id1, id2]);
       await manager.setPoolMarkets(pool, [id2]); // delist id1
       await morpho.setPosition(id1, pool, 0n, 0n, 0n);
 
-      await expect(manager.pruneTrackedMarket(pool, morphoAddr, id1))
+      await expect(manager.pruneTrackedMarket(pool, id1))
         .to.emit(manager, 'TrackedMarketPruned')
         .withArgs(pool, id1);
 
@@ -212,13 +236,31 @@ describe('MorphoBlueManager', () => {
       expect([...tracked]).to.deep.equal([id2]);
     });
 
+    // CertiK FNA-52 follow-up: pruneTrackedMarket() no longer takes a caller-supplied `morpho`
+    // address at all — the only way to influence the emptiness check is the real, immutable
+    // Morpho this manager was constructed with. Proves the spoofed-empty-position bypass is
+    // structurally gone, not just harder to trigger: the market still holds a real, nonzero
+    // position on the wired-in morpho, so pruning it must revert regardless of anything a caller
+    // could otherwise have supplied.
+    it('cannot be bypassed by any caller-supplied address — only the real, constructor-fixed morpho is ever consulted', async () => {
+      const { manager, morpho, pool } = await deployWithMorpho();
+      const id1 = mkId(1);
+      await manager.setPoolMarkets(pool, [id1]);
+      await manager.setPoolMarkets(pool, []); // delist, now tracked-but-inactive
+      await morpho.setPosition(id1, pool, 0n, 0n, 100n); // real, live position — not empty
+
+      // pruneTrackedMarket(pool, market) — note there is no morpho argument to spoof at all.
+      await expect(manager.pruneTrackedMarket(pool, id1)).to.be.revertedWith('Market not empty');
+      expect(await manager.isTrackedPoolMarket(pool, id1)).to.equal(true);
+    });
+
     it('re-adding a pruned market via setPoolMarkets re-tracks it', async () => {
-      const { manager, morpho, pool, morphoAddr } = await deployWithMorpho();
+      const { manager, morpho, pool } = await deployWithMorpho();
       const id1 = mkId(1);
       await manager.setPoolMarkets(pool, [id1]);
       await manager.setPoolMarkets(pool, []);
       await morpho.setPosition(id1, pool, 0n, 0n, 0n);
-      await manager.pruneTrackedMarket(pool, morphoAddr, id1);
+      await manager.pruneTrackedMarket(pool, id1);
       expect(await manager.isTrackedPoolMarket(pool, id1)).to.equal(false);
 
       await manager.setPoolMarkets(pool, [id1]);
