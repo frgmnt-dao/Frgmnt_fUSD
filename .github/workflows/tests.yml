@@ -21,5 +21,8 @@ jobs:
             - name: Branch parity check
               run: bash scripts/check-branch-parity.sh
 
+            - name: Contract size check (EIP-170 / EIP-3860)
+              run: npm run check:contract-size
+
             - name: Test
               run: npm run coverage # or npm run test
