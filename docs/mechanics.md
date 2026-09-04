@@ -17,24 +17,35 @@ User
   │
   └─ TokenLogic.deposit(asset, amount, to)
          │
-         ├─ Validate: asset allowed, cap not exceeded, amount > 0
+         ├─ Validate: asset allowed, amount > 0
+         │
+         ├─ Checkpoint fee accrual FIRST (CertiK FNA-22):
+         │     PoolLogic.checkpointFeesForDeposit() — settles pending fees using the
+         │     fund value/fUSD supply as they stand right now, before this deposit's
+         │     collateral/fUSD land — so new fUSD is never retroactively taxed for
+         │     yield that accrued before it existed. Reverts if active NAV is
+         │     incomplete (fails closed, unlike stake/unstake/harvest's accrual).
+         │
+         ├─ Transfer asset from msg.sender to PoolLogic, then measure the ACTUAL
+         │     balance delta received (CertiK FNA-23) — not the nominal `amount` —
+         │     so a fee-on-transfer collateral token can't mint fUSD against
+         │     collateral the pool never got
          │
          ├─ Query price: PoolManagerLogic.getAssetPrice(asset)
          │     └─ AssetHandler.getUSDPrice(asset)
          │           └─ Chainlink.latestRoundData() + staleness check
          │
          ├─ Compute fUSD amount:
-         │     fusdAmount = (amount × price) / 10^assetDecimals
+         │     fusdAmount = (received × price) / 10^assetDecimals
          │     (normalized to 18 decimals)
          │
          ├─ Enforce: fusdAmount ≥ minDepositUSD
          │           fusdAmount ≥ user-specified minFusdAmount
+         │           protocolFusdOutstanding + fusdAmount ≤ maxDepositFusdSupply
          │
-         ├─ Update: totalDeposited[asset] += amount
+         ├─ Update: totalDeposited[asset] += received
          │
          ├─ Mint: fUSD to recipient
-         │
-         ├─ Transfer: asset from msg.sender to PoolLogic (vault)
          │
          └─ Call: PoolLogic.incrementAccountedAssets(fusdAmount)
 ```
@@ -56,11 +67,14 @@ The cooldown system prevents flash-deposit → immediate-withdrawal attacks.
 ### Mechanism
 
 When fUSD is minted to a recipient:
-- `cooldownTimestamp[recipient]` is updated using a **time-weighted average**:
+- `cooldownTimestamp[recipient]` is updated using a **time-weighted average, rounded up** (CertiK FNA-55):
 
 ```
-newTimestamp = (oldTimestamp × oldBalance + now × mintAmount) / (oldBalance + mintAmount)
+newTimestamp = ceilDiv(oldTimestamp × oldPrincipal + now × mintAmount,
+                        oldPrincipal + mintAmount)
 ```
+
+Rounding up (rather than down) is required: floor division let an attacker split one large mint into many small ones to shorten their own effective cooldown expiry versus a single equal-sized mint. Proven by induction that no split can beat a single mint once every step rounds up.
 
 - `cooldownPrincipal[recipient]` tracks the total fUSD subject to cooldown.
 
@@ -126,21 +140,30 @@ Yield accrues automatically when any state-changing vault operation is performed
 
 ### `_accrueYield()` Logic
 
+`accountedAssets` is a **high-water mark**: it is only ever raised to match a new higher NAV, never lowered when NAV drops — a loss stays an unrecognized "overhang" until NAV recovers past the old mark, and NAV consumed by a queued/immediate withdrawal reduces the mark directly rather than waiting for the next accrual (see `FundCalculationLibrary`'s overhang-tracking, CertiK FNA-42).
+
 ```
-1. Read currentFundValue = totalFundValue()
+1. Read (activeValue, navComplete) = activeTotalValueWithCompleteness()
+   (reserved-value-excluding — a finalized-but-unclaimed queued withdrawal's
+   escrowed liquidity is excluded from this figure entirely, CertiK FNA-17)
 
-2. grossYield = currentFundValue - accountedAssets
-   (accountedAssets is the last-known total value)
+2. If !navComplete: no-op (zero fees, accountedAssets/lastFeeMintTime unchanged) —
+   deliberately does NOT revert for stake/unstake/harvest, since blocking those
+   over one guard's transient valuation failure is worse than deferring
+   recognition. checkpointFeesForDeposit() (a deposit's own accrual call) is
+   the one caller that DOES revert on incomplete NAV instead (CertiK FNA-22/
+   FNA-04 follow-up) — new value entering can be safely blocked; existing
+   value being withdrawn/staked against cannot.
 
-3. If grossYield > 0:
+3. If navComplete and activeValue > accountedAssets:
+   grossYield = activeValue - accountedAssets
    a. performanceFee = grossYield × performanceFeeNumerator / denominator
-   b. managementFee = computed based on time elapsed and AUM
+   b. managementFee = computed based on time elapsed and AUM, capped at netYield
    c. netYield = grossYield - performanceFee - managementFee
 
    d. rewardPerShare += netYield × 1e18 / totalSupply(sfUSD)
    e. Mint fee shares to manager (performance + management)
-
-4. accountedAssets = currentFundValue
+   f. accountedAssets = activeValue   (raised — never lowered here)
 ```
 
 ### Pending Rewards
@@ -205,21 +228,30 @@ User
          │
          ├─ Check cooldown: TokenLogic.getExitRemainingCooldown(user) == 0
          │
-         ├─ Compute portion:
-         │     portion = fusdAmount × 1e18 / totalFundValue()
+         ├─ Apply exit fee, burn net fUSD from user
          │
-         ├─ Apply exit fee: fUSD fee minted to manager
+         ├─ Compute portion (CertiK FNA-05/FNA-07/FNA-54 — see below):
+         │     totalClaims = outstanding fUSD + this withdrawal's own netFusd
+         │     fairFusd = netFusd × completeFundValue / max(completeFundValue, totalClaims)
+         │       (the claims haircut — scales DOWN only if the pool is underwater;
+         │        never scales up)
+         │     portion = fairFusd × 1e18 / (liquidityCappedWithdrawableValue + totalDeficit)
          │
          ├─ For each supported asset in the vault:
-         │     assetGuard.withdrawProcessing(pool, asset, to, portion)
+         │     assetGuard.withdrawProcessing(pool, asset, portion, to)
          │       → encodes withdrawal transaction(s)
          │     Execute each transaction
          │
-         ├─ Burn: fUSD from user
-         └─ Emit CashWithdrawImmediate
+         └─ Reduce accountedAssets by the overhang-aware amount (CertiK FNA-42):
+               reduction = valueDelta + netFusd × overhang / totalClaims
+               (overhang = max(accountedAssets - completeFundValue, 0) — ensures a
+                withdrawing claim's own share of any pre-existing unrecognized loss
+                leaves the books along with it, not just the raw dollars that moved)
 ```
 
 **Complex assets** (Aave positions, Morpho positions, Uniswap V3 LP) require flashloan-based unwinding. The `withdrawCashImmediateSafe()` variant accepts pre-computed complex asset data for slippage-protected unwinding.
+
+**Loss socialization (CertiK FNA-05):** if the pool is genuinely underwater (`totalClaims > completeFundValue`), every withdrawal — first or last — is scaled down by the same collateralization ratio, rather than early redeemers exiting at par while later holders absorb a larger deficit.
 
 ---
 
@@ -245,9 +277,16 @@ User
 Manager
   └─ PoolLogic.finalizeCashWithdraw(requestId)
          │
-         ├─ Convert vault holdings to targetAsset as needed
-         ├─ Reserve the required asset balance
-         └─ Update request status → Finalized
+         ├─ Apply the same claims haircut as the immediate path (CertiK FNA-05) to
+         │     size the payout in `targetAsset` units at today's price
+         │
+         └─ Physically move the payout amount into this pool's dedicated
+               WithdrawalEscrow (CertiK FNA-03) — NOT just bookkept as "reserved"
+               while remaining part of the pool's own balance. An earlier,
+               reservation-only design let a spender approved before the
+               reservation existed (or a second, independently-approved spender)
+               drain it via a guarded transaction; physically segregating the
+               asset removes that bug class structurally. Status → FinalizedEscrowed.
 ```
 
 ### Step 3: Claim
@@ -256,11 +295,14 @@ Manager
 User
   └─ PoolLogic.claimCashWithdraw(requestId)
          │
-         ├─ Verify status == Finalized
-         ├─ Transfer reserved asset to user
+         ├─ Verify status == FinalizedEscrowed (or legacy Finalized, for a request
+         │     finalized before WithdrawalEscrow was wired in — CertiK FNA-03)
+         ├─ Release from WithdrawalEscrow (or the pool's own legacy balance)
          ├─ Burn locked fUSD
          └─ Update request status → Claimed
 ```
+
+`accountedAssets` is deliberately **not** touched at claim time (CertiK FNA-26) — that adjustment already happened at finalize, when the payout left active NAV; re-subtracting it again at claim would double-count the reduction for a haircut claim and eventually let a later accrual mint unbacked fUSD against the resulting gap.
 
 ---
 
@@ -310,18 +352,21 @@ value = balance × getUSDPrice(asset) / 10^18
 
 Prices are 18-decimal Chainlink values. Balances are normalized by the asset guard.
 
-### Pro-Rata Withdrawal Portion
+### Pro-Rata Withdrawal Portion (CertiK FNA-05/FNA-07/FNA-54)
 
 ```
-portion = fusdAmount × 1e18 / totalFundValue
-withdrawAmount(asset) = assetBalance × portion / 1e18
+fairFusd = netFusd × completeFundValue / max(completeFundValue, totalClaims)
+portion  = fairFusd × 1e18 / (liquidityCappedWithdrawableValue + totalDeficit)
+withdrawAmount(asset) = assetBalance(asset) × portion / 1e18
 ```
 
-### Cooldown Timestamp (Time-Weighted Average)
+`portion` is sized against **gross** withdrawable assets (`+ totalDeficit`, not the deficit-netted figure) because each asset guard's own `getBalance()`/`getWithdrawableBalance()` never reports a negative balance for an underwater position — it floors at 0 — so dividing by the smaller, netted figure would size `portion` beyond what gross assets can actually deliver. See [FundCalculationLibrary](contracts/FundCalculationLibrary.md) for the full derivation.
+
+### Cooldown Timestamp (Time-Weighted Average, Rounded Up — CertiK FNA-55)
 
 ```
-newTimestamp = (oldTimestamp × oldPrincipal + now × newAmount)
-               / (oldPrincipal + newAmount)
+newTimestamp = ceilDiv(oldTimestamp × oldPrincipal + now × newAmount,
+                        oldPrincipal + newAmount)
 ```
 
 ### Health Factor (Aave / Morpho)

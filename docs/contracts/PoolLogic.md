@@ -12,13 +12,11 @@ PoolLogic is the protocol's yield vault. It holds all deposited collateral, mana
 
 Users stake fUSD to receive sfUSD, a non-transferable receipt token whose share price increases as the vault accumulates yield. Yield is distributed via a `rewardPerShare` accumulator and can be harvested at any time as fUSD.
 
-The vault supports two withdrawal modes — **immediate** (pro-rata across all assets) and **queued** (manager-finalized requests) — and integrates with Aave V3 and Morpho Blue flash loans for complex position unwinding.
+The vault supports two withdrawal modes — **immediate** (pro-rata across all assets) and **queued** (manager-finalized requests) — and integrates with Aave V3 and Morpho Blue flash loans for complex position unwinding. This is the most heavily audited contract in the protocol: PoolLogic.sol has essentially no remaining EIP-170 bytecode headroom (see the FNA-03/FNA-04/FNA-42 history), which is why so much of its own arithmetic has been pushed into [FundCalculationLibrary](FundCalculationLibrary.md).
 
 ---
 
 ## User-Facing Functions (Quick Reference)
-
-The following functions are called directly by end users:
 
 | Function | Purpose |
 |----------|---------|
@@ -26,15 +24,16 @@ The following functions are called directly by end users:
 | [`stake(uint256, uint256)`](#stake--stake-with-min-shares) | Stake with minimum share slippage protection |
 | [`unstake(uint256)`](#unstake) | Burn sfUSD shares, receive fUSD back |
 | [`harvest()`](#harvest) | Claim accumulated fUSD yield rewards |
-| [`withdrawCashImmediate(uint256)`](#withdrawcashimmediate) | Redeem fUSD for pro-rata underlying assets (immediate mode) |
-| [`withdrawCashImmediateTo(address, uint256)`](#withdrawcashimmediate) | Same, with custom recipient |
-| [`withdrawCashImmediateSafe(uint256, ComplexAsset[])`](#withdrawcashimmediate) | Immediate withdrawal with Aave/Morpho unwind data |
-| [`withdrawCashImmediateToSafe(address, uint256, ComplexAsset[])`](#withdrawcashimmediate) | Immediate withdrawal to recipient with unwind data |
+| [`withdrawCashImmediate(uint256)`](#immediate-cash-withdrawal) | Redeem fUSD for pro-rata underlying assets (immediate mode) |
+| [`withdrawCashImmediateTo(address, uint256)`](#immediate-cash-withdrawal) | Same, with custom recipient |
+| [`withdrawCashImmediateSafe(uint256, ComplexAsset[])`](#immediate-cash-withdrawal) | Immediate withdrawal with Aave/Morpho unwind data |
+| [`withdrawCashImmediateToSafe(address, uint256, ComplexAsset[])`](#immediate-cash-withdrawal) | Immediate withdrawal to recipient with unwind data |
 | [`requestCashWithdraw(uint256, address)`](#requestcashwithdraw) | Request a queued withdrawal (queued mode) |
+| [`finalizeCashWithdraw(uint256)`](#finalizecashwithdraw) | Manager finalizes a queued request into the escrow |
 | [`claimCashWithdraw(uint256)`](#claimcashwithdraw) | Claim a finalized queued withdrawal |
 | [`pendingReward(address)`](#view-functions) | View unclaimed fUSD rewards |
 
-> **Immediate vs. Queued Mode:** The manager toggles withdrawal mode. In **immediate mode**, cash withdrawals happen in a single transaction. In **queued mode**, users request a withdrawal, the manager finalizes it, then users claim.
+> **Immediate vs. Queued Mode:** The manager toggles withdrawal mode. In **immediate mode**, cash withdrawals happen in a single transaction, pro-rata across every supported asset. In **queued mode**, users request a withdrawal, the manager finalizes it (moving the payout into [WithdrawalEscrow](WithdrawalEscrow.md)), then users claim.
 
 ---
 
@@ -46,114 +45,47 @@ The following functions are called directly by end users:
 - Mint management and performance fee shares to the manager
 - Process immediate and queued cash withdrawals with pro-rata asset distribution
 - Handle Aave and Morpho flash loan callbacks for complex unwind operations
-- Accept collateral forwarded by TokenLogic and track accounted assets
+- Checkpoint fee accrual before TokenLogic applies a new deposit's effects (CertiK FNA-22)
+- Physically segregate finalized-but-unclaimed queued-withdrawal assets via [WithdrawalEscrow](WithdrawalEscrow.md) (CertiK FNA-03)
 
 ---
 
-## State Variables
+## Key State Variables
 
 | Variable | Type | Description |
 |----------|------|-------------|
 | `fusd` | `address` | TokenLogic (fUSD) contract address |
 | `poolManagerLogic` | `address` | PoolManagerLogic contract address |
-| `creationTime` | `uint256` | Timestamp of contract initialization |
+| `withdrawalEscrow` | `address` | This pool's dedicated `WithdrawalEscrow` instance, wired once via `initializeWithdrawalEscrow()` (CertiK FNA-03) |
 | `rewardPerShare` | `uint256` | Accumulated yield per sfUSD token, scaled by 1e18 |
-| `accountedAssets` | `uint256` | Last-known total fund value (baseline for yield calculation) |
-| `totalRewardAccrued` | `uint256` | Lifetime cumulative yield distributed |
-| `totalRewardHarvested` | `uint256` | Lifetime total rewards claimed by users |
-| `totalManagementFee` | `uint256` | Cumulative management fees minted |
-| `totalPerformanceFee` | `uint256` | Cumulative performance fees minted |
-| `userRewards` | `mapping(address → UserRewardInfo)` | Per-user pending rewards and reward debt |
+| `accountedAssets` | `uint256` | High-water-mark NAV baseline for yield calculation — only ever raised by new NAV highs, never lowered by a NAV drop (see [FundCalculationLibrary](FundCalculationLibrary.md)'s overhang-tracking docs) |
+| `compoundedRewardIndex` | `uint256` | Autocompounding index; `0` means autocompounding was never initialized on this proxy (a cross-proxy-upgrade-ordering state, not a normal runtime value) |
+| `totalRewardAccrued` / `totalRewardHarvested` | `uint256` | Lifetime cumulative yield distributed / claimed |
+| `finalizedUnclaimedFusd` | `uint256` | fUSD backing requests already `Finalized`/`FinalizedEscrowed` but not yet `Claimed` — excluded from the active claims denominator (CertiK FNA-38) |
 | `lastFeeMintTime` | `uint256` | Timestamp of last fee accrual |
-| `tokenPriceAtLastFeeMint` | `uint256` | Share price at last fee event (for performance fee baseline) |
 | `isImmediateWithdrawEnabled` | `bool` | Withdrawal mode flag |
-| `lastRequestId` | `uint256` | Auto-incrementing withdrawal request ID |
-| `cashWithdrawRequests` | `mapping(uint256 → CashWithdrawRequest)` | Queued withdrawal request details |
-| `userRequests` | `mapping(address → uint256[])` | User's active request IDs |
-| `reservedAssetBalance` | `mapping(address → uint256)` | Asset amounts reserved for finalized (unclaimed) requests |
+| `cashWithdrawRequests` | `mapping(uint256 → CashWithdrawRequest)` | Queued withdrawal request details, including `status` (`Pending` / `Finalized` / `FinalizedEscrowed` / `Claimed`) |
+| `reservedAssetBalance` | `mapping(address → uint256)` | Legacy (pre-FNA-03) reservation bookkeeping — only still populated for a request finalized before `withdrawalEscrow` was wired in |
 
 ---
 
 ## Functions
 
-### `initialize`
+### `initialize` / reinitializers
 
 ```solidity
-function initialize(
-    address _fusd,
-    address _poolManagerLogic,
-    address _owner
-) external initializer
+function initialize(address _fusd, address _poolManagerLogic, address _owner, string memory name_, string memory symbol_) external initializer
+function initializeAutoCompounding() external onlyOwner reinitializer(2)
+function initializeWithdrawalEscrow(address escrow) external onlyOwner
 ```
 
-Sets up the vault with fUSD token, PoolManagerLogic reference, and initial owner.
+`initialize()` sets up the base vault (`compoundedRewardIndex = 1e18` on a fresh deploy). `initializeAutoCompounding()` is a versioned `reinitializer(2)` for a pool upgraded from a pre-autocompounding implementation — reverts `AutoCompoundingAlreadyInitialized()` if already run. `initializeWithdrawalEscrow()` (CertiK FNA-03) is a plain already-set guard rather than another reinitializer version — deliberately, to avoid inlining a second copy of OpenZeppelin's `Initializable` version-check machinery, since PoolLogic has essentially no bytecode headroom left. Callable exactly once, any time after the pool's dedicated `WithdrawalEscrow` is deployed (escrow deploy order is always after-pool, since the escrow immutably binds to this pool's address at its own construction).
 
----
+### `stake` / `unstake` / `harvest`
 
-### `stake` / `stake` (with min shares)
+Standard staking-accumulator mechanics — see [Yield Accounting](#yield-accounting) below. `stake()` applies an entry fee minted as sfUSD to the manager; `unstake()` applies an exit fee deducted from the fUSD output. Both call `_accrueYield()` first via the `updateFeesAndRewards` modifier.
 
-```solidity
-function stake(uint256 amountFusd) external
-function stake(uint256 amountFusd, uint256 minShares) external
-```
-
-Stakes fUSD into the vault, minting sfUSD to the caller.
-
-**Parameters:**
-
-| Name | Type | Description |
-|------|------|-------------|
-| `amountFusd` | `uint256` | Amount of fUSD to stake |
-| `minShares` | `uint256` | Minimum sfUSD shares to receive (slippage protection) |
-
-**Side effects:**
-- Calls `_accrueYield()` to snapshot current yield
-- Applies entry fee (minted as sfUSD to manager)
-- Transfers fUSD from caller to vault
-- Mints sfUSD to caller
-- Emits `Stake`
-
----
-
-### `unstake`
-
-```solidity
-function unstake(uint256 shareAmount) external
-```
-
-Burns sfUSD and returns fUSD to the caller.
-
-**Parameters:**
-
-| Name | Type | Description |
-|------|------|-------------|
-| `shareAmount` | `uint256` | Number of sfUSD shares to burn |
-
-**Side effects:**
-- Calls `_accrueYield()`
-- Applies exit fee (deducted from fUSD output)
-- Burns sfUSD
-- Transfers fUSD to caller
-- Emits `Unstake`
-
----
-
-### `harvest`
-
-```solidity
-function harvest() external
-```
-
-Claims all accumulated fUSD rewards for `msg.sender`.
-
-**Side effects:**
-- Calls `_accrueYield()` and `_updateUserReward()`
-- Transfers pending fUSD to caller
-- Emits `Harvest`
-
----
-
-### `withdrawCashImmediate`
+### Immediate Cash Withdrawal
 
 ```solidity
 function withdrawCashImmediate(uint256 fusdAmount) external
@@ -162,104 +94,31 @@ function withdrawCashImmediateSafe(uint256 amount, ComplexAsset[] calldata compl
 function withdrawCashImmediateToSafe(address recipient, uint256 amount, ComplexAsset[] calldata complexAssetsData) external
 ```
 
-Withdraws a proportional share of all vault assets immediately. Requires cooldown to have elapsed.
-
-**Parameters:**
-
-| Name | Type | Description |
-|------|------|-------------|
-| `fusdAmount` | `uint256` | fUSD value to redeem |
-| `recipient` | `address` | Destination address for assets |
-| `complexAssetsData` | `ComplexAsset[]` | Pre-computed data for Aave/Morpho position unwinding |
-
-**Side effects:**
-- Checks cooldown via `TokenLogic.getExitRemainingCooldown()`
-- Applies exit fee
-- Computes `portion = fusdAmount / totalFundValue`
-- Calls `assetGuard.withdrawProcessing()` per asset and executes resulting transactions
-- Burns fUSD from caller
-- Emits `CashWithdrawImmediate` and `CashWithdrawImmediateProRata`
-
----
+All four converge on `_withdrawCashImmediateToSafe()`. The non-`Safe` variants build an empty `ComplexAsset[]` internally — `ComplexAsset.withdrawData` is only needed for a leveraged position (Aave V3 / Morpho Blue) that must be pre-encoded with flashloan unwind parameters; a plain ERC-20/no-debt withdrawal needs none. Requires `isImmediateWithdrawEnabled`; cooldown (`TokenLogic.getExitRemainingCooldown()`) is enforced for every caller except the manager itself. Sizes the withdrawal via `FundCalculationLibrary.computeImmediateWithdrawPortion()` (CertiK FNA-05/FNA-07/FNA-54 — see that function's own docs), executes each asset's guard-planned `withdrawProcessing()`, and reduces `accountedAssets` by the overhang-aware amount `FundCalculationLibrary.computeAccountedAssetsReduction()` computes (CertiK FNA-42).
 
 ### `requestCashWithdraw`
 
 ```solidity
-function requestCashWithdraw(uint256 amount, address asset) external
+function requestCashWithdraw(uint256 amount, address asset) external returns (uint256 requestId)
 ```
 
-Creates a queued withdrawal request. fUSD is locked in the contract.
+Only usable in queued mode. Locks the full nominal `amount` of fUSD in the contract (not burned yet), records `fusdNetForAsset` (post-fee) for later finalization, and reverts `ZeroAmount()` up front if the net amount would round to zero asset units — preventing a request that could never be finalized.
 
-**Side effects:**
-- Checks cooldown
-- Applies exit fee
-- Locks fUSD in contract
-- Creates `CashWithdrawRequest` with status `Pending`
-- Emits `CashWithdrawRequested`
-
----
-
-### `finalizeCashWithdraw`
+### `finalizeCashWithdraw` (CertiK FNA-03/FNA-05/FNA-38/FNA-42)
 
 ```solidity
 function finalizeCashWithdraw(uint256 requestId) external
 ```
 
-**Access control:** Manager only.
+**Manager only.** Sizes the payout via `FundCalculationLibrary.computeFinalizeAssetAmount()` (same claims-haircut logic as the immediate path, floored against outstanding claims per FNA-05), then physically moves that amount into `withdrawalEscrow` via `FundCalculationLibrary.finalizeReserveAndUpdateBaseline()` — **not** just bookkept as "reserved" while remaining part of the pool's own balance, which CertiK's FNA-03 follow-up showed could not fully close an approval-based drain (see [ERC20Guard](ERC20Guard.md)'s complementary source-level fix and [WithdrawalEscrow](WithdrawalEscrow.md)'s own docs). Sets `status = FinalizedEscrowed` and increments `finalizedUnclaimedFusd` (CertiK FNA-38) so this request's still-unburned fUSD is excluded from other requests'/withdrawals' claims denominator until claimed.
 
-Converts vault holdings to the requested asset and reserves the liquidity for the user.
-
-**Side effects:**
-- Updates request status to `Finalized`
-- Records `reservedAssetBalance[asset] += amount`
-- Emits `CashWithdrawFinalized`
-
----
-
-### `claimCashWithdraw`
+### `claimCashWithdraw` (CertiK FNA-03/FNA-26/FNA-38)
 
 ```solidity
 function claimCashWithdraw(uint256 requestId) external
 ```
 
-Allows user to claim a finalized withdrawal.
-
-**Side effects:**
-- Verifies request is `Finalized` and belongs to caller
-- Transfers reserved asset to user
-- Burns locked fUSD
-- Emits `CashWithdrawClaimed`
-
----
-
-### `execTransaction`
-
-```solidity
-function execTransaction(address to, bytes calldata data) external
-```
-
-**Access control:** Manager or Trader only.
-
-Executes an external transaction via the guard system. The target must have a registered contract guard in Governance.
-
-**Side effects:**
-- Routes through `PoolTxExecutor`
-- Calls `guard.txGuard()` before execution and `guard.afterTxGuard()` after
-- Emits `TransactionExecuted`
-
----
-
-### `mintManagerFee`
-
-```solidity
-function mintManagerFee() external
-```
-
-**Access control:** PoolManagerLogic only.
-
-Triggers fee accrual. Called before fee-changing operations (e.g., fee announcements).
-
----
+Handles both `FinalizedEscrowed` (the normal case — releases via `WithdrawalEscrow.release()`) and the legacy `Finalized` status (a request finalized before the escrow was wired in — releases from the pool's own balance, pre-FNA-03 bookkeeping) via `FundCalculationLibrary.claimCashWithdrawRelease()`. Burns the locked fUSD and decrements `finalizedUnclaimedFusd` only for an escrowed claim (a legacy claim was never added there). **Deliberately does not touch `accountedAssets`** (CertiK FNA-26) — that adjustment already happened in `finalizeCashWithdraw()` when the reservation was created; re-subtracting the claim's full pre-haircut `fusdNetForAsset` here (an earlier version's behavior) double-counted the reduction for an underwater/haircut claim, understating `accountedAssets` below true NAV and letting a later accrual call misread the gap as yield and mint unbacked fUSD against it.
 
 ### `incrementAccountedAssets`
 
@@ -267,88 +126,51 @@ Triggers fee accrual. Called before fee-changing operations (e.g., fee announcem
 function incrementAccountedAssets(uint256 amount) external
 ```
 
-**Access control:** TokenLogic (fUSD) only.
+**TokenLogic only** (`OnlyTokenLogic()`). Raises `accountedAssets` when new collateral is deposited, so a fresh deposit is never mistaken for protocol yield.
 
-Updates `accountedAssets` when new collateral is deposited. Prevents new deposits from being counted as protocol yield.
-
----
-
-### `setImmediateWithdrawEnabled`
+### `checkpointFeesForDeposit` (CertiK FNA-22, FNA-22 follow-up, FNA-04 follow-up)
 
 ```solidity
-function setImmediateWithdrawEnabled(bool enabled) external
+function checkpointFeesForDeposit() external
 ```
 
-**Access control:** Manager only.
+**TokenLogic only.** Settles pending fee accrual using the fUSD supply and fund value *as they stand right now*, before TokenLogic applies an incoming deposit's effects (new fUSD minted, new collateral credited) — closing the gap where `stake()` already checkpoints before minting new shares but a plain `deposit()` previously did not, letting freshly-deposited fUSD be staked into a share supply that later captures yield that economically accrued *before* the deposit, at existing stakers' expense. **Fails closed** (`IncompleteNAV()`) when active NAV is incomplete — unlike `_accrueYield()`'s other callers (stake/unstake/harvest), which stay fail-open, since blocking *new* value from entering during a guard's transient failure has none of the downsides of blocking a withdrawal of *existing* value. One narrow fail-open exception remains: if `compoundedRewardIndex == 0` (autocompounding never initialized on this proxy — a cross-proxy-upgrade-ordering state, not a normal one), this returns without accruing or reverting, so a deposit doesn't hard-block on an unrelated not-yet-migrated-pool condition; provably not a re-opening of the FNA-22 bug, since no fee of any kind can accrue while `compoundedRewardIndex == 0` regardless of caller.
 
-Switches between immediate and queued withdrawal modes.
+### `execTransaction`
 
----
+```solidity
+function execTransaction(address to, bytes calldata data) external returns (bool)
+```
 
-### View Functions
-
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `pendingReward(address)` | `uint256` | User's claimable fUSD rewards |
-| `getFundSummary()` | `FundSummary` | Full fund metadata (name, value, fees, supply) |
-| `calculateAvailableManagerFee()` | `uint256` | Unminted accumulated fee shares |
-| `totalFundValue()` | `uint256` | Total USD value of all vault assets |
-
----
+**Manager or Trader only.** Routes through `PoolTxExecutor.exec()`, which calls the target's registered contract guard's `txGuard()`/`afterTxGuard()` and verifies, after dispatch, that `balanceOf(this) >= reservedAssetBalance[asset]` still holds for every supported asset — without this, a manager deploying a reserved asset elsewhere (ordinary vault management, e.g. supplying it to Aave) could silently leave a finalized withdraw claim unbacked.
 
 ### Flash Loan Callbacks
 
 | Function | Protocol | Description |
 |----------|----------|-------------|
-| `executeOperation(assets, amounts, premiums, initiator, params)` | Aave V3 | Aave flash loan callback — executes pre-encoded unwind operations |
-| `onMorphoFlashLoan(assets, params)` | Morpho Blue | Morpho flash loan callback — executes pre-encoded unwind operations |
+| `executeOperation(assets, amounts, premiums, initiator, params)` | Aave V3 | Aave flashloan callback |
+| `onMorphoFlashLoan(assets, params)` | Morpho Blue | Morpho flashloan callback |
 
-Both callbacks validate the caller is a registered allowed callback sender.
+Both validate the caller against `_isAllowedCallbackSender()` before executing any pre-encoded unwind operations.
 
----
+### View Functions
 
-## Events
-
-| Event | Parameters | Emitted When |
-|-------|-----------|-------------|
-| `Stake` | `user, fusdIn, sharesMinted, entryFeeFusd` | fUSD staked |
-| `Unstake` | `user, sharesBurned, fusdOut` | sfUSD burned |
-| `RewardDistributed` | `by, fusdGross, fusdToStakers, perfFeeFusd` | Yield accrued |
-| `Harvest` | `user, fusdAmount` | Rewards claimed |
-| `ManagementFeesAccrued` | `feeShares, timestamp` | Management fee minted |
-| `CashWithdrawImmediate` | `user, fusdTotal, fusdNet, fusdFee` | Immediate withdrawal executed |
-| `CashWithdrawRequested` | `requestId, user, fusdTotal, fusdNet, fusdFee, asset` | Queued request created |
-| `CashWithdrawFinalized` | `requestId, fusdTotal, fusdNet, asset, assetAmount` | Manager finalizes request |
-| `CashWithdrawClaimed` | `requestId, user, asset, amount` | User claims finalized withdrawal |
-| `CashWithdrawImmediateProRata` | `user, fusdTotal, fusdNet, fusdFee, assets, amounts` | Pro-rata asset details |
-| `WithdrawModeUpdated` | `immediateWithdrawEnabled` | Withdrawal mode toggled |
-| `TransactionExecuted` | `pool, actor, txType, time` | Guarded transaction executed |
-| `AccountedAssetsIncremented` | `amount` | New collateral accounted |
-
----
-
-## Access Control
-
-| Role / Caller | Permissions |
-|--------------|------------|
-| Manager (via PoolManagerLogic) | `setImmediateWithdrawEnabled`, `finalizeCashWithdraw`, `execTransaction` |
-| Trader (via PoolManagerLogic) | `execTransaction` |
-| PoolManagerLogic | `mintManagerFee` |
-| TokenLogic (fUSD) | `incrementAccountedAssets` |
-| Allowed callback senders | `executeOperation`, `onMorphoFlashLoan`, fallback |
-| Private pool members only | `stake`, `requestCashWithdraw` (when pool is private) |
+| Function | Returns |
+|----------|---------|
+| `pendingReward(address)` | User's claimable fUSD rewards |
+| `getFundSummary()` | Full fund metadata (name, value, fees, supply) |
+| `calculateAvailableManagerFee()` | Unminted accumulated fee shares — mirrors `_accrueYield()`'s reserved-value-excluding NAV (CertiK FNA-17) |
+| `getUserRequests(address)` | A user's queued withdrawal request IDs |
 
 ---
 
 ## sfUSD Non-Transferability
 
-`transfer()`, `transferFrom()`, and `approve()` all revert with `NonTransferable`. sfUSD can only be minted via `stake()` and burned via `unstake()` or withdrawal operations.
+`transfer()`, `transferFrom()`, and `approve()` all revert `NonTransferable`. sfUSD can only be minted via `stake()` and burned via `unstake()` or a withdrawal operation.
 
 ---
 
 ## Yield Accounting
-
-The reward distribution model follows a standard staking accumulator pattern:
 
 ```
 rewardPerShare += (netYield × 1e18) / totalSupply
@@ -356,4 +178,13 @@ userPending    += (rewardPerShare - userDebt) × userBalance / 1e18
 userDebt        = rewardPerShare (updated on any balance change)
 ```
 
-This ensures fair, proportional yield distribution with O(1) complexity regardless of the number of stakers.
+`netYield`/`accountedAssets` updates route through `FundCalculationLibrary.computeYieldAccrual()` — see that function's own docs for the fail-open design (stake/unstake/harvest) versus `checkpointFeesForDeposit()`'s fail-closed exception.
+
+---
+
+## Related
+
+- [FundCalculationLibrary](FundCalculationLibrary.md) — hosts the bulk of this contract's NAV/fee/withdrawal-sizing arithmetic, delegated to for bytecode-size reasons
+- [WithdrawalEscrow](WithdrawalEscrow.md) — the CertiK FNA-03 fix's destination for finalized queued-withdrawal payouts
+- [TokenLogic](TokenLogic.md) — the sole caller of `incrementAccountedAssets`/`checkpointFeesForDeposit`
+- [PoolManagerLogic](PoolManagerLogic.md) — the paired governance/configuration contract this vault reads fees, supported assets, and guard lookups from

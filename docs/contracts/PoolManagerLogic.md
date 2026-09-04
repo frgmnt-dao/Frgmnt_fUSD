@@ -101,22 +101,31 @@ Initializes the contract, validates cross-references between pool logic and mana
 
 ### Asset Valuation
 
-#### `totalFundValue`
+#### `totalFundValue` / `totalFundValueWithCompleteness` (CertiK FNA-04, FNA-54)
 
 ```solidity
 function totalFundValue() external view returns (uint256)
+function totalFundValueWithCompleteness() public view returns (uint256 total, bool complete)
 ```
 
-Returns the total USD value of all vault assets by summing `assetValue(asset)` for each entry in `supportedAssets`.
+Both sum `assetValue(asset)` across every supported asset, then subtract the aggregate deficit via `_subtractTotalDeficit()` (below). `totalFundValueWithCompleteness()` additionally checks each asset's `IIncompleteValuationGuard` marker (`_isValuationComplete()`, low-level staticcall) and returns `complete = false` if any asset's valuation is currently degraded — the completeness flag [FundCalculationLibrary](FundCalculationLibrary.md)'s `totalValueWithCompleteness()` reads via a fallback staticcall so PoolLogic and PoolManagerLogic can be upgraded in either order (CertiK FNA-04). A guard without the marker, or whose marker check itself can't be decoded, is treated as complete — correct for every guard that either reverts on failure (making the whole call revert, not silently understate it) or has no external dependency that can degrade a nonzero position to zero.
 
-#### `assetValue`
+#### `_subtractTotalDeficit` (CertiK FNA-54)
+
+```solidity
+function _subtractTotalDeficit(uint256 grossTotal) internal view returns (uint256)
+```
+
+Sums every supported asset's `IDeficitReportingGuard`-reported deficit (an underwater lending position's debt exceeding its collateral) and subtracts the total from `grossTotal`, floored at 0. A guard without the marker contributes 0. `getBalance()` alone can only clamp an underwater position's own contribution to 0 — it cannot make the aggregate go negative, since every consumer works in non-negative `uint256` — so without this separate pass the deficit would be silently *omitted* rather than actually *deducted* from the rest of the pool's positive balances.
+
+#### `assetValue` (CertiK FNA-56)
 
 ```solidity
 function assetValue(address asset) public view returns (uint256)
 function assetValue(address asset, uint256 amount) public view returns (uint256)
 ```
 
-Returns USD value of the vault's current balance of an asset, or the USD value of a specific `amount`.
+Returns USD value of the vault's current balance of an asset, or the USD value of a specific `amount`. Checks `_isPreValued(guard)` (shared with `getAssetPrice()` above, CertiK FNA-56) — for a pre-valued asset, `amount` **is** the USD-18 value already (the guard's own `getBalance()` returns a fully priced figure), so it's returned as-is rather than run through `AssetHandler`'s placeholder $1.00 identity feed.
 
 #### `assetBalance`
 
@@ -126,13 +135,13 @@ function assetBalance(address asset) public view returns (uint256)
 
 Returns the vault's balance of `asset` as reported by the asset's guard contract.
 
-#### `getAssetPrice`
+#### `getAssetPrice` (CertiK FNA-45 follow-up, FNA-56)
 
 ```solidity
 function getAssetPrice(address asset) external view returns (uint256)
 ```
 
-Returns the Chainlink USD price of `asset` (18 decimals) via AssetHandler.
+Checks `_isPreValued(guard)` (a low-level staticcall to the guard's `isPreValuedAssetGuard()` marker, shared by `assetValue()` and `_addAsset()`'s FNA-18 check below — CertiK FNA-56) — if the asset's guard is pre-valued, dispatches to `IPreValuedAssetGuard(guard).getUnitPrice(asset)` via a plain typed call (no try/catch, so a guard revert propagates rather than being swallowed — the correct fail-closed behavior for a price a caller is about to act on). Otherwise returns the Chainlink USD price of `asset` (18 decimals) via `AssetHandler`. AssetHandler's registered feed for a pre-valued asset is only a placeholder $1.00 identity aggregator — returning it directly for a *transferable* pre-valued share (Morpho Vault V2 / Aave V4 Tokenization, worth more or less than $1) would silently misprice any consumer calling this function directly rather than through `assetValue()`'s own already-correct short-circuit (`SlippageAccumulator.assetValue()` being the concrete case this closes).
 
 ---
 
@@ -156,6 +165,14 @@ Adds and removes assets from the vault's supported list. Insertion-sorted by ass
 | `_removeAssets` | `address[]` | Asset addresses to remove |
 
 **Side effects:** Calls `guard.removeAssetCheck()` for each removal. Emits `AssetAdded` / `AssetRemoved`.
+
+**Adding an asset — additional checks (`_addAsset`):**
+- `asset` must not itself be `fUSD` (`CannotAddFusdAsAsset()`, CertiK FNA-23) — fUSD is the fund's accounting unit, not a collateral asset; listing it as its own backing pool's supported asset would leave fUSD reserved for finalized cash withdrawals un-ring-fenced from the pool's general fUSD balance, spendable by ordinary guarded operations.
+- If `isDeposit == true` and the asset's guard is pre-valued (`_isPreValued`, see `getAssetPrice()` above), reverts `PreValuedAssetNotDepositable()` (**CertiK FNA-18**) — a pre-valued guard's `getBalance()` already returns a fully priced USD-18 figure, and its registered AssetHandler price is a fixed $1 identity multiplier, not a real per-share price. `TokenLogic`'s deposit math and `PoolLogic`'s queued-withdrawal math both treat the registered price/decimals as literal per-raw-unit conversion factors — depositing or queue-withdrawing such an asset would mint or transfer against the wrong quantity whenever one unit's real value isn't exactly $1. Enforced here (the single authoritative point `isDeposit` is ever set), not just by convention.
+
+**Removing an asset — additional checks (`_removeAsset`):**
+- **CertiK FNA-52**: requires a *resolvable* guard before allowing removal — reverts `NoAssetGuard()` rather than silently skipping `removeAssetCheck()` when the guard lookup returns `address(0)`. If an operator clears an asset's type mapping in `AssetHandler` before removing it from this pool's own `supportedAssets`, an unconditional skip would let an asset with an open position be removed with no safety check at all.
+- **CertiK FNA-53**: after the candidate's own `removeAssetCheck()` passes, `_requireNotReferencedByOtherAssets()` loops every *other* supported asset and calls its guard's `removeTokenCheck(poolLogic, otherAsset, _asset)`, reverting `AssetStillReferenced()` if any of them still depend on `_asset`. Centralizes a check that seven guards already implement (`ERC20Guard`, `ClosedAssetGuard` and everything built on it) but that, before this fix, only ever actually ran from `ERC20Guard.removeAssetCheck()`'s own loop — so it only fired when the *asset being removed* was itself ERC20Guard-typed. A composite ERC-20 (e.g. a Morpho Vault V2 share) used as a Uniswap V3 position leg could previously be removed from `supportedAssets` while an open Uniswap V3 NFT still referenced it, silently degrading that position's valuation. Now runs for every removal uniformly, regardless of the candidate's own guard type; `ERC20Guard.removeAssetCheck()` no longer duplicates it (see [ERC20Guard](ERC20Guard.md)).
 
 ---
 
@@ -195,7 +212,7 @@ Announces a fee increase. Sets `announcedFeeIncreaseTimestamp = now + _performan
 
 ---
 
-#### `commitFeeIncrease`
+#### `commitFeeIncrease` (CertiK FNA-43)
 
 ```solidity
 function commitFeeIncrease() external
@@ -203,7 +220,7 @@ function commitFeeIncrease() external
 
 **Access control:** Manager only.
 
-Activates the announced fee increase after the delay has elapsed. Calls `PoolLogic.mintManagerFee()` first to settle fees at the old rate.
+Activates the announced fee increase after the delay has elapsed. **Reverts (`"NAV incomplete"`) if `totalFundValueWithCompleteness()` reports an incomplete NAV reading** — committing a fee increase against a transiently-understated NAV would settle the *old* rate's fee (`mintManagerFee()`, called next) against too-low a base, then apply the *new*, higher rate going forward once the guard recovers and NAV jumps back up, effectively taxing the recovery. Calls `PoolLogic.mintManagerFee()` to settle fees at the old rate before the new rates take effect.
 
 ---
 
@@ -287,3 +304,11 @@ function getContractGuard(address extContract) external view returns (address)
 ```
 
 These proxy directly to `Governance.assetGuards[assetType]` and `Governance.contractGuards[extContract]`. Used by PoolLogic and PoolTxExecutor to find the correct guard implementation for any given asset or external contract.
+
+---
+
+## Related
+
+- [FundCalculationLibrary](FundCalculationLibrary.md) — consumes `totalFundValueWithCompleteness()`/`getAssetPrice()`/`assetValue()`/`getAssetGuard()` for the bulk of PoolLogic's NAV/fee/withdrawal arithmetic
+- [Governance](Governance.md) — the guard registry `getAssetGuard()`/`getContractGuard()` proxy to
+- [ERC20Guard](ERC20Guard.md) — the removal-safety check centralized into `_removeAsset()` by CertiK FNA-53

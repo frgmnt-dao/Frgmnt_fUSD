@@ -73,10 +73,12 @@ Post-execution hook. Called after every Aave transaction to verify that the heal
 **Validation:**
 ```
 healthFactor = aave.getUserAccountData(pool).healthFactor
-require(healthFactor >= 1.01e18)
+require(healthFactor > 1.01e18)
 ```
 
-Reverts if the health factor drops below 1.01 after the transaction.
+Reverts if the health factor is not strictly above 1.01 after the transaction. Only checked for risk-increasing operations: `borrow` (always), `setUserUseReserveAsCollateral` when disabling collateral, and **every** `withdraw` regardless of size (see CertiK FNA-24 below).
+
+> **CertiK FNA-24**: `withdraw` was previously only treated as risk-increasing when Aave still reported the withdrawn reserve as collateral-enabled *after* the withdrawal executed (`afterTxGuard` runs post-transaction). Aave clears that exact flag when a withdrawal empties the caller's aToken balance for a reserve — so a **full** withdrawal of a collateral asset observed itself as already-disabled and skipped the health-factor check entirely, while an otherwise-identical **partial** withdrawal of the same asset (flag still `true`) was correctly checked. Checking unconditionally on every withdrawal closes that gap regardless of size, and is safe for a non-collateral or debt-free withdrawal too: health factor is unaffected by withdrawing an asset that wasn't backing any debt, and `getUserAccountData` reports `healthFactor = type(uint256).max` for a debt-free pool, so the check trivially passes in both cases.
 
 ---
 
@@ -91,7 +93,7 @@ Reverts if the health factor drops below 1.01 after the transaction.
 ### `withdraw`
 
 - `asset` must be supported
-- `to` must equal the vault address
+- `to` must equal the vault address (parameter named `onBehalfOf` in the guard's own decode, but semantically the withdrawal recipient)
 
 ### `borrow`
 
@@ -136,4 +138,23 @@ The guard itself has no owner or privileged roles — it is a stateless validato
 
 ## Health Factor Threshold
 
-The minimum health factor of `1.01e18` (1.01 in Aave's 1e18 scale) provides a 1% buffer above liquidation threshold, protecting the vault from accidental undercollateralization while still allowing efficient capital usage.
+The minimum health factor of `1.01e18` (1.01 in Aave's 1e18 scale) provides a 1% buffer above liquidation threshold, protecting the vault from accidental undercollateralization while still allowing efficient capital usage. Applied consistently with [MorphoBlueContractGuard](MorphoBlueContractGuard.md)'s own threshold across both leveraged lending integrations.
+
+---
+
+## Documented Rule: Single Debt-Asset Only
+
+`_borrow()` enforces that a pool may hold debt in only one asset at a time: before authorizing a new `borrow`, it iterates every *other* supported asset and requires zero stable/variable debt-token balance for each. This is a Frgmnt-specific risk-management rule, not an Aave V3 constraint — Aave itself supports multi-asset debt.
+
+---
+
+## Asset Type Requirement
+
+Every operation touching a lending-position asset (`supply`, `withdraw`, `borrow`, `repay`, `repayWithATokens`, `setUserUseReserveAsCollateral`) requires `IHasAssetInfo.getAssetType(asset) == 4` — see [Governance's Asset Type Registry](Governance.md#asset-type-registry) for the on-chain-verified mapping (CertiK FNA-33).
+
+---
+
+## Related
+
+- [AaveLendingPoolAssetGuard](AaveLendingPoolAssetGuard.md) — the paired asset guard handling valuation and pro-rata/flashloan-based withdrawal of the position this guard's calls create
+- [MorphoBlueContractGuard](MorphoBlueContractGuard.md) — the structurally analogous leveraged-lending contract guard for Morpho Blue
