@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { anyValue } from '@nomicfoundation/hardhat-chai-matchers/withArgs';
 
 async function increaseTime(seconds: number) {
   await ethers.provider.send('evm_increaseTime', [seconds]);
@@ -3166,6 +3167,70 @@ describe('PoolLogic', () => {
         pool,
         'AutoCompoundingNotInitialized',
       );
+    });
+  });
+
+  describe('FNA-04 follow-up (CertiK 09/03): IncompleteNAVAccrual event for stake/unstake/harvest monitoring', () => {
+    // stake/unstake/harvest deliberately stay fail-open on incomplete NAV (unlike
+    // checkpointFeesForDeposit, tested above) — CertiK's own recommendation for that accepted
+    // design was operational monitoring of "incomplete-NAV events and the associated changes in
+    // sFUSD ownership". These tests confirm that signal actually exists and is accurate.
+    it('emits IncompleteNAVAccrual naming the actor when a stake proceeds during incomplete NAV', async () => {
+      const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
+
+      const stakeAmount = ethers.parseUnits('1000', 18);
+      await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+      await pool.connect(user).stake(stakeAmount); // first stake: no accrual skip to observe yet
+
+      await poolManager.setTotalFundValue(ethers.parseUnits('2000', 18));
+      await poolManager.setValuationComplete(false);
+
+      const tiny = ethers.parseUnits('1', 18);
+      await mintAndApproveFUSD(fusd, pool, user, tiny);
+      await expect(pool.connect(user).stake(tiny))
+        .to.emit(pool, 'IncompleteNAVAccrual')
+        .withArgs(await user.getAddress(), anyValue);
+    });
+
+    it('does not emit IncompleteNAVAccrual when the NAV reading is complete', async () => {
+      const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
+
+      const stakeAmount = ethers.parseUnits('1000', 18);
+      await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+      await pool.connect(user).stake(stakeAmount);
+
+      await poolManager.setTotalFundValue(ethers.parseUnits('2000', 18));
+      await poolManager.setValuationComplete(true);
+
+      const tiny = ethers.parseUnits('1', 18);
+      await mintAndApproveFUSD(fusd, pool, user, tiny);
+      await expect(pool.connect(user).stake(tiny)).to.not.emit(pool, 'IncompleteNAVAccrual');
+    });
+
+    it("names harvest's caller, not some other address, when NAV is incomplete", async () => {
+      const { pool, fusd, poolManager, user, user2 } = await loadFixture(deployPoolFixture);
+
+      const stakeAmount = ethers.parseUnits('1000', 18);
+      await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+      await pool.connect(user).stake(stakeAmount);
+
+      // Real yield so harvest() has something pending and doesn't revert NothingToHarvest.
+      const reward = ethers.parseUnits('300', 18);
+      await fusd.mint(await pool.getAddress(), reward);
+      await poolManager.setTotalFundValue(stakeAmount + reward);
+      const tiny = ethers.parseUnits('1', 18);
+      await mintAndApproveFUSD(fusd, pool, user, tiny);
+      await pool.connect(user).stake(tiny); // settles the pending reward into userRewards[user]
+
+      await poolManager.setValuationComplete(false);
+
+      await expect(pool.connect(user2).harvest()).to.be.revertedWithCustomError(
+        pool,
+        'NothingToHarvest',
+      );
+      await expect(pool.connect(user).harvest())
+        .to.emit(pool, 'IncompleteNAVAccrual')
+        .withArgs(await user.getAddress(), anyValue);
     });
   });
 });

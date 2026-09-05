@@ -247,6 +247,16 @@ contract PoolLogic is
     event Stake(address indexed user, uint256 fusdIn, uint256 sharesMinted, uint256 entryFeeFusd);
     event Unstake(address indexed user, uint256 sharesBurned, uint256 fusdOut);
 
+    /// @notice CertiK FNA-04 follow-up (09/03 comment): stake/unstake/harvest/mintManagerFee
+    ///         deliberately stay fail-open on incomplete NAV (see the design note on
+    ///         computeYieldAccrual()) rather than reverting like checkpointFeesForDeposit() does
+    ///         — but that silent skip previously had zero on-chain signal. CertiK's own
+    ///         recommendation for this accepted-risk design was operational monitoring of
+    ///         "incomplete-NAV events and the associated changes in sFUSD ownership"; this event
+    ///         is what actually makes that monitorable, naming the exact actor whose
+    ///         stake/unstake/harvest went through while accrual was skipped.
+    event IncompleteNAVAccrual(address indexed actor, uint256 timestamp);
+
     event RewardDistributed(
         address indexed by,
         uint256 fusdGross,
@@ -488,6 +498,7 @@ contract PoolLogic is
     function _accrueYield() internal {
         uint256 index = _requireAutoCompoundingInitialized();
         (uint256 totalValue, bool navComplete) = _activeTotalValueWithCompleteness();
+        if (!navComplete) emit IncompleteNAVAccrual(msg.sender, block.timestamp);
         uint256 totalFusd = _managementFeeBase();
 
         (
