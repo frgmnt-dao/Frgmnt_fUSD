@@ -702,6 +702,68 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       expect(net).to.be.lt(oldFormulaNet);
       expect(oldFormulaNet - net).to.equal(ethers.parseUnits('16', 18));
     });
+
+    // CertiK FNA-35 (09/03 comment): the settlement<->debt leg's cost is priced above, but every
+    // OTHER collateral reserve (not the settlement token, not needed to fund the flashloan) is
+    // ALSO swapped into the settlement token during a full unwind (_buildCollateralToSettlementSwaps
+    // runs over every withdrawn reserve) — and that cost was never deducted at all, regardless of
+    // debt composition. Isolate it here with same-asset debt (zero settlement<->debt cost, zero
+    // premium) so the WETH collateral leg's swap cost is the only thing being measured.
+    it('deducts the collateral->settlement swap cost for every non-settlement collateral reserve', async () => {
+      const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const wethAToken = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('aWETH', 'aWETH', 18));
+      await wethAToken.waitForDeployment();
+      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      const plAddr = await pl.getAddress();
+
+      // Collateral: 10,000 USDC + 1 WETH @ $2000. Debt: 100 USDC only (same asset as
+      // settlement -> zero settlement<->debt swap cost, isolating the WETH leg).
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
+      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
+      await aavePool.setReserveTokens(await weth.getAddress(), await wethAToken.getAddress(), ethers.ZeroAddress);
+
+      await aToken.mint(plAddr, 10_000n * 10n ** 6n);
+      await wethAToken.mint(plAddr, ethers.parseEther('1'));
+      await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
+
+      await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000); // 0.3%
+      await guard.setDefaultSlippageBps(50); // 0.5%
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(0); // isolate the WETH leg specifically
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      // (10,000 + 2,000) - 100 = 11,900.
+      expect(gross).to.equal(ethers.parseUnits('11900', 18));
+
+      // Same-asset debt, zero premium -> the settlement<->debt leg costs exactly 0.
+      // WETH leg: $2,000 * effectiveSlippageExactIn(50bps + feeBps(3000/1e6=30bps)) = $2,000 * 80bps = $16.
+      const expectedCollateralLegCost = ethers.parseUnits('16', 18);
+      const expectedNet = gross - expectedCollateralLegCost;
+
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+      expect(net).to.equal(expectedNet);
+
+      // Before this fix, no non-settlement collateral leg's swap cost was deducted at all —
+      // the old formula would have reported the full, uncapped gross equity here (net == gross).
+      expect(net).to.be.lt(gross);
+    });
   });
 
   // -----------------------------------------------------------------------

@@ -297,7 +297,40 @@ contract AaveV3LendingPoolAssetGuard is
             ? totalOutlayUsd - totalDebtInUsd
             : 0;
 
-        balance = gross > unwindCostUsd ? gross - unwindCostUsd : 0;
+        // CertiK FNA-35 (09/03 comment): the above only prices the settlement<->debt leg (via
+        // flashAmount). Every OTHER collateral reserve (i.e. not already the settlement token)
+        // is also swapped into the settlement token to fund the flashloan repayment — see
+        // _buildCollateralToSettlementSwaps() — and that swap's cost was never deducted here.
+        // Price it the same way the real swap will be bound (_routeFeeCollateralToSettlement +
+        // _effectiveSlippageExactIn, exactly as _buildOneCollateralToSettlementSwapTx uses to
+        // compute its own minOut), applied to each such reserve's full 100% collateral USD value.
+        uint256 costUsd;
+        {
+            IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
+                IPoolLogic(pool).poolManagerLogic()
+            ).getSupportedAssets();
+            for (uint256 i; i < supportedAssets.length; ++i) {
+                address underlying = supportedAssets[i].asset;
+                if (underlying == settlementToken) continue;
+
+                (uint256 collateralBalance, ) = _calculateAaveBalance(pool, underlying);
+                if (collateralBalance == 0) continue;
+
+                uint256 collateralPriceUsd = IHasAssetInfo(factory).getAssetPrice(underlying);
+                uint256 collateralDecimals = IERC20Extended(underlying).decimals();
+                uint256 collateralUsd = (collateralPriceUsd * collateralBalance) /
+                    (10 ** collateralDecimals);
+
+                uint256 effBps = _effectiveSlippageExactIn(
+                    defaultSlippageBps,
+                    uint256(_routeFeeCollateralToSettlement(underlying, settlementToken))
+                );
+                costUsd += (collateralUsd * effBps) / BPS_DENOMINATOR;
+            }
+        }
+
+        uint256 totalCostUsd = unwindCostUsd + costUsd;
+        balance = gross > totalCostUsd ? gross - totalCostUsd : 0;
     }
 
     /// @notice Liquidity-capped counterpart to getBalance()/getNetRealizableBalance() — see
