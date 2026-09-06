@@ -1331,6 +1331,13 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     await aavePool.setReserveTokens(await weth.getAddress(), ethers.ZeroAddress, await wethDebt.getAddress());
     await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
     await wethDebt.mint(plAddr, ethers.parseEther('1'));
+    // CertiK FNA-36 follow-up: withdrawProcessing() now skips a position with zero-or-negative
+    // gross equity before ever reaching the fee lookup this test targets — fund USDC collateral
+    // (comfortably above the $2,100 total debt) so gross equity is positive. USDC is itself the
+    // settlement token here (two different debt tokens force preferredSettlementAsset), so this
+    // needs no swap fee of its own, leaving the WETH debt leg's missing fee as the only gap.
+    await aToken.mint(plAddr, 3_000n * 10n ** 6n);
+    await usdc.mint(await aToken.getAddress(), 3_000n * 10n ** 6n);
 
     await expect(
       guard.withdrawProcessing.staticCall(
@@ -1632,13 +1639,19 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
   });
 
   // -----------------------------------------------------------------------
-  // CertiK FNA-36 follow-up: withdrawProcessing() must not return a flashloan transaction for a
-  // leg whose unwind, at the actual portion being planned, is not solvent against the same
-  // configured costs (premium, route fee/slippage, buffer) getNetRealizableBalance() (FNA-35)
-  // already accounts for at the 100% level. Fails closed (empty transactions) instead.
+  // CertiK FNA-36 follow-up (09/03 comment): withdrawProcessing() must not return a flashloan
+  // transaction for a leg whose unwind, at the actual portion being planned, is not solvent
+  // against the same configured costs (premium, route fee/slippage, buffer, rounding)
+  // getNetRealizableBalance() (FNA-35) already accounts for at the 100% level. The gate now
+  // compares actual worst-case settlement-token proceeds (accounting for every non-settlement
+  // collateral leg's own swap-bounded minOut, not just gross oracle value) against the flashloan
+  // repayment obligation, and REVERTS on failure rather than silently returning an empty
+  // transaction list — a positive-value leg reaching this point already had its share counted
+  // into the withdrawal's netFusd (via FNA-35's NAV), so silently skipping it would burn that
+  // share without ever delivering it.
   // -----------------------------------------------------------------------
   describe('CertiK FNA-36 follow-up: withdrawProcessing solvency gate', () => {
-    it('fails closed (no transactions) when collateral just misses covering the flashloan repayment obligation', async () => {
+    it('reverts when collateral just misses covering the flashloan repayment obligation', async () => {
       const { guard, dataProvider, aavePool, usdc, aToken } = await deploy();
       const [signer] = await ethers.getSigners();
       const Debt = await ethers.getContractFactory('MockERC20Custom');
@@ -1676,16 +1689,14 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
       expect(gross).to.equal(ethers.parseUnits('5', 18));
 
-      const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
-        plAddr,
-        ethers.ZeroAddress,
-        ethers.parseUnits('1', 18),
-        signer.address,
-      );
-
-      expect(withdrawAsset).to.equal(ethers.ZeroAddress);
-      expect(withdrawBalance).to.equal(0n);
-      expect(txs.length).to.equal(0);
+      await expect(
+        guard.withdrawProcessing.staticCall(
+          plAddr,
+          ethers.ZeroAddress,
+          ethers.parseUnits('1', 18),
+          signer.address,
+        ),
+      ).to.be.revertedWith('Frgmnt: unsafe unwind');
     });
 
     it('still builds the flashloan once collateral covers the full repayment obligation, same position otherwise', async () => {
@@ -1779,6 +1790,114 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       // it must not return a flashloan transaction it cannot actually settle.
       await aToken.mint(plAddr, 2_130n * 10n ** 6n);
       await usdc.mint(await aToken.getAddress(), 2_130n * 10n ** 6n);
+
+      await expect(
+        guard.withdrawProcessing.staticCall(
+          plAddr,
+          ethers.ZeroAddress,
+          ethers.parseUnits('1', 18),
+          signer.address,
+        ),
+      ).to.be.revertedWith('Frgmnt: unsafe unwind');
+    });
+
+    // CertiK FNA-36 (09/03 comment), the core gap: the PRIOR gate compared gross oracle collateral
+    // value against the outlay — but a non-settlement collateral reserve's actual proceeds are
+    // LOWER than its gross value, degraded by the same route fee/slippage bound
+    // (_oracleMinOut) the real collateral->settlement swap is bound by. A position whose gross
+    // collateral value narrowly exceeds the outlay can still fail to produce enough real
+    // settlement-token proceeds — exactly the case the prior gate would have missed (built the
+    // flashloan anyway, which would then revert for real during execution).
+    it('reverts when a non-settlement collateral leg\'s gross value covers the outlay but its actual swap-bounded proceeds do not', async () => {
+      const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const wethAToken = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('aWETH', 'aWETH', 18));
+      await wethAToken.waitForDeployment();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const plAddr = await pl.getAddress();
+
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      // Debt: 1,000 USDC, same asset as settlement -> zero settlement<->debt swap cost, isolating
+      // the WETH collateral leg's own swap-back cost specifically.
+      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
+      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
+      await aavePool.setReserveTokens(await weth.getAddress(), await wethAToken.getAddress(), ethers.ZeroAddress);
+
+      await usdcDebt.mint(plAddr, 1_000n * 10n ** 6n);
+      // Collateral: 0.5025 WETH @ $2000 = $1,005 gross — narrowly covers the $1,000 flashloan
+      // outlay (buffer/premium both zeroed to isolate the swap-cost effect), so the OLD gross-value
+      // gate would have judged this solvent.
+      await wethAToken.mint(plAddr, ethers.parseEther('0.5025'));
+      // Fully fund the aToken's own underlying liquidity so FNA-07's _maxSafePortion cap doesn't
+      // separately zero out effectivePortion — this test isolates the FNA-36 swap-proceeds gate.
+      await weth.mint(await wethAToken.getAddress(), ethers.parseEther('0.5025'));
+
+      await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000); // 0.3%
+      await guard.setDefaultSlippageBps(50); // 0.5%
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(0);
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      expect(gross).to.equal(ethers.parseUnits('5', 18)); // 1,005 - 1,000, positive, would have passed the old gate
+
+      // effectiveSlippageExactIn = 50bps + feeBps(3000/1e6 = 30bps) = 80bps.
+      // minOut = $1,005 * (1 - 0.008) = $997.296 < $1,000 outlay -> genuinely insolvent.
+      await expect(
+        guard.withdrawProcessing.staticCall(
+          plAddr,
+          ethers.ZeroAddress,
+          ethers.parseUnits('1', 18),
+          signer.address,
+        ),
+      ).to.be.revertedWith('Frgmnt: unsafe unwind');
+    });
+
+    // CertiK FNA-36 (09/03 comment): "a zero-value leg may continue to be skipped" — distinct from
+    // the insolvent-but-positive-equity cases above, which now revert. A position with debt but
+    // zero (or negative) gross equity has nothing to deliver regardless of portion, so it must
+    // still return an empty transaction list rather than revert.
+    it('returns empty transactions (no revert) for a zero-equity position, unlike the insolvent-but-positive cases above', async () => {
+      const { guard, dataProvider, aavePool, usdc, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const Debt = await ethers.getContractFactory('MockERC20Custom');
+      const debt = await Debt.deploy('dUSDC', 'dUSDC', 6);
+      await debt.waitForDeployment();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+
+      await dataProvider.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await debt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await debt.getAddress(),
+      );
+
+      // No collateral at all — debt exists, but gross equity is exactly 0 (collateral <= debt).
+      await debt.mint(plAddr, 1_000n * 10n ** 6n);
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      expect(gross).to.equal(0n);
 
       const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
         plAddr,

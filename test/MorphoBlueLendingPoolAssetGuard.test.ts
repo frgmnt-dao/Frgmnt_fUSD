@@ -963,6 +963,9 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
         },
       );
       await morpho.setPosition(supplyMarketId, poolAddress, ethers.parseEther('1'), 0n, 0n);
+      // CertiK FNA-36 follow-up: withdrawProcessing() now needs a route fee to price this WETH
+      // supply leg's swap-back to the USDC settlement token when gating solvency.
+      await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000);
 
       const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
         poolAddress,
@@ -1098,7 +1101,12 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       await usdc.getAddress(),
       await weth.getAddress(),
     );
-    await morpho.setPosition(id, poolAddress, 0n, 500_000n, 0n);
+    // CertiK FNA-36 follow-up: withdrawProcessing() now gates on real solvency, so a debt-only
+    // position with zero collateral (gross equity <= 0) is skipped rather than planned. Fund
+    // comfortable WETH collateral (this market's collateralToken) so gross equity is positive and
+    // the solvency gate passes, keeping this test's original focus (transaction structure).
+    await morpho.setPosition(id, poolAddress, 0n, 500_000n, ethers.parseEther('1'));
+    await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000);
 
     const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
       poolAddress,
@@ -1128,7 +1136,10 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       await usdc.getAddress(),
       await weth.getAddress(),
     );
-    await morpho.setPosition(id, poolAddress, 0n, 500_000n, 0n);
+    // CertiK FNA-36 follow-up: withdrawProcessing() now gates on real solvency — fund collateral
+    // so gross equity is positive (see the identical note on the non-delisted case above).
+    await morpho.setPosition(id, poolAddress, 0n, 500_000n, ethers.parseEther('1'));
+    await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000);
     expect(await morphoManager.isValidPoolMarket(poolAddress, id)).to.equal(false);
     expect(await morphoManager.isTrackedPoolMarket(poolAddress, id)).to.equal(true);
 
@@ -1166,6 +1177,14 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     );
     await morpho.setPosition(usdcMarket.id, poolAddress, 0n, 500_000n, 0n);
     await morpho.setPosition(wethMarket.id, poolAddress, 0n, 500_000n, 0n);
+    // CertiK FNA-36 follow-up: withdrawProcessing() now gates on real solvency — fund USDC
+    // collateral via a dedicated market (collateralToken == the eventual settlementToken, so it
+    // needs no swap/fee of its own) so gross equity is positive and this test still reaches
+    // _estimateFlashAmount()'s own fee lookup for the WETH debt leg, the thing actually under test.
+    // A genuinely distinct market pair (usdc/usdc) so this doesn't collide with an existing
+    // (loanToken, collateralToken) market id above and silently overwrite its position.
+    const collateralMarket = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress());
+    await morpho.setPosition(collateralMarket.id, poolAddress, 0n, 0n, 1_000_000n);
 
     await expect(
       guard.withdrawProcessing.staticCall(
@@ -1198,6 +1217,12 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     await morpho.setPosition(usdcMarket.id, poolAddress, 0n, 500_000n, 0n);
     await morpho.setPosition(wethMarket.id, poolAddress, 0n, 500_000n, 0n);
     await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000);
+    // CertiK FNA-36 follow-up: fund USDC collateral (see the identical note on the fee-revert
+    // case above) so gross equity is positive and this test still reaches a built flashloan tx.
+    // A genuinely distinct market pair (usdc/usdc) so this doesn't collide with an existing
+    // (loanToken, collateralToken) market id above and silently overwrite its position.
+    const collateralMarket = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress());
+    await morpho.setPosition(collateralMarket.id, poolAddress, 0n, 0n, 1_000_000n);
 
     const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
       poolAddress,
@@ -1233,6 +1258,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     );
     await morpho.setPosition(firstMarket.id, poolAddress, 0n, 500_000n, 0n);
     await morpho.setPosition(secondMarket.id, poolAddress, 0n, 500_000n, 0n);
+    // CertiK FNA-36 follow-up: fund USDC collateral (see the identical note on the fee-revert
+    // case above) so gross equity is positive and this test still reaches a built flashloan tx.
+    // Both debts already share the same loan token (usdc), so no swap fee is needed anywhere here.
+    // A genuinely distinct market pair (usdc/usdc) so this doesn't collide with an existing
+    // (loanToken, collateralToken) market id above and silently overwrite its position.
+    const collateralMarket = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress());
+    await morpho.setPosition(collateralMarket.id, poolAddress, 0n, 0n, 1_000_000n);
 
     const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
       poolAddress,
@@ -1566,6 +1598,167 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       expect(repayTx).to.not.equal(undefined);
       const repayDecoded = repayIface.decodeFunctionData('repay', repayTx.txData);
       expect(repayDecoded.shares).to.equal(repayBorrowShares);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // CertiK FNA-36 follow-up (09/03 comment): mirrors AaveV3LendingPoolAssetGuard's own
+  // portion-specific solvency gate (see its docs) — this guard had none at all before. Compares
+  // the actual worst-case (minimum guaranteed) settlement-token proceeds from every withdrawn
+  // supply AND collateral leg at effectivePortion against the flashloan repayment obligation
+  // (no premium term — Morpho Blue's flashLoan() charges none), reverting on failure rather than
+  // silently returning an empty transaction list.
+  // -----------------------------------------------------------------------
+  describe('CertiK FNA-36 follow-up: withdrawProcessing solvency gate', () => {
+    it('reverts when collateral just misses covering the flashloan repayment obligation', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+
+      const totals = {
+        totalSupplyAssets: 0n,
+        totalSupplyShares: 0n,
+        totalBorrowAssets: 1_000_000n * 10n ** 6n,
+        totalBorrowShares: 1_000_000n * 10n ** 6n,
+      };
+      // Single-token market (loanToken == collateralToken == USDC): settlementToken == USDC,
+      // zero swap cost anywhere, isolating the raw repayment-obligation comparison.
+      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress(), totals);
+
+      const borrowShares = 1_000n * 10n ** 6n;
+      await guard.setFlashAmountBufferBps(100); // 1% -- Morpho charges no premium, so the buffer
+      // is what creates a "thin positive equity but unsafe unwind" gap here, mirroring the role
+      // Aave's flashloan premium plays in the equivalent Aave test.
+      await guard.setRepayDebtBufferBps(0);
+
+      const repayAssetsEst = toAssetsUp(borrowShares, totals.totalBorrowAssets, totals.totalBorrowShares);
+      const flashAmount = (repayAssetsEst * 10_100n) / 10_000n; // +1% buffer
+      // Collateral is ABOVE the raw debt (positive gross equity — does not hit the zero-equity
+      // skip) but still below the buffered flashloan amount actually owed back.
+      const collateral = repayAssetsEst + 5_000_000n; // +5 USDC of gross equity
+      expect(collateral).to.be.lt(flashAmount);
+      await morpho.setPosition(id, poolAddress, 0n, borrowShares, collateral);
+
+      await expect(
+        guard.withdrawProcessing.staticCall(
+          poolAddress,
+          ethers.ZeroAddress,
+          ethers.parseUnits('1', 18),
+          ethers.Wallet.createRandom().address,
+        ),
+      ).to.be.revertedWithCustomError(guard, 'UnsafeUnwind');
+    });
+
+    it('still builds the flashloan once collateral covers the full repayment obligation, same position otherwise', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+
+      const totals = {
+        totalSupplyAssets: 0n,
+        totalSupplyShares: 0n,
+        totalBorrowAssets: 1_000_000n * 10n ** 6n,
+        totalBorrowShares: 1_000_000n * 10n ** 6n,
+      };
+      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress(), totals);
+
+      const borrowShares = 1_000n * 10n ** 6n;
+      await guard.setFlashAmountBufferBps(100); // 1%, same as the insolvent case above
+      await guard.setRepayDebtBufferBps(0);
+
+      const repayAssetsEst = toAssetsUp(borrowShares, totals.totalBorrowAssets, totals.totalBorrowShares);
+      const flashAmount = (repayAssetsEst * 10_100n) / 10_000n;
+      const collateral = flashAmount + 10n; // clears the full buffered obligation
+      await morpho.setPosition(id, poolAddress, 0n, borrowShares, collateral);
+
+      const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
+        poolAddress,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18),
+        ethers.Wallet.createRandom().address,
+      );
+
+      expect(withdrawAsset).to.equal(await usdc.getAddress());
+      expect(txs.length).to.equal(1);
+    });
+
+    // CertiK FNA-36 (09/03 comment), the core gap: the collateral leg's actual proceeds are LOWER
+    // than its gross value once degraded by the same route fee/slippage bound
+    // (MorphoMathLib.oracleMinOut) the real collateral->settlement swap is bound by. A position
+    // whose gross collateral value narrowly exceeds the outlay can still fail to produce enough
+    // real settlement-token proceeds.
+    it('reverts when a non-settlement collateral leg\'s gross value covers the outlay but its actual swap-bounded proceeds do not', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      await pool.setAsset(await weth.getAddress(), true, ethers.parseUnits('2000', 18));
+
+      const totals = {
+        totalSupplyAssets: 0n,
+        totalSupplyShares: 0n,
+        totalBorrowAssets: 1_000_000n * 10n ** 6n,
+        totalBorrowShares: 1_000_000n * 10n ** 6n,
+      };
+      // loanToken = usdc (same as settlement -> zero settlement<->debt cost), collateralToken = weth.
+      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await weth.getAddress(), totals);
+
+      const borrowShares = 1_000n * 10n ** 6n;
+      await guard.setFlashAmountBufferBps(0);
+      await guard.setRepayDebtBufferBps(0);
+      await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000); // 0.3%
+      await guard.setDefaultSlippageBps(50); // 0.5%
+
+      // Collateral: 0.5025 WETH @ $2000 = $1,005 gross — narrowly covers the ~$1,000 flashloan
+      // outlay, so a gross-value-only gate would have judged this solvent.
+      const collateralWeth = ethers.parseEther('0.5025');
+      await morpho.setPosition(id, poolAddress, 0n, borrowShares, collateralWeth);
+
+      // effectiveSlippageExactIn = 50bps + feeBps(3000/1e6 = 30bps) = 80bps.
+      // minOut = $1,005 * (1 - 0.008) = $997.296 < ~$1,000 outlay -> genuinely insolvent.
+      await expect(
+        guard.withdrawProcessing.staticCall(
+          poolAddress,
+          ethers.ZeroAddress,
+          ethers.parseUnits('1', 18),
+          ethers.Wallet.createRandom().address,
+        ),
+      ).to.be.revertedWithCustomError(guard, 'UnsafeUnwind');
+    });
+
+    // CertiK FNA-36 (09/03 comment): "a zero-value leg may continue to be skipped" — distinct from
+    // the insolvent-but-positive-equity cases above, which now revert. A position with debt but
+    // zero (or negative) gross equity has nothing to deliver regardless of portion, so it must
+    // still return an empty transaction list rather than revert.
+    it('returns empty transactions (no revert) for a zero-equity position, unlike the insolvent-but-positive cases above', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+
+      const totals = {
+        totalSupplyAssets: 0n,
+        totalSupplyShares: 0n,
+        totalBorrowAssets: 1_000_000n * 10n ** 6n,
+        totalBorrowShares: 1_000_000n * 10n ** 6n,
+      };
+      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress(), totals);
+
+      // No collateral, no supply at all — debt exists, but gross equity is exactly 0.
+      const borrowShares = 1_000n * 10n ** 6n;
+      await morpho.setPosition(id, poolAddress, 0n, borrowShares, 0n);
+
+      const gross = await guard.getBalance(poolAddress, ethers.ZeroAddress);
+      expect(gross).to.equal(0n);
+
+      const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
+        poolAddress,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18),
+        ethers.Wallet.createRandom().address,
+      );
+
+      expect(withdrawAsset).to.equal(ethers.ZeroAddress);
+      expect(withdrawBalance).to.equal(0n);
+      expect(txs.length).to.equal(0);
     });
   });
 });

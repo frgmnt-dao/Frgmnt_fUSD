@@ -154,6 +154,7 @@ contract MorphoBlueLendingPoolAssetGuard is
     error ToZero();
     error FeeNotSet();
     error SettlementMismatch();
+    error UnsafeUnwind();
 
     /*//////////////////////////////////////////////////////////////
                             CONSTRUCTOR
@@ -539,6 +540,18 @@ contract MorphoBlueLendingPoolAssetGuard is
             return (address(0), 0, txs);
         }
 
+        // CertiK FNA-36 (09/03 comment): "a zero-value leg may continue to be skipped" — a
+        // position with debt but zero or negative gross equity has nothing to deliver regardless
+        // of portion, so skip it the same way the no-debt path above does, rather than reaching
+        // the solvency gate below (which would revert: no proceeds can ever cover any nonzero
+        // repayment obligation). Mirrors getBalance()'s own zero-flooring exactly, so a direct
+        // call to this function behaves consistently with the NAV this position actually
+        // contributes, independent of whatever upstream skip PoolLogic's own FNA-36 first-round
+        // fix already applies.
+        if (getBalance(pool, address(0)) == 0) {
+            return (address(0), 0, new MultiTransaction[](0));
+        }
+
         // Debt exists → flashloan unwind
         address settlementToken = _chooseSettlementToken(debts);
         uint256 flashAmount = _estimateFlashAmount(
@@ -547,6 +560,66 @@ contract MorphoBlueLendingPoolAssetGuard is
             settlementToken,
             defaultSlippageBps
         );
+
+        // CertiK FNA-36 follow-up (09/03 comment): mirrors AaveV3LendingPoolAssetGuard's own
+        // portion-specific solvency gate (see its docs) — this guard had none at all. Recomputes
+        // the actual worst-case (minimum guaranteed) settlement-token proceeds from every
+        // withdrawn supply AND collateral leg at effectivePortion, using the exact same swap
+        // bound (MorphoMathLib.oracleMinOut with the same uniV3Fee lookup) _swapAssetsToSettlement
+        // will actually use, and compares it against the flashloan repayment obligation. Morpho
+        // Blue's flashLoan() charges no premium (unlike Aave V3), so the obligation is exactly
+        // flashAmount — no separate premium term to add. An unsafe unwind now reverts rather than
+        // silently returning an empty transaction list: withdrawProcessing() is only reached (via
+        // PoolLogic's normal flow) once FNA-35's getNetRealizableBalance() has already confirmed
+        // this position's 100%-portion net-realizable value is positive, so the withdrawal's
+        // netFusd was already sized including this leg's share — silently skipping here would
+        // burn that share without ever delivering it.
+        {
+            address factory = IPoolLogic(pool).factory();
+            uint256 minSettlementProceeds;
+
+            for (uint256 i; i < supplies.length; ++i) {
+                uint256 amount = supplies[i].withdrawAssetsEst;
+                if (amount == 0) continue;
+                address loanToken = supplies[i].mp.loanToken;
+                if (loanToken == settlementToken) {
+                    minSettlementProceeds += amount;
+                } else {
+                    uint24 fee = uniV3Fee[loanToken][settlementToken];
+                    if (fee == 0) revert FeeNotSet();
+                    minSettlementProceeds += MorphoMathLib.oracleMinOut(
+                        factory,
+                        loanToken,
+                        settlementToken,
+                        amount,
+                        defaultSlippageBps,
+                        fee
+                    );
+                }
+            }
+
+            for (uint256 i; i < collaterals.length; ++i) {
+                uint256 amount = collaterals[i].withdrawCollateral;
+                if (amount == 0) continue;
+                address collateralToken = collaterals[i].mp.collateralToken;
+                if (collateralToken == settlementToken) {
+                    minSettlementProceeds += amount;
+                } else {
+                    uint24 fee = uniV3Fee[collateralToken][settlementToken];
+                    if (fee == 0) revert FeeNotSet();
+                    minSettlementProceeds += MorphoMathLib.oracleMinOut(
+                        factory,
+                        collateralToken,
+                        settlementToken,
+                        amount,
+                        defaultSlippageBps,
+                        fee
+                    );
+                }
+            }
+
+            if (minSettlementProceeds < flashAmount) revert UnsafeUnwind();
+        }
 
         FlashloanParams memory fp = FlashloanParams({
             withdrawPortion: effectivePortion,

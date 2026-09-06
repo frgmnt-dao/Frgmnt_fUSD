@@ -511,6 +511,20 @@ contract AaveV3LendingPoolAssetGuard is
             return (address(0), 0, transactions);
         }
 
+        // CertiK FNA-36 (09/03 comment): "a zero-value leg may continue to be skipped" — a
+        // position with debt but zero or negative gross equity (collateral <= debt, the same
+        // condition getBalance() floors to 0 at) has nothing to deliver regardless of portion, so
+        // skip it the same way the no-debt/all-dust path above does, rather than reaching the
+        // solvency gate below (which would revert: no collateral proceeds can ever cover any
+        // nonzero repayment obligation). This mirrors getBalance()'s own zero-flooring condition
+        // exactly, so a direct call to this function behaves consistently with the NAV this
+        // position actually contributes, independent of whatever upstream skip PoolLogic's own
+        // FNA-36 first-round fix already applies.
+        (uint256 totalCollateralInUsd, uint256 totalDebtInUsd) = _getBalance(pool);
+        if (totalCollateralInUsd <= totalDebtInUsd) {
+            return (address(0), 0, new MultiTransaction[](0));
+        }
+
         address settlementToken = _chooseSettlementToken(repayPlans);
         uint256 slippageBps = defaultSlippageBps;
 
@@ -521,39 +535,74 @@ contract AaveV3LendingPoolAssetGuard is
             slippageBps
         );
 
-        // CertiK FNA-36 follow-up: getWithdrawableBalance()/_netRealizableBalance() only gate
-        // whether the *100%*-position net-realizable value is zero (see FNA-35) — a thin-but-
-        // positive 100% position doesn't guarantee this specific effectivePortion (which may
-        // already be below the caller's requested withdrawPortion via the FNA-07 liquidity cap
-        // above) is itself solvent once _mulPortionRoundUp's rounding, the route fee/slippage
-        // tolerance and flashAmountBufferBps all apply to this portion's own repay amounts.
-        // Verify the collateral being freed at effectivePortion actually covers the full
-        // flashloan repayment obligation before committing to it; if not, fail closed for this
-        // leg (the recommendation's explicit alternative) instead of planning an unwind that
-        // reverts and, with it, the entire pro-rata withdrawal including every other healthy
-        // asset's share. Compares collateral value directly against the total outlay rather than
-        // routing through a subtracted "debt value": that term cancels out of the comparison
-        // algebraically regardless of its exact composition (stable vs variable debt, which
-        // _getBalance() and _collectDebtPlans() account for differently), so computing it here
-        // would only reintroduce that same accounting question with no effect on the result.
+        // CertiK FNA-36 follow-up (09/03 comment): the prior gate compared the GROSS oracle value
+        // of collateral withdrawn at effectivePortion against the flashloan outlay — but the real
+        // settlement-token proceeds are lower, since every non-settlement collateral reserve must
+        // first be swapped into the settlement token (_buildCollateralToSettlementSwaps) at the
+        // same worst-case bound (_oracleMinOut) that swap's own amountOutMinimum uses. A thin
+        // position could pass the old gross-value gate while the real, swap-bounded proceeds fall
+        // short of what's needed to repay the flashloan, reverting the withdrawal anyway.
+        //
+        // Recompute the actual worst-case (minimum guaranteed) settlement-token proceeds from
+        // every reserve withdrawn at effectivePortion, using the exact same per-reserve amount
+        // (aTokenBalance * effectivePortion / PORTION_DENOMINATOR, matching
+        // _buildWithdrawCollateral) and swap bound (_oracleMinOut with
+        // _routeFeeCollateralToSettlement) the real unwind transactions will use, then compare
+        // directly in settlement-token units — no USD round-trip needed for the comparison
+        // itself (only each swap leg's own internal price lookup, which _oracleMinOut already
+        // does). Premium is still charged on the full, already-buffered flashAmount per the
+        // recommendation; unused flashloan principal is not treated as an extra cost.
+        //
+        // CertiK's 09/03 comment: an unsafe *positive*-value leg must now revert rather than
+        // silently return an empty transaction list. withdrawProcessing() is only ever reached
+        // (via PoolLogic's normal flow) once FNA-35's getNetRealizableBalance() has already
+        // confirmed this position's 100%-portion net-realizable value is positive — PoolLogic's
+        // own upstream zero-portionBalance skip (this finding's first round) never applies here —
+        // so the withdrawal's netFusd was already sized including this leg's share. Silently
+        // returning empty would burn that share of the user's redeemed FUSD without ever
+        // delivering it; reverting instead fails the entire withdrawal loudly and recoverably
+        // (retry smaller, wait for health to recover, or switch to queued withdrawals) instead of
+        // silently shortchanging the user.
         {
+            address factory = IPoolLogic(pool).factory();
+            IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
+                IPoolLogic(pool).poolManagerLogic()
+            ).getSupportedAssets();
+
+            uint256 minSettlementProceeds;
+            for (uint256 i; i < supportedAssets.length; ++i) {
+                address underlying = supportedAssets[i].asset;
+                (address aToken, , ) = aaveProtocolDataProvider.getReserveTokensAddresses(
+                    underlying
+                );
+                if (aToken == address(0)) continue;
+
+                uint256 aTokenBalance = IERC20Extended(aToken).balanceOf(pool);
+                if (aTokenBalance == 0) continue;
+
+                uint256 withdrawAmount = (aTokenBalance * effectivePortion) / PORTION_DENOMINATOR;
+                if (withdrawAmount == 0) continue;
+
+                if (underlying == settlementToken) {
+                    minSettlementProceeds += withdrawAmount;
+                } else {
+                    minSettlementProceeds += _oracleMinOut(
+                        factory,
+                        underlying,
+                        settlementToken,
+                        withdrawAmount,
+                        slippageBps,
+                        _routeFeeCollateralToSettlement(underlying, settlementToken)
+                    );
+                }
+            }
+
             uint256 premiumBps = uint256(IAaveV3Pool(aaveLendingPool).FLASHLOAN_PREMIUM_TOTAL());
             uint256 totalOutlaySettlement = flashAmount +
                 (flashAmount * premiumBps) /
                 BPS_DENOMINATOR;
 
-            address factory = IPoolLogic(pool).factory();
-            uint256 priceUsd = IHasAssetInfo(factory).getAssetPrice(settlementToken);
-            uint256 decimals = IERC20Extended(settlementToken).decimals();
-            uint256 totalOutlayUsd = (priceUsd * totalOutlaySettlement) / (10 ** decimals);
-
-            (uint256 totalCollateralInUsd, ) = _getBalance(pool);
-            uint256 collateralAtPortionUsd = (totalCollateralInUsd * effectivePortion) /
-                PORTION_DENOMINATOR;
-
-            if (collateralAtPortionUsd <= totalOutlayUsd) {
-                return (address(0), 0, new MultiTransaction[](0));
-            }
+            require(minSettlementProceeds >= totalOutlaySettlement, "Frgmnt: unsafe unwind");
         }
 
         FlashloanParams memory fp;
