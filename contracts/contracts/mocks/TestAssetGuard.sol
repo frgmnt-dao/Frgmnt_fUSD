@@ -25,8 +25,27 @@ contract TestAssetGuard {
     // reached for this asset — see PoolLogic._withdrawProcessing()'s v.portionBalance == 0 skip.
     bool public forceZeroBalance;
 
+    // FNA-07 follow-up: lets a test simulate a IWithdrawableBalanceGuard whose real,
+    // liquidity-capped withdrawable amount is smaller than getBalance() — mirroring a lending
+    // guard whose external market cannot currently pay out its full reported position.
+    bool public withdrawableBalanceCapEnabled;
+    uint256 public withdrawableBalanceCap;
+
     function setForceZeroBalance(bool value) external {
         forceZeroBalance = value;
+    }
+
+    function setWithdrawableBalanceCap(bool enabled, uint256 cap) external {
+        withdrawableBalanceCapEnabled = enabled;
+        withdrawableBalanceCap = cap;
+    }
+
+    function isWithdrawableBalanceGuard() external view returns (bool) {
+        return withdrawableBalanceCapEnabled;
+    }
+
+    function getWithdrawableBalance(address, address) external view returns (uint256) {
+        return withdrawableBalanceCap;
     }
 
     function setWithdrawMode(bool zeroAsset, bool zeroAmount, uint256 bps) external {
@@ -69,7 +88,12 @@ contract TestAssetGuard {
             MultiTransaction[] memory transactions
         )
     {
-        uint256 balance = IERC20(asset).balanceOf(poolLogic);
+        // FNA-07 follow-up: when simulating a liquidity-capped guard, deliver against the capped
+        // balance (what would actually be redeemable) rather than the raw ERC20 balance, mirroring
+        // a real IWithdrawableBalanceGuard's withdrawProcessing().
+        uint256 balance = withdrawableBalanceCapEnabled
+            ? withdrawableBalanceCap
+            : IERC20(asset).balanceOf(poolLogic);
         uint256 amount = (balance * portion) / 1e18;
         amount = (amount * amountBps) / 10_000;
 

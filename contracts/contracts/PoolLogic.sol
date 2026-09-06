@@ -1253,7 +1253,24 @@ contract PoolLogic is
         if (v.portionBalance == 0) {
             return (address(0), 0, false);
         }
-        v.expectedValue = IPoolManagerLogic(poolManagerLogic).assetValue(asset, v.portionBalance);
+        // CertiK FNA-07 (09/03 follow-up): the slippage baseline must reflect what the guard can
+        // actually deliver, not the uncapped net-realizable v.portionBalance above — a guard
+        // implementing IWithdrawableBalanceGuard (e.g. Aave V4 Tokenization, Morpho Vault V2)
+        // clamps its own withdrawProcessing() output to real external liquidity, so comparing the
+        // clamped delivery against an unclamped expectation produced a false-positive
+        // SlippageExceeded() whenever the cap actually bound.
+        uint256 cappedBalance = FundCalculationLibrary.guardWithdrawableBalance(
+            address(this),
+            asset,
+            v.guard
+        );
+        if (reserved > 0) {
+            cappedBalance = cappedBalance > reserved ? cappedBalance - reserved : 0;
+        }
+        v.expectedValue = IPoolManagerLogic(poolManagerLogic).assetValue(
+            asset,
+            (cappedBalance * portion) / 1e18
+        );
         v.regularProcessing = true;
 
         if (complexData.withdrawData.length > 0) {
