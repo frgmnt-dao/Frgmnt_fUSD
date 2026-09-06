@@ -3232,5 +3232,20 @@ describe('PoolLogic', () => {
         .to.emit(pool, 'IncompleteNAVAccrual')
         .withArgs(await user.getAddress(), anyValue);
     });
+
+    it('also emits IncompleteNAVAccrual on unstake, via the same shared _accrueYield() path', async () => {
+      const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
+
+      const stakeAmount = ethers.parseUnits('1000', 18);
+      await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+      await pool.connect(user).stake(stakeAmount);
+
+      await poolManager.setTotalFundValue(ethers.parseUnits('2000', 18));
+      await poolManager.setValuationComplete(false);
+
+      await expect(pool.connect(user).unstake(ethers.parseUnits('1', 18)))
+        .to.emit(pool, 'IncompleteNAVAccrual')
+        .withArgs(await user.getAddress(), anyValue);
+    });
   });
 });
