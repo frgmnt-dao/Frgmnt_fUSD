@@ -22,6 +22,7 @@ import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckin
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
 import { IDeficitReportingGuard } from "../../interfaces/guards/IDeficitReportingGuard.sol";
 import { IWithdrawableBalanceGuard } from "../../interfaces/guards/IWithdrawableBalanceGuard.sol";
+import { IUnwindCostAwareGuard } from "../../interfaces/guards/IUnwindCostAwareGuard.sol";
 import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
 import { IMorphoBlueManager } from "../../interfaces/IMorphoBlueManager.sol";
 import { IERC20Extended } from "../../interfaces/IERC20Extended.sol";
@@ -51,7 +52,8 @@ contract MorphoBlueLendingPoolAssetGuard is
     ISlippageCheckingGuard,
     IPreValuedAssetGuard,
     IDeficitReportingGuard,
-    IWithdrawableBalanceGuard
+    IWithdrawableBalanceGuard,
+    IUnwindCostAwareGuard
 {
     /// @notice Required flag for dHEDGE slippage guards
     bool public override isSlippageCheckingGuard = true;
@@ -284,22 +286,146 @@ contract MorphoBlueLendingPoolAssetGuard is
     ///      resulting ceiling is still applied uniformly to debt repayment and collateral
     ///      withdrawal too, not just supply.
     ///
-    ///      No cost-haircut layer exists for this guard yet (unlike Aave V3's FNA-35
-    ///      getNetRealizableBalance()) — this scales the plain gross getBalance() figure, not a
-    ///      net-of-unwind-cost one. Adding that haircut here is a separate, un-filed gap, not
-    ///      addressed by this fix — see the contract-level documentation comment above.
+    ///      CertiK FNA-35 follow-up: previously scaled the plain gross getBalance() figure (no
+    ///      cost-haircut layer existed for this guard at all — see getNetRealizableBalance()
+    ///      below, added to close exactly that gap). Now composed the same way
+    ///      AaveV3LendingPoolAssetGuard.getWithdrawableBalance() already does: net-realizable
+    ///      (100%, cost-haircut-adjusted) scaled by the liquidity ceiling, consistent with the
+    ///      linear-scaling assumption already used throughout this guard's debt/flashloan sizing
+    ///      math.
     function getWithdrawableBalance(
         address pool,
-        address asset
+        address
     ) external view override returns (uint256 balanceUsd18) {
-        uint256 fullBalance = getBalance(pool, asset);
+        uint256 netRealizable = _netRealizableBalance(pool);
         uint256 maxSafePortion = _maxSafePortion(pool);
-        balanceUsd18 = (fullBalance * maxSafePortion) / MorphoMathLib.PORTION_DENOMINATOR;
+        balanceUsd18 = (netRealizable * maxSafePortion) / MorphoMathLib.PORTION_DENOMINATOR;
     }
 
     /// @notice See IWithdrawableBalanceGuard.
     function isWithdrawableBalanceGuard() external pure override returns (bool) {
         return true;
+    }
+
+    /// @notice CertiK FNA-35: see IUnwindCostAwareGuard — marker so FundCalculationLibrary
+    ///         substitutes getNetRealizableBalance() below for getBalance()'s gross figure when
+    ///         sizing NAV for the immediate/queued withdrawal solvency haircut. Mirrors
+    ///         AaveV3LendingPoolAssetGuard's own marker/getNetRealizableBalance() pair — this
+    ///         guard previously had no unwind-cost haircut layer at all (see the note this
+    ///         replaces on getWithdrawableBalance() above).
+    function isUnwindCostAwareGuard() external pure override returns (bool) {
+        return true;
+    }
+
+    /// @notice getBalance() minus a conservative estimate of what a full unwind of this position
+    ///         actually costs across every tracked Morpho Blue market: the settlement<->debt
+    ///         swap's route fee/oracle slippage/buffer (already folded into
+    ///         _estimateFlashAmount's sizing, mirroring AaveV3LendingPoolAssetGuard's own
+    ///         getNetRealizableBalance()), plus every OTHER withdrawn supply/collateral leg's own
+    ///         swap back to the settlement token (_swapAssetsToSettlement swaps everything except
+    ///         the settlement token itself). Morpho Blue's flashLoan() charges no premium (unlike
+    ///         Aave V3), so there is no separate premium term to add. Without debt, there is
+    ///         nothing to unwind and gross equity is already net-realizable. See
+    ///         IUnwindCostAwareGuard and FNA-35.
+    function getNetRealizableBalance(
+        address pool,
+        address
+    ) external view override returns (uint256 balance) {
+        balance = _netRealizableBalance(pool);
+    }
+
+    function _netRealizableBalance(address pool) internal view returns (uint256 balance) {
+        uint256 gross = getBalance(pool, address(0));
+        if (gross == 0) return 0;
+
+        (MorphoCollectLib.DebtPlan[] memory debts, bool hasDebt) = _collectDebts(
+            pool,
+            MorphoMathLib.PORTION_DENOMINATOR
+        );
+        if (!hasDebt) return gross;
+
+        address settlementToken = _chooseSettlementToken(debts);
+        uint256 flashAmount = _estimateFlashAmount(
+            pool,
+            debts,
+            settlementToken,
+            defaultSlippageBps
+        );
+
+        address factory = IPoolLogic(pool).factory();
+        uint256 settlementPriceUsd = IHasAssetInfo(factory).getAssetPrice(settlementToken);
+        uint256 settlementDecimals = IERC20Extended(settlementToken).decimals();
+        uint256 flashAmountUsd = (settlementPriceUsd * flashAmount) / (10 ** settlementDecimals);
+
+        uint256 totalDebtUsd;
+        for (uint256 i; i < debts.length; ++i) {
+            if (debts[i].repayAssetsEst == 0) continue;
+            address loanToken = debts[i].mp.loanToken;
+            uint256 priceUsd = IHasAssetInfo(factory).getAssetPrice(loanToken);
+            uint256 decimals = IERC20Extended(loanToken).decimals();
+            totalDebtUsd += (priceUsd * debts[i].repayAssetsEst) / (10 ** decimals);
+        }
+
+        // Same trick as Aave V3's guard: flashAmount is provably >= the fair settlement-equivalent
+        // of the debt being repaid, so the excess over totalDebtUsd is exactly the combined
+        // route fee/slippage/buffer cost of the settlement<->debt leg.
+        uint256 unwindCostUsd = flashAmountUsd > totalDebtUsd ? flashAmountUsd - totalDebtUsd : 0;
+
+        uint256 costUsd;
+        {
+            MorphoCollectLib.SupplyPlan[] memory supplies = _collectSupplies(
+                pool,
+                MorphoMathLib.PORTION_DENOMINATOR
+            );
+            for (uint256 i; i < supplies.length; ++i) {
+                costUsd += _legSwapCostUsd(
+                    factory,
+                    supplies[i].mp.loanToken,
+                    supplies[i].withdrawAssetsEst,
+                    settlementToken
+                );
+            }
+
+            MorphoCollectLib.CollateralPlan[] memory collaterals = _collectCollaterals(
+                pool,
+                MorphoMathLib.PORTION_DENOMINATOR
+            );
+            for (uint256 i; i < collaterals.length; ++i) {
+                costUsd += _legSwapCostUsd(
+                    factory,
+                    collaterals[i].mp.collateralToken,
+                    collaterals[i].withdrawCollateral,
+                    settlementToken
+                );
+            }
+        }
+
+        uint256 totalCostUsd = unwindCostUsd + costUsd;
+        balance = gross > totalCostUsd ? gross - totalCostUsd : 0;
+    }
+
+    /// @dev Prices one withdrawn leg's cost of being swapped back to the settlement token,
+    ///      exactly the way _swapAssetsToSettlement() will actually bound that swap (same
+    ///      uniV3Fee lookup, same FeeNotSet() revert on a missing route — an unconfigured route
+    ///      would revert the real unwind too, so this valuation-time estimate fails the same way
+    ///      rather than silently under-costing an un-executable leg).
+    function _legSwapCostUsd(
+        address factory,
+        address token,
+        uint256 amount,
+        address settlementToken
+    ) internal view returns (uint256) {
+        if (token == settlementToken || amount == 0) return 0;
+
+        uint24 fee = uniV3Fee[token][settlementToken];
+        if (fee == 0) revert FeeNotSet();
+
+        uint256 priceUsd = IHasAssetInfo(factory).getAssetPrice(token);
+        uint256 decimals = IERC20Extended(token).decimals();
+        uint256 usd = (priceUsd * amount) / (10 ** decimals);
+
+        uint256 effBps = MorphoMathLib._effectiveSlippageExactIn(defaultSlippageBps, uint256(fee));
+        return (usd * effBps) / MorphoMathLib.BPS_DENOMINATOR;
     }
 
     /// @dev Returns the single largest portion (<= PORTION_DENOMINATOR) safe to apply uniformly

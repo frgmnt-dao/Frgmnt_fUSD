@@ -548,6 +548,182 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
   });
 
   // -----------------------------------------------------------------------
+  // CertiK FNA-35 (09/03 comment): this guard had NO unwind-cost haircut layer at all — getBalance()
+  // reported gross collateral+supply-minus-debt with no deduction for what a full unwind actually
+  // costs (settlement<->debt swap route fee/slippage, and every other withdrawn leg's swap back to
+  // the settlement token). Mirrors AaveV3LendingPoolAssetGuard's own getNetRealizableBalance().
+  // -----------------------------------------------------------------------
+
+  describe('FNA-35: getNetRealizableBalance (unwind-cost-aware NAV)', () => {
+    it('isUnwindCostAwareGuard returns true', async () => {
+      const { guard } = await deploy();
+      expect(await guard.isUnwindCostAwareGuard()).to.equal(true);
+    });
+
+    it('equals gross equity when there is no debt to unwind', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await weth.getAddress());
+      await morpho.setPosition(id, poolAddress, 500_000n, 0n, ethers.parseEther('2'));
+
+      const gross = await guard.getBalance(poolAddress, ethers.ZeroAddress);
+      const net = await guard.getNetRealizableBalance(poolAddress, ethers.ZeroAddress);
+      expect(net).to.equal(gross);
+      expect(net).to.be.gt(0n);
+    });
+
+    // Mirrors AaveV3LendingPoolAssetGuard's own cross-asset settlement<->debt test: two debt
+    // markets in different loan tokens force _chooseSettlementToken to fall back to
+    // preferredSettlementAsset (USDC), so the WETH-denominated debt leg genuinely needs a swap.
+    // Both markets' collateral is posted in USDC (== settlement token) specifically to keep the
+    // OTHER new cost (collateral/supply leg swap-back, tested separately below) at zero here.
+    it('deducts route fee and slippage on a cross-asset settlement->debt swap leg', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      await pool.setAsset(await weth.getAddress(), true, ethers.parseUnits('2000', 18));
+
+      const usdcTotals = {
+        totalSupplyAssets: 0n,
+        totalSupplyShares: 0n,
+        totalBorrowAssets: 1_000_000n * 10n ** 6n,
+        totalBorrowShares: 1_000_000n * 10n ** 6n,
+      };
+      const wethTotals = {
+        totalSupplyAssets: 0n,
+        totalSupplyShares: 0n,
+        totalBorrowAssets: ethers.parseEther('10'),
+        totalBorrowShares: ethers.parseEther('10'),
+      };
+      // loanToken = usdc, collateralToken = usdc too (a single-token market is fine here — only
+      // the debt leg's token matters for this test, and USDC collateral keeps its cost at zero).
+      const usdcMarket = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress(), usdcTotals);
+      const wethMarket = await setupMarket(morpho, morphoManager, poolAddress, await weth.getAddress(), await usdc.getAddress(), wethTotals);
+
+      const usdcBorrowShares = 5_000n * 10n ** 6n;
+      const wethBorrowShares = ethers.parseEther('1');
+      await morpho.setPosition(usdcMarket.id, poolAddress, 0n, usdcBorrowShares, 20_000n * 10n ** 6n);
+      await morpho.setPosition(wethMarket.id, poolAddress, 0n, wethBorrowShares, 20_000n * 10n ** 6n);
+
+      await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000); // 0.3%
+      await guard.setDefaultSlippageBps(50); // 0.5%
+      await guard.setFlashAmountBufferBps(0);
+      await guard.setRepayDebtBufferBps(0);
+
+      const gross = await guard.getBalance(poolAddress, ethers.ZeroAddress);
+
+      const repayAssetsEstUsdc = toAssetsUp(usdcBorrowShares, usdcTotals.totalBorrowAssets, usdcTotals.totalBorrowShares);
+      const repayAssetsEstWeth = toAssetsUp(wethBorrowShares, wethTotals.totalBorrowAssets, wethTotals.totalBorrowShares);
+
+      // WETH leg (oracleMaxIn, exact-output gross-up — same formula as MorphoMathLib.oracleMaxIn).
+      const wethFairUsdc = (repayAssetsEstWeth * 2000n * 10n ** 6n) / 10n ** 18n;
+      const feeGrossUpBps = (3000n * 10_000n) / (1_000_000n - 3000n);
+      const effectiveSlippageBps = 50n + feeGrossUpBps;
+      const wethMaxInUsdc = (wethFairUsdc * (10_000n + effectiveSlippageBps)) / 10_000n;
+
+      // USDC leg is same-asset: contributes its exact repay amount (buffers zeroed), no inflation.
+      const flashAmount = repayAssetsEstUsdc + wethMaxInUsdc;
+      const flashAmountUsd = flashAmount * 10n ** 12n; // USDC 6dp -> 18dp @ $1
+
+      const totalDebtUsd = repayAssetsEstUsdc * 10n ** 12n + repayAssetsEstWeth * 2000n;
+      const unwindCostUsd = flashAmountUsd - totalDebtUsd;
+
+      const net = await guard.getNetRealizableBalance(poolAddress, ethers.ZeroAddress);
+      expect(net).to.equal(gross - unwindCostUsd);
+      expect(net).to.be.lt(gross); // the cross-asset leg's cost is genuinely deducted
+    });
+
+    // CertiK FNA-35: every OTHER withdrawn leg (not the settlement token, not needed for the
+    // settlement<->debt swap) is ALSO swapped into the settlement token during a full unwind
+    // (_swapAssetsToSettlement runs over every withdrawn supply/collateral leg) — isolated here
+    // with same-asset debt (zero settlement<->debt cost) so the WETH collateral leg's own
+    // swap-back cost is the only thing being measured.
+    it('deducts the collateral/supply leg swap-back cost for every non-settlement reserve', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      await pool.setAsset(await weth.getAddress(), true, ethers.parseUnits('2000', 18));
+
+      const totals = {
+        totalSupplyAssets: 0n,
+        totalSupplyShares: 0n,
+        totalBorrowAssets: 1_000_000n * 10n ** 6n,
+        totalBorrowShares: 1_000_000n * 10n ** 6n,
+      };
+      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await weth.getAddress(), totals);
+
+      const borrowShares = 5_000n * 10n ** 6n;
+      const collateralWeth = ethers.parseEther('10');
+      await morpho.setPosition(id, poolAddress, 0n, borrowShares, collateralWeth);
+
+      await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000); // 0.3%
+      await guard.setDefaultSlippageBps(50); // 0.5%
+      await guard.setFlashAmountBufferBps(0);
+      await guard.setRepayDebtBufferBps(0);
+
+      const gross = await guard.getBalance(poolAddress, ethers.ZeroAddress);
+
+      // Same-asset debt (settlementToken == usdc, the sole debt token): zero settlement<->debt cost.
+      const wethCollateralUsd = (collateralWeth * 2000n * 10n ** 18n) / 10n ** 18n; // = collateralWeth(18dp) * $2000
+      const feeBps = (3000n * 10_000n) / 1_000_000n; // direct fee fraction, not grossed up
+      const effectiveSlippageBps = 50n + feeBps;
+      const expectedLegCost = (wethCollateralUsd * effectiveSlippageBps) / 10_000n;
+
+      const net = await guard.getNetRealizableBalance(poolAddress, ethers.ZeroAddress);
+      expect(net).to.equal(gross - expectedLegCost);
+      expect(net).to.be.lt(gross);
+    });
+
+    // CertiK FNA-35 follow-up (own judgment call, not explicitly asked by the finding text):
+    // getWithdrawableBalance() previously scaled plain gross getBalance() by the liquidity
+    // ceiling. Now that a cost-haircut layer exists, it composes net-realizable * ceiling instead
+    // — mirroring AaveV3LendingPoolAssetGuard's own getWithdrawableBalance(), which already does
+    // this. One market carries BOTH a supply-liquidity constraint (_maxSafePortion) AND
+    // debt/collateral requiring a real unwind cost, so this test fails under the old
+    // gross-based formula and passes only once both layers are actually composed together.
+    it('getWithdrawableBalance composes net-realizable (not gross) with the liquidity ceiling', async () => {
+      const { guard, morpho, morphoManager, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      await pool.setAsset(await weth.getAddress(), true, ethers.parseUnits('2000', 18));
+
+      const totals = {
+        totalSupplyAssets: 100_000n * 10n ** 6n,
+        totalSupplyShares: 100_000n * 10n ** 6n,
+        totalBorrowAssets: 80_000n * 10n ** 6n, // only 20% of supply is available liquidity
+        totalBorrowShares: 80_000n * 10n ** 6n,
+      };
+      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await weth.getAddress(), totals);
+
+      const supplyShares = totals.totalSupplyShares; // the pool holds the market's entire supply
+      const borrowShares = 5_000n * 10n ** 6n;
+      const collateralWeth = ethers.parseEther('10');
+      await morpho.setPosition(id, poolAddress, supplyShares, borrowShares, collateralWeth);
+
+      await guard.setUniV3Fee(await weth.getAddress(), await usdc.getAddress(), 3000);
+      await guard.setDefaultSlippageBps(50);
+      await guard.setFlashAmountBufferBps(0);
+      await guard.setRepayDebtBufferBps(0);
+
+      const gross = await guard.getBalance(poolAddress, ethers.ZeroAddress);
+      const net = await guard.getNetRealizableBalance(poolAddress, ethers.ZeroAddress);
+      expect(net).to.be.lt(gross); // sanity: the WETH collateral leg's cost really is deducted
+
+      const fullSupplyAssets = toAssetsDown(supplyShares, totals.totalSupplyAssets, totals.totalSupplyShares);
+      const availableLiquidity = totals.totalSupplyAssets - totals.totalBorrowAssets;
+      const expectedPortion = maxPortionForMarket(availableLiquidity, fullSupplyAssets);
+      expect(expectedPortion).to.be.lt(PORTION_DENOMINATOR); // sanity: the market really constrains
+
+      const withdrawable = await guard.getWithdrawableBalance(poolAddress, ethers.ZeroAddress);
+      expect(withdrawable).to.equal((net * expectedPortion) / PORTION_DENOMINATOR);
+      // The old formula (gross * ceiling) would have reported a strictly larger figure — proving
+      // this test actually distinguishes the two.
+      expect(withdrawable).to.be.lt((gross * expectedPortion) / PORTION_DENOMINATOR);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // CertiK FNA-07 follow-up: getWithdrawableBalance (liquidity-capped counterpart to
   // getBalance()) and its uniform-ceiling effect on withdrawProcessing.
   //
