@@ -844,6 +844,40 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       expect(decoded[1]).to.equal(300n * 10n ** 6n);
     });
 
+    // CertiK FNA-07 (09/03 comment): a *partial* requested portion must be composed
+    // multiplicatively with the liquidity ceiling, not clamped via min(). The prior test above
+    // requests 100%, which degenerates min(1, maxSafe) === 1 * maxSafe — it cannot distinguish
+    // the two formulas. This test requests 50% against a 40% ceiling: min() gives 40%
+    // (400 of 1000), the correct composition gives 50% * 40% = 20% (200 of 1000).
+    it('with a fractional requested portion, composes multiplicatively with the liquidity ceiling (not min())', async () => {
+      const { guard, dataProvider, aavePool, usdc, aToken } = await deploy();
+      const [signer, , , to] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      await supportAsset(pm, factory, usdc);
+      const plAddr = await pl.getAddress();
+      const aTokenAddr = await aToken.getAddress();
+      const usdcAddr = await usdc.getAddress();
+
+      await dataProvider.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress, ethers.ZeroAddress);
+      await aavePool.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress);
+      await aToken.mint(plAddr, 1000n * 10n ** 6n);
+      // 40% of this reserve is actually liquid right now.
+      await usdc.mint(aTokenAddr, 400n * 10n ** 6n);
+
+      // Request 50% — the correct effective portion is 50% * 40% = 20% (200), not min(50%, 40%)
+      // = 40% (400).
+      const [, , txs] = await guard.withdrawProcessing.staticCall(
+        plAddr,
+        ethers.ZeroAddress,
+        ethers.parseUnits('0.5', 18),
+        to.address,
+      );
+
+      expect(txs.length).to.equal(2);
+      const decoded = aavePool.interface.decodeFunctionData('withdraw', txs[0].txData);
+      expect(decoded[1]).to.equal(200n * 10n ** 6n);
+    });
+
     // CertiK FNA-07 follow-up, the critical invariant: when a leveraged (debt-bearing) position
     // is liquidity-constrained, debt repayment and the flashloan sizing that funds it must scale
     // down by the SAME ceiling as collateral withdrawal — not stay at the full, uncapped portion.

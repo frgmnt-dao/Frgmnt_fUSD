@@ -380,17 +380,20 @@ contract MorphoBlueLendingPoolAssetGuard is
         }
         if (to == address(0)) revert ToZero();
 
-        // CertiK FNA-07 follow-up: never request more supply from any market than it can
-        // currently pay out — see _maxSafePortion's own documentation for why this single,
+        // CertiK FNA-07 follow-up (09/03 comment): never request more supply from any market than
+        // it can currently pay out — see _maxSafePortion's own documentation for why this single,
         // uniform ceiling is also applied to debt repayment and collateral withdrawal, not just
-        // supply. getWithdrawableBalance() already sized the caller's requested withdrawPortion
-        // against this same ceiling at the NAV level; recomputing it here keeps this function
-        // correct on its own, against live on-chain state at execution time.
-        uint256 effectivePortion = withdrawPortion;
-        {
-            uint256 maxSafe = _maxSafePortion(pool);
-            if (maxSafe < effectivePortion) effectivePortion = maxSafe;
-        }
+        // supply. getWithdrawableBalance() already sizes the caller's requested withdrawPortion
+        // against this same ceiling at the NAV level via a multiplicative
+        // (withdrawPortion * maxSafePortion) composition — this must recompute the *same*
+        // composition, not clamp via min(), or the amount actually extracted here would exceed
+        // what was counted into NAV: the caller sizes the global withdrawal portion `p` against a
+        // liquidity-capped contribution of `p * maxSafePortion * balance`, but
+        // min(p, maxSafePortion) * balance is strictly larger than that for any 0 < p < 1 and
+        // 0 < maxSafePortion < 1, over-extracting relative to NAV and risking depleting real
+        // external liquidity beyond the ceiling this cap exists to enforce.
+        uint256 effectivePortion = (withdrawPortion * _maxSafePortion(pool)) /
+            MorphoMathLib.PORTION_DENOMINATOR;
 
         // Collect debt and supply plans
         (MorphoCollectLib.DebtPlan[] memory debts, bool hasDebt) = _collectDebts(

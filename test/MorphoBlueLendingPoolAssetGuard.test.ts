@@ -696,6 +696,61 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       expect(collateralDecoded[1]).to.be.lt(collateral);
     });
 
+    // CertiK FNA-07 (09/03 comment): a *partial* requested portion must be composed
+    // multiplicatively with the liquidity ceiling, not clamped via min(). Both tests around this
+    // one request 100%, which degenerates min(1, maxSafe) === 1 * maxSafe — they cannot
+    // distinguish the two formulas. This test requests 50% against a 30% market ceiling: min()
+    // gives 30%, the correct composition gives 50% * 30% = 15%.
+    it('with a fractional requested portion, composes multiplicatively with the market ceiling (not min())', async () => {
+      const { guard, morpho, morphoManager, morphoAddr, usdc, weth } = await deploy();
+      const pool = await deployAssetPool([usdc, weth]);
+      const poolAddress = await pool.getAddress();
+      // Only 30% of supply is actually liquid.
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+        {
+          totalSupplyAssets: 1_000_000n,
+          totalSupplyShares: 1_000_000n,
+          totalBorrowAssets: 700_000n,
+          totalBorrowShares: 700_000n,
+        },
+      );
+      const collateral = ethers.parseEther('2');
+      await morpho.setPosition(id, poolAddress, 1_000_000n, 0n, collateral);
+
+      const requestedPortion = ethers.parseUnits('0.5', 18); // 50% requested
+      const [, , txs] = await guard.withdrawProcessing.staticCall(
+        poolAddress,
+        ethers.ZeroAddress,
+        requestedPortion,
+        ethers.Wallet.createRandom().address,
+      );
+
+      expect(txs.length).to.equal(2);
+      const iface = new ethers.Interface([
+        'function withdraw(tuple(address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) mp, uint256 assets, uint256 shares, address onBehalf, address receiver)',
+        'function withdrawCollateral(tuple(address loanToken,address collateralToken,address oracle,address irm,uint256 lltv) mp, uint256 assets, address onBehalf, address receiver)',
+      ]);
+      const supplyDecoded = iface.decodeFunctionData('withdraw', txs[0].txData);
+      const collateralDecoded = iface.decodeFunctionData('withdrawCollateral', txs[1].txData);
+
+      const fullSupplyAssets = toAssetsDown(1_000_000n, 1_000_000n, 1_000_000n);
+      const availableLiquidity = 1_000_000n - 700_000n;
+      const marketCeiling = maxPortionForMarket(availableLiquidity, fullSupplyAssets);
+      expect(marketCeiling).to.be.lt(PORTION_DENOMINATOR); // sanity: the market really constrains
+      const expectedPortion = (requestedPortion * marketCeiling) / PORTION_DENOMINATOR;
+      // min(requestedPortion, marketCeiling) would instead give marketCeiling (30%) here — larger
+      // than the correct 15% composition, proving this test actually distinguishes the two.
+      expect(expectedPortion).to.be.lt(marketCeiling);
+
+      expect(supplyDecoded[2]).to.equal((1_000_000n * expectedPortion) / PORTION_DENOMINATOR);
+      expect(collateralDecoded[1]).to.equal((collateral * expectedPortion) / PORTION_DENOMINATOR);
+    });
+
     // CertiK FNA-07 follow-up, the critical invariant: when a debt-bearing position is
     // liquidity-constrained (via an unrelated supply-only market sharing the same flashloan
     // repayment), debt repayment and the flashloan sizing that funds it must scale down by the

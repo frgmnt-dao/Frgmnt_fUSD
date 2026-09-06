@@ -453,18 +453,19 @@ contract AaveV3LendingPoolAssetGuard is
         require(withdrawPortion <= PORTION_DENOMINATOR, "Frgmnt: bad portion");
         require(to != address(0), "Frgmnt: to=0");
 
-        // CertiK FNA-07 follow-up: never request more of any reserve than its aToken can
-        // currently pay out — see _maxSafePortion's own documentation for why this must be one
-        // uniform ceiling applied to both debt repayment and collateral withdrawal, not an
-        // independent per-reserve cap. getWithdrawableBalance() already sized the caller's
-        // requested withdrawPortion against this same ceiling at the NAV level; recomputing it
-        // here (rather than trusting the caller) keeps this function correct on its own, exactly
-        // matching live on-chain state at execution time.
-        uint256 effectivePortion = withdrawPortion;
-        {
-            uint256 maxSafe = _maxSafePortion(pool);
-            if (maxSafe < effectivePortion) effectivePortion = maxSafe;
-        }
+        // CertiK FNA-07 follow-up (09/03 comment): never request more of any reserve than its
+        // aToken can currently pay out — see _maxSafePortion's own documentation for why this
+        // must be one uniform ceiling applied to both debt repayment and collateral withdrawal,
+        // not an independent per-reserve cap. getWithdrawableBalance() already sizes the caller's
+        // requested withdrawPortion against this same ceiling at the NAV level via a
+        // multiplicative (withdrawPortion * maxSafePortion) composition — this must recompute the
+        // *same* composition, not clamp via min(), or the amount actually extracted here would
+        // exceed what was counted into NAV: the caller sizes the global withdrawal portion `p`
+        // against a liquidity-capped contribution of `p * maxSafePortion * balance`, but
+        // min(p, maxSafePortion) * balance is strictly larger than that for any 0 < p < 1 and
+        // 0 < maxSafePortion < 1, over-extracting relative to NAV and risking depleting real
+        // external liquidity beyond the ceiling this cap exists to enforce.
+        uint256 effectivePortion = (withdrawPortion * _maxSafePortion(pool)) / PORTION_DENOMINATOR;
 
         (DebtRepayPlan[] memory repayPlans, uint256 debtAssetCount) = _collectDebtPlans(
             pool,

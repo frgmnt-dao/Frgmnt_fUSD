@@ -553,7 +553,7 @@ library FundCalculationLibrary {
             address asset = assets[i].asset;
             address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
             uint256 withdrawableBalance = capByLiquidity
-                ? _guardWithdrawableBalance(pool, asset, guard)
+                ? guardWithdrawableBalance(pool, asset, guard)
                 : guardNetRealizableBalance(pool, asset, guard);
             uint256 reserved = IPoolLogic(pool).reservedAssetBalance(asset);
             if (reserved > 0) {
@@ -593,7 +593,7 @@ library FundCalculationLibrary {
     ///      pattern already used elsewhere in this codebase (isPreValuedAssetGuard(),
     ///      isWithdrawableBalanceGuard()) — a guard without the marker is assumed to already
     ///      report net-realizable value from getBalance() (today's behavior, unaffected). Unlike
-    ///      _guardWithdrawableBalance()'s liquidity cap, a marked guard's actual call here is not
+    ///      guardWithdrawableBalance()'s liquidity cap, a marked guard's actual call here is not
     ///      wrapped in a further try/degrade: it's a plain valuation read, exactly as
     ///      unconditional as getBalance() itself already is.
     /// @dev public (not external, not private): also called directly by name from
@@ -624,11 +624,19 @@ library FundCalculationLibrary {
     ///      itself unexpectedly fails, falls back to getBalance() and 0 respectively; see
     ///      IWithdrawableBalanceGuard for why a failed marked call degrades to 0 (conservative)
     ///      rather than the full getBalance() value.
-    function _guardWithdrawableBalance(
+    /// @dev public (not external, not private), same reasoning as guardNetRealizableBalance()
+    ///      above: called internally by name from _withdrawableFundValue() below, and separately
+    ///      by PoolLogic._withdrawProcessing() (CertiK FNA-07 09/03 follow-up) to size the
+    ///      slippage-tolerance baseline against the same liquidity-capped amount a
+    ///      IWithdrawableBalanceGuard actually delivers, instead of the uncapped
+    ///      guardNetRealizableBalance() figure — a guard whose withdrawProcessing() clamps to a
+    ///      liquidity cap was previously compared against an expected value computed pre-cap,
+    ///      producing a false-positive SlippageExceeded() whenever the cap actually bound.
+    function guardWithdrawableBalance(
         address pool,
         address asset,
         address guard
-    ) private view returns (uint256) {
+    ) public view returns (uint256) {
         (bool hasMarker, bytes memory markerData) = guard.staticcall(
             abi.encodeWithSignature("isWithdrawableBalanceGuard()")
         );

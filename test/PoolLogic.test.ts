@@ -827,6 +827,37 @@ describe('PoolLogic', () => {
     );
   });
 
+  // CertiK FNA-07 (09/03 comment), second bug: a guard implementing IWithdrawableBalanceGuard
+  // (e.g. Aave V4 Tokenization, Morpho Vault V2) delivers only its liquidity-capped amount from
+  // withdrawProcessing(), but the slippage-tolerance baseline used to be derived from the
+  // uncapped net-realizable balance — producing a false-positive SlippageExceeded() whenever the
+  // cap actually bound, even though the guard delivered exactly what real liquidity allowed.
+  it('does not false-positive SlippageExceeded when a guard reports a liquidity-capped withdrawable balance', async () => {
+    const { pool, fusd, asset, assetGuard, user } = await loadFixture(deployPoolFixture);
+    const amount = ethers.parseUnits('100', 18);
+    const poolAsset = ethers.parseUnits('1000', 18);
+    const cappedBalance = ethers.parseUnits('400', 18); // only 40% of the raw balance is liquid
+
+    await mintAndApproveFUSD(fusd, pool, user, amount);
+    await asset.mint(await pool.getAddress(), poolAsset);
+    await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
+    await assetGuard.setWithdrawableBalanceCap(true, cappedBalance);
+
+    const before = await asset.balanceOf(await user.getAddress());
+    // Portion sizing (_withdrawableFundValue) is itself already liquidity-capped: fundValue = 400
+    // (the cap, single asset), so portion = 100/400 = 25%. Capped delivery is 400 * 25% = 100,
+    // exactly matching the correctly-capped expectedValue baseline within the tight 1% tolerance.
+    // Before the fix, expectedValue was derived from the UNCAPPED v.portionBalance
+    // (1000 * 25% = 250) instead — making this same, fully-correct 100 delivery look like a
+    // >50% shortfall and revert.
+    await pool.connect(user).withdrawCashImmediateSafe(amount, [
+      { supportedAsset: await asset.getAddress(), withdrawData: '0x', slippageTolerance: 100 },
+    ]);
+    const after = await asset.balanceOf(await user.getAddress());
+
+    expect(after - before).to.equal(ethers.parseUnits('100', 18));
+  });
+
   it('supports complex withdraw data and rejects mismatched or failing complex guards', async () => {
     const { pool, fusd, asset, assetGuard, user } = await loadFixture(deployPoolFixture);
     const amount = ethers.parseUnits('100', 18);
