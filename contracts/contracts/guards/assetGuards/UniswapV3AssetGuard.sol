@@ -192,7 +192,11 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
                 continue;
             }
 
-            (bool inRange, uint160 sqrtPriceX96) = UniswapV3PriceLibrary.isFairPrice(
+            // CertiK FNA-58: isFairPrice() now returns the Chainlink-derived fair sqrtPrice, not
+            // the pool's own spot — see its own doc comment. `inRange` still gates out a position
+            // whose pool has moved further than the band tolerates (FNA-37), it just no longer
+            // also selects which price gets used to value the position once the gate passes.
+            (bool inRange, uint160 fairSqrtPriceX96) = UniswapV3PriceLibrary.isFairPrice(
                 factory,
                 nonfungiblePositionManager.factory(),
                 params.token0,
@@ -203,9 +207,9 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
                 complete = false;
                 continue;
             }
-            params.sqrtPriceX96 = sqrtPriceX96;
+            params.sqrtPriceX96 = fairSqrtPriceX96;
 
-            // Total amounts for this NFT at current sqrtPrice
+            // Total amounts for this NFT at the Chainlink-derived fair sqrtPrice
             (uint256 amount0, uint256 amount1) = _positionTotalAmounts(
                 nonfungiblePositionManager,
                 tokenId,

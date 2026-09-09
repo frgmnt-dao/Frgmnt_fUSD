@@ -266,6 +266,42 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
     });
   });
 
+  // CertiK FNA-58: the oracle value of a concentrated position is convex in spot price, minimized
+  // at the fair price — valuing at spot (once merely in-band) let any in-band displacement raise
+  // NAV, permissionlessly harvestable as unbacked fUSD yield via a swap/harvest/reverse-swap round
+  // trip. getBalance() must now value every position at the Chainlink-derived fair price
+  // regardless of where spot sits within the accepted band, so an in-band spot move can no longer
+  // move NAV at all — only an out-of-band move (FNA-37, tested above) has any effect, and that
+  // effect is to zero the position out, not to inflate it.
+  describe('CertiK FNA-58: in-band spot displacement must not change LP valuation', () => {
+    it('getBalance is unchanged by an in-band spot move away from fair price', async () => {
+      const { guard, poolAndFactory, nfpm, uniPool } = await deployPositionFixture();
+      const poolAddr = await poolAndFactory.getAddress();
+      const nfpmAddr = await nfpm.getAddress();
+
+      const balanceAtFair = await guard.getBalance(poolAddr, nfpmAddr);
+      expect(balanceAtFair).to.be.gt(0n);
+      expect(await guard.isValuationComplete(poolAddr, nfpmAddr)).to.equal(true);
+
+      // Move spot 0.3% above fair — comfortably inside the fee-3000 pool's 0.5% sqrt-price band
+      // (MIN_THRESHOLD, since 3000 < 5000), so isValuationComplete must stay true.
+      await uniPool.setSqrtPriceX96((SQRT_PRICE_1 * 1_003n) / 1_000n);
+      expect(await guard.isValuationComplete(poolAddr, nfpmAddr)).to.equal(true);
+
+      const balanceSpotAboveFair = await guard.getBalance(poolAddr, nfpmAddr);
+      // Before the fix, this would be strictly greater than balanceAtFair (convex gain).
+      expect(balanceSpotAboveFair).to.equal(balanceAtFair);
+
+      // Same check on the other side of fair (0.3% below), proving the position isn't just
+      // insensitive to one direction of displacement.
+      await uniPool.setSqrtPriceX96((SQRT_PRICE_1 * 997n) / 1_000n);
+      expect(await guard.isValuationComplete(poolAddr, nfpmAddr)).to.equal(true);
+
+      const balanceSpotBelowFair = await guard.getBalance(poolAddr, nfpmAddr);
+      expect(balanceSpotBelowFair).to.equal(balanceAtFair);
+    });
+  });
+
   it('removeTokenCheck returns false for tokens used by owned NFTs', async () => {
     const { guard, token0, token1, poolAndFactory, nfpm } = await deployPositionFixture();
 
