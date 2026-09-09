@@ -6,8 +6,16 @@ contract MockPoolLogic {
     uint256 public mintCount_;
     address public fusd;
 
+    // CertiK FNA-60: mirrors PoolLogic's real public mapping getter so
+    // PoolManagerLogic._removeAsset()'s staticcall against it can be exercised in tests.
+    mapping(address => uint256) public pendingCashWithdrawCount;
+
     function setManager(address m) external {
         manager = m;
+    }
+
+    function setPendingCashWithdrawCount(address asset, uint256 count) external {
+        pendingCashWithdrawCount[asset] = count;
     }
 
     function setFusd(address _fusd) external {

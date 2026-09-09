@@ -119,6 +119,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     error PreValuedAssetNotDepositable();
     error NoAssetGuard();
     error AssetStillReferenced();
+    error AssetHasPendingCashWithdrawRequests();
     error CannotAddFusdAsAsset();
 
     modifier onlyFactoryOwner() {
@@ -496,6 +497,21 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         }
     }
 
+    /// @notice CertiK FNA-60: a queued cash-withdraw request locks the user's FUSD against a
+    ///         chosen deposit asset without requiring the pool to actually hold that asset (it's
+    ///         only priced/paid out later, at finalizeCashWithdraw()) — so a zero-balance deposit
+    ///         asset could pass every guard/reference check above and still be delisted while a
+    ///         request against it sits Pending. Once delisted, finalizeCashWithdraw() prices it
+    ///         at zero and reverts, and there is no cancel path, permanently locking that user's
+    ///         FUSD in PoolLogic until the manager re-lists the exact same asset.
+    /// @dev Checked via a low-level staticcall against PoolLogic's own
+    ///      `pendingCashWithdrawCount(address) -> uint256` public-mapping getter (FNA-60), not a
+    ///      typed interface call — PoolLogic and PoolManagerLogic are separately-upgradeable
+    ///      proxies (see the standing upgrade-ordering constraint), so a typed call would revert
+    ///      outright if this contract's own upgrade landed before PoolLogic's matching one. Fails
+    ///      CLOSED (blocks removal) on any staticcall failure or malformed return, not just a
+    ///      confirmed nonzero count: an unresolvable answer must never be read as "safe to
+    ///      remove" for a check whose entire purpose is preventing funds from being locked.
     function _removeAsset(address _asset) internal {
         if (!isSupportedAsset(_asset)) revert AssetNotSupported();
 
@@ -505,6 +521,15 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         // Let the guard decide using protocol-aware checks (including external positions).
         IAssetGuard(guard).removeAssetCheck(poolLogic, _asset);
         _requireNotReferencedByOtherAssets(_asset);
+
+        {
+            (bool ok, bytes memory data) = poolLogic.staticcall(
+                abi.encodeWithSignature("pendingCashWithdrawCount(address)", _asset)
+            );
+            if (!ok || data.length != 32 || abi.decode(data, (uint256)) != 0) {
+                revert AssetHasPendingCashWithdrawRequests();
+            }
+        }
 
         uint256 idx = assetPosition[_asset] - 1;
         uint256 len = supportedAssets.length;

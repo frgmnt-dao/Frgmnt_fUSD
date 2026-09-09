@@ -457,6 +457,76 @@ describe('PoolManagerLogic', () => {
       });
     });
 
+    // CertiK FNA-60: a queued cash-withdraw request locks the user's FUSD against a chosen
+    // deposit asset without requiring the pool to hold that asset — it's only priced/paid out
+    // later, at finalizeCashWithdraw(). Removing a zero-balance deposit asset while a request
+    // against it is still Pending permanently locks that user's FUSD (finalizeCashWithdraw()
+    // prices the now-unsupported asset at 0 and reverts, with no cancel path).
+    describe('CertiK FNA-60: removal blocked while a pending cash-withdraw request references the asset', () => {
+      it('reverts AssetHasPendingCashWithdrawRequests when PoolLogic reports a nonzero pending count for the asset', async () => {
+        const { contract, manager, poolLogic, tokenB } = await loadFixture(setupFixture);
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+        await poolLogic.setPendingCashWithdrawCount(tokenB, 1);
+
+        await expect(
+          contract.connect(manager).changeAssets([], [tokenB]),
+        ).to.be.revertedWithCustomError(contract, 'AssetHasPendingCashWithdrawRequests');
+        expect(await contract.isSupportedAsset(tokenB)).to.equal(true);
+      });
+
+      it('succeeds once PoolLogic reports zero pending requests for the asset again', async () => {
+        const { contract, manager, poolLogic, tokenB } = await loadFixture(setupFixture);
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+        await poolLogic.setPendingCashWithdrawCount(tokenB, 1);
+        await expect(
+          contract.connect(manager).changeAssets([], [tokenB]),
+        ).to.be.revertedWithCustomError(contract, 'AssetHasPendingCashWithdrawRequests');
+
+        // The request finalizes (or the manager waits it out) — PoolLogic's own count drops to 0.
+        await poolLogic.setPendingCashWithdrawCount(tokenB, 0);
+        await expect(contract.connect(manager).changeAssets([], [tokenB])).to.emit(
+          contract,
+          'AssetRemoved',
+        );
+      });
+
+      it('does not block removal of an unrelated asset with its own zero pending count', async () => {
+        const { contract, manager, poolLogic, tokenA, tokenB } = await loadFixture(setupFixture);
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+        // Pending requests exist, but only against tokenA — must not block tokenB's removal.
+        await poolLogic.setPendingCashWithdrawCount(tokenA, 1);
+
+        await expect(contract.connect(manager).changeAssets([], [tokenB])).to.emit(
+          contract,
+          'AssetRemoved',
+        );
+      });
+
+      // The check is a staticcall against PoolLogic's own getter, not a typed interface call —
+      // PoolLogic and PoolManagerLogic are separately-upgradeable proxies, so a call that reverts
+      // or returns malformed data (e.g. PoolLogic not yet upgraded to expose this getter) must
+      // fail CLOSED (block removal), never be silently read as "no pending requests."
+      it('fails closed (blocks removal) when the staticcall itself fails, not just when it reports a nonzero count', async () => {
+        const { contract, manager, owner, tokenB } = await loadFixture(setupFixture);
+        await contract.connect(manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+
+        // Simulate a not-yet-upgraded PoolLogic implementation that has no
+        // pendingCashWithdrawCount(address) getter at all — the staticcall itself returns
+        // ok=false, exactly the "unresolvable answer" case this check must not treat as safe.
+        // A bare EOA can't be used here: setPoolLogic() itself requires poolManagerLogic() to
+        // resolve back to this contract before accepting the new address.
+        const LegacyPoolLogic = await ethers.getContractFactory('MockPoolLogicLegacy');
+        const legacyPoolLogic = await LegacyPoolLogic.deploy();
+        await legacyPoolLogic.waitForDeployment();
+        await legacyPoolLogic.setManager(await contract.getAddress());
+        await contract.connect(owner).setPoolLogic(await legacyPoolLogic.getAddress());
+
+        await expect(
+          contract.connect(manager).changeAssets([], [tokenB]),
+        ).to.be.revertedWithCustomError(contract, 'AssetHasPendingCashWithdrawRequests');
+      });
+    });
+
     describe('FNA-23: fusd cannot be added as a supported asset of its own pool', () => {
       it('reverts CannotAddFusdAsAsset when adding fusd itself', async () => {
         const { contract, manager, poolLogic, mockAssetHandler } = await loadFixture(
