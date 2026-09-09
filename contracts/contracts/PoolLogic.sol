@@ -420,8 +420,18 @@ contract PoolLogic is
         return totalRewardAccrued - totalRewardHarvested;
     }
 
+    /// @dev CertiK FNA-59: a finalized-but-unclaimed queued withdrawal already left active NAV
+    ///      (finalizeCashWithdraw() escrows the payout asset and lowers accountedAssets) but its
+    ///      FUSD isn't burned until claimCashWithdraw() — see finalizedUnclaimedFusd's own docs.
+    ///      Without subtracting it here, the management-fee base kept charging the linear annual
+    ///      fee on that already-departed liability for every elapsed interval until claimed,
+    ///      minting the manager fee from remaining stakers' net yield against value no longer in
+    ///      the pool. Mirrors FundCalculationLibrary._activeTotalClaims()'s identical exclusion
+    ///      exactly (same floor-at-zero subtraction), so this base and the withdrawal-claims
+    ///      denominator finally agree on what "outstanding" means.
     function _managementFeeBase() internal view returns (uint256) {
-        return IERC20(fusd).totalSupply() + _unclaimedRewards();
+        uint256 base = IERC20(fusd).totalSupply() + _unclaimedRewards();
+        return base > finalizedUnclaimedFusd ? base - finalizedUnclaimedFusd : 0;
     }
 
     function _requireAutoCompoundingInitialized() internal view returns (uint256 index) {

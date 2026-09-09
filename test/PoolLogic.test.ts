@@ -2416,6 +2416,62 @@ describe('PoolLogic', () => {
     // later finalize its true fair share ..." test above.
   });
 
+  // CertiK FNA-59: a finalized-but-unclaimed queued withdrawal's backing asset already left
+  // active NAV (same FNA-38 mechanism above), but _managementFeeBase() kept charging the linear
+  // annual management fee on the FULL fUSD.totalSupply(), including that already-departed
+  // liability, until claimCashWithdraw() finally burns it. _activeTotalClaims() already excludes
+  // finalizedUnclaimedFusd from the withdrawal-claims denominator; the management-fee base must
+  // agree, or the manager is minted a fee on value no longer backing anything.
+  describe('CertiK FNA-59: management fee base excludes finalized-but-unclaimed FUSD', () => {
+    it('calculateAvailableManagerFee excludes finalizedUnclaimedFusd from the management-fee base', async () => {
+      const { pool, fusd, asset, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const poolAddr = await pool.getAddress();
+
+      // Management fee only (10%/year), no performance fee, so the returned figure isolates the
+      // management-fee component exactly.
+      await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n);
+
+      // Pool: 100 value backing Alice's 100 FUSD (fully collateralized, so accountedAssets ==
+      // totalValue and netYield stays 0 regardless of the finalize below).
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('100', 18));
+
+      // Alice queues and finalizes 40 of her 100 FUSD — fully collateralized, so no haircut.
+      // fusd.totalSupply() stays 100 (finalize never burns), but finalizedUnclaimedFusd is now 40.
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('40', 18), await asset.getAddress());
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+      await pool.connect(manager).finalizeCashWithdraw(event!.args.requestId);
+      expect(await pool.finalizedUnclaimedFusd()).to.equal(ethers.parseUnits('40', 18));
+      expect(await fusd.totalSupply()).to.equal(ethers.parseUnits('100', 18));
+
+      const lastFeeMintTime = await pool.lastFeeMintTime();
+      await increaseTime(365 * 24 * 60 * 60);
+
+      const fee = await pool.calculateAvailableManagerFee();
+      const latestBlock = await ethers.provider.getBlock('latest');
+      const dt = BigInt(latestBlock!.timestamp) - lastFeeMintTime;
+
+      // Fixed formula: fee = (totalSupply(100) - finalizedUnclaimedFusd(40)) * 10%/year * dt.
+      // Hand-derived against the exact elapsed dt (not assumed to be precisely 365 days, since
+      // setup transactions before increaseTime() also advance the block timestamp) — matches this
+      // codebase's own established style for fee-accrual tests with exact math.
+      const base = ethers.parseUnits('100', 18) - ethers.parseUnits('40', 18);
+      const expectedFee = (base * 1000n * dt) / 10_000n / (365n * 24n * 60n * 60n);
+      expect(fee).to.equal(expectedFee);
+
+      // Old (buggy) formula would instead have charged the fee on the full 100 FUSD, including
+      // Alice's already-departed 40 — strictly larger than the fixed result.
+      const oldBuggyFee = (ethers.parseUnits('100', 18) * 1000n * dt) / 10_000n / (365n * 24n * 60n * 60n);
+      expect(fee).to.be.lt(oldBuggyFee);
+    });
+  });
+
   // FNA-06: compoundedRewardIndex must never grow unbounded. An attacker holding the pool's only
   // (dust) effective sfUSD supply could previously donate directly to the pool (reads as "yield"
   // since it grows fund value without growing accountedAssets) and harvest repeatedly, compounding
