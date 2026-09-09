@@ -199,6 +199,13 @@ contract PoolLogic is
     ///      over-excludes).
     uint256 public finalizedUnclaimedFusd;
 
+    /// @notice CertiK FNA-60: count of currently-Pending cashWithdrawRequests entries per asset.
+    ///         Incremented in requestCashWithdraw(), decremented once a request leaves Pending
+    ///         (finalizeCashWithdraw()). O(1) so PoolManagerLogic._removeAsset() can check "does
+    ///         any pending request still reference this asset" without an unbounded loop over
+    ///         every request this pool has ever created.
+    mapping(address => uint256) public pendingCashWithdrawCount;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -1067,6 +1074,7 @@ contract PoolLogic is
             assetAmount: 0,
             status: RequestStatus.Pending
         });
+        ++pendingCashWithdrawCount[asset];
 
         userRequests[msg.sender].push(requestId);
 
@@ -1147,6 +1155,7 @@ contract PoolLogic is
 
         r.assetAmount = assetAmount;
         r.status = RequestStatus.FinalizedEscrowed;
+        --pendingCashWithdrawCount[asset];
 
         // FNA-38: this request's backing asset just left active NAV above; its FUSD isn't
         // burned until claimCashWithdraw(), so exclude it from totalClaims in the meantime too —

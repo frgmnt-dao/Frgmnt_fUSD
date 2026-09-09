@@ -2472,6 +2472,66 @@ describe('PoolLogic', () => {
     });
   });
 
+  // CertiK FNA-60: PoolManagerLogic._removeAsset() gates asset removal on PoolLogic's own
+  // pendingCashWithdrawCount(asset) via a staticcall (tested end-to-end against a mock in
+  // PoolManagerLogic.test.ts). This suite verifies the counter itself — the piece that lives in
+  // PoolLogic.sol's own, extremely bytecode-tight budget — is correctly incremented at
+  // requestCashWithdraw() and decremented once a request leaves Pending at finalizeCashWithdraw().
+  describe('CertiK FNA-60: pendingCashWithdrawCount bookkeeping', () => {
+    it('increments on requestCashWithdraw and decrements back to 0 on finalizeCashWithdraw', async () => {
+      const { pool, fusd, asset, manager, user } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const poolAddr = await pool.getAddress();
+      const assetAddr = await asset.getAddress();
+
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('100', 18));
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      expect(await pool.pendingCashWithdrawCount(assetAddr)).to.equal(0n);
+
+      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('40', 18), assetAddr);
+      const receipt = await tx.wait();
+      const event = receipt!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+
+      expect(await pool.pendingCashWithdrawCount(assetAddr)).to.equal(1n);
+
+      await pool.connect(manager).finalizeCashWithdraw(event!.args.requestId);
+
+      expect(await pool.pendingCashWithdrawCount(assetAddr)).to.equal(0n);
+    });
+
+    it('tracks multiple concurrent pending requests for the same asset independently', async () => {
+      const { pool, fusd, asset, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const alice = user;
+      const bob = user2;
+      const poolAddr = await pool.getAddress();
+      const assetAddr = await asset.getAddress();
+
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+      await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('20', 18));
+      await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('20', 18));
+      await pool.connect(manager).setImmediateWithdrawEnabled(false);
+
+      const tx1 = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('20', 18), assetAddr);
+      const receipt1 = await tx1.wait();
+      const event1 = receipt1!.logs
+        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
+
+      await pool.connect(bob).requestCashWithdraw(ethers.parseUnits('20', 18), assetAddr);
+      expect(await pool.pendingCashWithdrawCount(assetAddr)).to.equal(2n);
+
+      // Finalizing Alice's request alone must not clear Bob's still-pending one.
+      await pool.connect(manager).finalizeCashWithdraw(event1!.args.requestId);
+      expect(await pool.pendingCashWithdrawCount(assetAddr)).to.equal(1n);
+    });
+  });
+
   // FNA-06: compoundedRewardIndex must never grow unbounded. An attacker holding the pool's only
   // (dust) effective sfUSD supply could previously donate directly to the pool (reads as "yield"
   // since it grows fund value without growing accountedAssets) and harvest repeatedly, compounding
