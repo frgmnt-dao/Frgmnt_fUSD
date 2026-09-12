@@ -818,21 +818,21 @@ contract AaveV3LendingPoolAssetGuard is
             (, address stableDebtToken, address variableDebtToken) = aaveProtocolDataProvider
                 .getReserveTokensAddresses(underlying);
 
-            uint256 stableDebtBalance =
-                stableDebtToken == address(0) ? 0 : IERC20Extended(stableDebtToken).balanceOf(pool);
-            uint256 variableDebtBalance =
-                variableDebtToken == address(0)
-                    ? 0
-                    : IERC20Extended(variableDebtToken).balanceOf(pool);
+            uint256 stableDebtBalance = stableDebtToken == address(0)
+                ? 0
+                : IERC20Extended(stableDebtToken).balanceOf(pool);
+            uint256 variableDebtBalance = variableDebtToken == address(0)
+                ? 0
+                : IERC20Extended(variableDebtToken).balanceOf(pool);
 
             if (stableDebtBalance == 0 && variableDebtBalance == 0) continue;
 
-            uint256 repayStable =
-                stableDebtBalance == 0 ? 0 : _mulPortionRoundUp(stableDebtBalance, withdrawPortion);
-            uint256 repayVariable =
-                variableDebtBalance == 0
-                    ? 0
-                    : _mulPortionRoundUp(variableDebtBalance, withdrawPortion);
+            uint256 repayStable = stableDebtBalance == 0
+                ? 0
+                : _mulPortionRoundUp(stableDebtBalance, withdrawPortion);
+            uint256 repayVariable = variableDebtBalance == 0
+                ? 0
+                : _mulPortionRoundUp(variableDebtBalance, withdrawPortion);
 
             if (repayStable == 0 && repayVariable == 0) continue;
 
@@ -863,8 +863,8 @@ contract AaveV3LendingPoolAssetGuard is
         uint256 totalMaxIn;
 
         for (uint256 i = 0; i < repayPlans.length; ++i) {
-            uint256 repayTotal =
-                repayPlans[i].repayStableAmount + repayPlans[i].repayVariableAmount;
+            uint256 repayTotal = repayPlans[i].repayStableAmount +
+                repayPlans[i].repayVariableAmount;
             if (repayTotal == 0) continue;
 
             // Skip swap logic if debt token is same as settlement token
@@ -879,10 +879,7 @@ contract AaveV3LendingPoolAssetGuard is
             // not always the unrelated single-hop fallback fee — otherwise a configured
             // multi-hop route's true cost can exceed this estimate, under-sizing the flash
             // loan needed to cover the swap that same route will later require.
-            uint24 fee = _routeFeeSettlementToDebt(
-                settlementToken,
-                repayPlans[i].underlyingAsset
-            );
+            uint24 fee = _routeFeeSettlementToDebt(settlementToken, repayPlans[i].underlyingAsset);
 
             totalMaxIn += _oracleMaxIn(
                 factory,

@@ -26,12 +26,13 @@ contract TestCLPriceLibrary {
         uint8 token0Decimals,
         uint8 token1Decimals
     ) external pure returns (uint160) {
-        return CLPriceLibrary.calculateSqrtPrice(
-            token0Price,
-            token1Price,
-            token0Decimals,
-            token1Decimals
-        );
+        return
+            CLPriceLibrary.calculateSqrtPrice(
+                token0Price,
+                token1Price,
+                token0Decimals,
+                token1Decimals
+            );
     }
 }
 
@@ -221,7 +222,11 @@ contract TestFundCalculationLibrary {
         address asset,
         uint256 grossFusd
     ) external view returns (uint256 assetAmount) {
-        (assetAmount, , ) = FundCalculationLibrary.computeFinalizeAssetAmount(pool, asset, grossFusd);
+        (assetAmount, , ) = FundCalculationLibrary.computeFinalizeAssetAmount(
+            pool,
+            asset,
+            grossFusd
+        );
     }
 }
 
@@ -411,11 +416,7 @@ contract TestTxGuardMissingTrackingFunction {
         isPublic = publicTx;
     }
 
-    function txGuard(
-        address,
-        address,
-        bytes calldata
-    ) external view returns (uint16, bool) {
+    function txGuard(address, address, bytes calldata) external view returns (uint16, bool) {
         return (txType, isPublic);
     }
 }
@@ -424,11 +425,7 @@ contract TestTxGuardShortTrackingReturn {
     uint16 public txType = 1;
     bool public isPublic = true;
 
-    function txGuard(
-        address,
-        address,
-        bytes calldata
-    ) external view returns (uint16, bool) {
+    function txGuard(address, address, bytes calldata) external view returns (uint16, bool) {
         return (txType, isPublic);
     }
 

@@ -152,7 +152,6 @@ contract AssetHandler is OwnableUpgradeable, IAssetHandler {
         } catch {
             revert(fetchError);
         }
-
         require(price > 0, unavailableError);
     }
 

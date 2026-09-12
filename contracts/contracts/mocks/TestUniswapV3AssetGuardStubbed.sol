@@ -6,7 +6,9 @@ import { IHasGuardInfo } from "../interfaces/IHasGuardInfo.sol";
 import { IPoolLogic } from "../interfaces/IPoolLogic.sol";
 import { IERC20Extended } from "../interfaces/IERC20Extended.sol";
 
-import { UniswapV3NonfungiblePositionGuard } from "../guards/contractGuards/uniswapV3/UniswapV3NonfungiblePositionGuard.sol";
+import {
+    UniswapV3NonfungiblePositionGuard
+} from "../guards/contractGuards/uniswapV3/UniswapV3NonfungiblePositionGuard.sol";
 import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 
 /// @notice Test-only stub that mimics UniswapV3AssetGuard without calling Uniswap math.
@@ -46,15 +48,28 @@ contract TestUniswapV3AssetGuardStubbed {
         amount1Override[tokenId] = amount1;
     }
 
-    function setDecData(uint256 tokenId, uint128 lpAmount, uint256 amount0, uint256 amount1) external {
-        decOverride[tokenId] = DecreaseLiquidity({ lpAmount: lpAmount, amount0: amount0, amount1: amount1 });
+    function setDecData(
+        uint256 tokenId,
+        uint128 lpAmount,
+        uint256 amount0,
+        uint256 amount1
+    ) external {
+        decOverride[tokenId] = DecreaseLiquidity({
+            lpAmount: lpAmount,
+            amount0: amount0,
+            amount1: amount1
+        });
     }
 
     function getDecimals(address) external pure returns (uint256 decimals) {
         decimals = 18;
     }
 
-    function _assetValue(address factory, address token, uint256 amount) internal view returns (uint256) {
+    function _assetValue(
+        address factory,
+        address token,
+        uint256 amount
+    ) internal view returns (uint256) {
         if (IHasAssetInfo(factory).isSupportedAsset(token)) {
             uint256 tokenPriceInUsd = IHasAssetInfo(factory).getAssetPrice(token);
             uint256 dec = IERC20Extended(token).decimals();
@@ -72,7 +87,10 @@ contract TestUniswapV3AssetGuardStubbed {
             address token0 = token0Override[tokenId];
             address token1 = token1Override[tokenId];
 
-            if (!IHasAssetInfo(factory).isSupportedAsset(token0) || !IHasAssetInfo(factory).isSupportedAsset(token1)) {
+            if (
+                !IHasAssetInfo(factory).isSupportedAsset(token0) ||
+                !IHasAssetInfo(factory).isSupportedAsset(token1)
+            ) {
                 continue;
             }
 
@@ -88,7 +106,15 @@ contract TestUniswapV3AssetGuardStubbed {
         address asset,
         uint256 /*portion*/,
         address to
-    ) external view returns (address withdrawAsset, uint256 withdrawBalance, MultiTransaction[] memory transactions) {
+    )
+        external
+        view
+        returns (
+            address withdrawAsset,
+            uint256 withdrawBalance,
+            MultiTransaction[] memory transactions
+        )
+    {
         INonfungiblePositionManager nfpm = INonfungiblePositionManager(asset);
         address factory = IPoolLogic(pool).factory();
 
@@ -109,7 +135,13 @@ contract TestUniswapV3AssetGuardStubbed {
                 transactions[txCount].to = address(nfpm);
                 transactions[txCount].txData = abi.encodeWithSelector(
                     INonfungiblePositionManager.decreaseLiquidity.selector,
-                    INonfungiblePositionManager.DecreaseLiquidityParams(tokenId, dec.lpAmount, 0, 0, type(uint256).max)
+                    INonfungiblePositionManager.DecreaseLiquidityParams(
+                        tokenId,
+                        dec.lpAmount,
+                        0,
+                        0,
+                        type(uint256).max
+                    )
                 );
                 txCount++;
             }
@@ -118,7 +150,12 @@ contract TestUniswapV3AssetGuardStubbed {
                 transactions[txCount].to = address(nfpm);
                 transactions[txCount].txData = abi.encodeWithSelector(
                     INonfungiblePositionManager.collect.selector,
-                    INonfungiblePositionManager.CollectParams(tokenId, to, uint128(dec.amount0), uint128(dec.amount1))
+                    INonfungiblePositionManager.CollectParams(
+                        tokenId,
+                        to,
+                        uint128(dec.amount0),
+                        uint128(dec.amount1)
+                    )
                 );
                 txCount++;
             }

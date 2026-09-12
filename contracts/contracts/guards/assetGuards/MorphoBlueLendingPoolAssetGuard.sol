@@ -5,7 +5,9 @@ pragma solidity ^0.8.24;
                             IMPORTS
 //////////////////////////////////////////////////////////////*/
 
-import { MorphoBalancesLib } from "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
+import {
+    MorphoBalancesLib
+} from "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 
 import {
     IMorpho,
@@ -16,7 +18,9 @@ import {
     Market
 } from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
 import { SharesMathLib } from "@morpho-org/morpho-blue/src/libraries/SharesMathLib.sol";
-import { IMorphoBlueLendingPoolAssetGuard } from "../../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
+import {
+    IMorphoBlueLendingPoolAssetGuard
+} from "../../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { IAssetGuard } from "../../interfaces/guards/IAssetGuard.sol";
 import { ISlippageCheckingGuard } from "../../interfaces/guards/ISlippageCheckingGuard.sol";
 import { IPreValuedAssetGuard } from "../../interfaces/guards/IPreValuedAssetGuard.sol";
@@ -238,7 +242,10 @@ contract MorphoBlueLendingPoolAssetGuard is
         return true;
     }
 
-    function getDeficit(address pool, address) external view override returns (uint256 deficitUsd18) {
+    function getDeficit(
+        address pool,
+        address
+    ) external view override returns (uint256 deficitUsd18) {
         deficitUsd18 = MorphoCollectLib.getDeficit(morphoManager, morpho, pool);
     }
 

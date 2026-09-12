@@ -304,10 +304,8 @@ contract AaveV4SpokeAssetGuard is
         address spoke
     ) internal view returns (uint256 balanceUsd18, bool complete) {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
-            pool,
-            spoke
-        );
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager)
+            .getTrackedPoolReserves(pool, spoke);
 
         complete = true;
         for (uint256 i = 0; i < reserveIds.length; ++i) {
@@ -360,10 +358,8 @@ contract AaveV4SpokeAssetGuard is
         address spoke
     ) external view override returns (uint256 balanceUsd18) {
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
-            pool,
-            spoke
-        );
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager)
+            .getTrackedPoolReserves(pool, spoke);
 
         HubLiquidityLedger memory ledger = _newHubLiquidityLedger(reserveIds.length);
         for (uint256 i = 0; i < reserveIds.length; ++i) {
@@ -496,7 +492,10 @@ contract AaveV4SpokeAssetGuard is
     }
 
     /// @notice See IIncompleteValuationGuard.
-    function isValuationComplete(address pool, address spoke) external view override returns (bool complete) {
+    function isValuationComplete(
+        address pool,
+        address spoke
+    ) external view override returns (bool complete) {
         (, complete) = _valuePosition(pool, spoke);
     }
 
@@ -516,10 +515,8 @@ contract AaveV4SpokeAssetGuard is
     ///      removal — the correct, conservative outcome when emptiness can't be proven. See
     ///      RAW_DUST_TOLERANCE for why the tolerance itself is in raw units rather than USD.
     function removeAssetCheck(address pool, address spoke) public view override {
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
-            pool,
-            spoke
-        );
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager)
+            .getTrackedPoolReserves(pool, spoke);
         for (uint256 i = 0; i < reserveIds.length; ++i) {
             uint256 suppliedAssets = ISpoke(spoke).getUserSuppliedAssets(reserveIds[i], pool);
             require(suppliedAssets <= RAW_DUST_TOLERANCE, "ClosedAssetGuard: non-empty asset");
@@ -548,10 +545,8 @@ contract AaveV4SpokeAssetGuard is
         address asset,
         address token
     ) public view override returns (bool) {
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
-            pool,
-            asset
-        );
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager)
+            .getTrackedPoolReserves(pool, asset);
         for (uint256 i = 0; i < reserveIds.length; ++i) {
             uint256 suppliedAssets;
             try ISpoke(asset).getUserSuppliedAssets(reserveIds[i], pool) returns (uint256 a) {
@@ -606,10 +601,8 @@ contract AaveV4SpokeAssetGuard is
         if (withdrawPortion > 1e18) revert BadPortion();
         if (to == address(0)) revert InvalidRecipient();
 
-        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager).getTrackedPoolReserves(
-            pool,
-            spoke
-        );
+        uint256[] memory reserveIds = IAaveV4SpokeManager(aaveV4SpokeManager)
+            .getTrackedPoolReserves(pool, spoke);
 
         txs = new MultiTransaction[](reserveIds.length * 2);
         uint256 n;
@@ -677,12 +670,7 @@ contract AaveV4SpokeAssetGuard is
 
         txs[n++] = MultiTransaction({
             to: ctx.spoke,
-            txData: abi.encodeWithSelector(
-                ISpoke.withdraw.selector,
-                reserveId,
-                amount,
-                ctx.pool
-            )
+            txData: abi.encodeWithSelector(ISpoke.withdraw.selector, reserveId, amount, ctx.pool)
         });
 
         txs[n++] = MultiTransaction({
@@ -723,7 +711,6 @@ contract AaveV4SpokeAssetGuard is
         } catch {
             availableLiquidity = 0;
         }
-
         // CertiK FNA-07 follow-up: `availableLiquidity` above is the Hub's *total* liquidity for
         // this (hub, assetId) — not what's left after an earlier reserve in this same call
         // already counted on some of it. _remainingHubLiquidity nets that out; recording this

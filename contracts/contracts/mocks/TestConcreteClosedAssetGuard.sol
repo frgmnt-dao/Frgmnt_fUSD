@@ -26,12 +26,7 @@ contract TestConcreteClosedAssetGuard is ClosedAssetGuard {
         address,
         uint256,
         address
-    )
-        external
-        pure
-        override
-        returns (address, uint256, MultiTransaction[] memory txs)
-    {
+    ) external pure override returns (address, uint256, MultiTransaction[] memory txs) {
         return (address(0), 0, txs);
     }
 }

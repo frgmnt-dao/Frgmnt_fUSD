@@ -35,7 +35,12 @@ contract WithdrawalEscrow is IWithdrawalEscrow {
     error ZeroAddress();
 
     event Reserved(address indexed asset, uint256 amount);
-    event Released(address indexed asset, address indexed recipient, uint256 amount, uint256 delivered);
+    event Released(
+        address indexed asset,
+        address indexed recipient,
+        uint256 amount,
+        uint256 delivered
+    );
 
     modifier onlyPool() {
         if (msg.sender != pool) revert OnlyPool();

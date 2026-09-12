@@ -40,9 +40,8 @@ contract MerklRewardClaimGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITransa
 
     /// @notice Merkl claim selector
     /// claim(address[] users, address[] tokens, uint256[] amounts, bytes32[][] proofs)
-    bytes4 private constant SEL_CLAIM = bytes4(
-        keccak256("claim(address[],address[],uint256[],bytes32[][])")
-    );
+    bytes4 private constant SEL_CLAIM =
+        bytes4(keccak256("claim(address[],address[],uint256[],bytes32[][])"));
 
     /*//////////////////////////////////////////////////////////////////////////
                                     EVENTS

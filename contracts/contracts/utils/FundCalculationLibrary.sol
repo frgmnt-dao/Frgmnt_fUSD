@@ -560,7 +560,10 @@ library FundCalculationLibrary {
                 if (withdrawableBalance < reserved) revert InvalidReservedBalance();
                 withdrawableBalance -= reserved;
             }
-            grossValue += IPoolManagerLogic(poolManagerLogic).assetValue(asset, withdrawableBalance);
+            grossValue += IPoolManagerLogic(poolManagerLogic).assetValue(
+                asset,
+                withdrawableBalance
+            );
             totalDeficit += _guardDeficit(pool, asset, guard);
         }
     }
@@ -781,6 +784,8 @@ library FundCalculationLibrary {
             valueBefore,
             valueDelta
         );
-        newAccountedAssets = accountedAssetsBefore > reduction ? accountedAssetsBefore - reduction : 0;
+        newAccountedAssets = accountedAssetsBefore > reduction
+            ? accountedAssetsBefore - reduction
+            : 0;
     }
 }

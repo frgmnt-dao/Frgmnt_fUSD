@@ -187,15 +187,17 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
         bytes4 method = getMethod(data);
         bytes memory params = getParams(data);
 
-        if (method == SEL_DEPOSIT) txType = _handleDeposit(poolLogic, to, _poolManagerLogic, params);
+        if (method == SEL_DEPOSIT)
+            txType = _handleDeposit(poolLogic, to, _poolManagerLogic, params);
         else if (method == SEL_MINT) txType = _handleMint(poolLogic, to, _poolManagerLogic, params);
         else if (method == SEL_WITHDRAW)
             txType = _handleWithdraw(poolLogic, to, _poolManagerLogic, params);
-        else if (method == SEL_REDEEM) txType = _handleRedeem(poolLogic, to, _poolManagerLogic, params);
+        else if (method == SEL_REDEEM)
+            txType = _handleRedeem(poolLogic, to, _poolManagerLogic, params);
         else if (method == SEL_MULTICALL)
             txType = _handleMulticall(poolLogic, to, _poolManagerLogic, params);
-        // FNA-46: SEL_FORCE_DEALLOCATE is deliberately NOT dispatched standalone here — see
-        // _handleMulticall's own docs. A bare forceDeallocate call now falls through to NotUsed.
+            // FNA-46: SEL_FORCE_DEALLOCATE is deliberately NOT dispatched standalone here — see
+            // _handleMulticall's own docs. A bare forceDeallocate call now falls through to NotUsed.
         else txType = uint16(TransactionType.NotUsed);
 
         // Vault V2 deposits/withdrawals carry no debt and no liquidation risk, so there is
@@ -211,7 +213,11 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     /// @dev Entry-side validation (FNA-51): the vault must be a registered supported asset of
     ///      the pool AND actively whitelisted by the protocol owner. See the contract-level
     ///      documentation above for why deposit/mint use the active (not tracked) set.
-    function _requireActiveVault(address poolManagerLogic, address poolLogic, address vault) internal view {
+    function _requireActiveVault(
+        address poolManagerLogic,
+        address poolLogic,
+        address vault
+    ) internal view {
         require(
             IHasSupportedAsset(poolManagerLogic).isSupportedAsset(vault),
             "MorphoVaultV2Guard: vault not enabled"
@@ -226,7 +232,11 @@ contract MorphoVaultV2ContractGuard is TxDataUtils, IGuard, ITransactionTypes {
     ///      of the pool, but only needs to be TRACKED, not actively whitelisted — see the
     ///      contract-level documentation above for why a delisted vault must still be exitable
     ///      through this manual path.
-    function _requireTrackedVault(address poolManagerLogic, address poolLogic, address vault) internal view {
+    function _requireTrackedVault(
+        address poolManagerLogic,
+        address poolLogic,
+        address vault
+    ) internal view {
         require(
             IHasSupportedAsset(poolManagerLogic).isSupportedAsset(vault),
             "MorphoVaultV2Guard: vault not enabled"

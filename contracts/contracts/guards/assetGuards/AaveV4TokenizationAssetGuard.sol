@@ -260,7 +260,6 @@ contract AaveV4TokenizationAssetGuard is
         } catch {
             return (0, false);
         }
-
         return ((underlyingAmount * price) / (10 ** underlyingDecimals), true);
     }
 
@@ -317,7 +316,6 @@ contract AaveV4TokenizationAssetGuard is
         } catch {
             return 0;
         }
-
         uint256 availableLiquidity;
         try IHubBase(hub).getAssetLiquidity(assetId) returns (uint256 l) {
             availableLiquidity = l;
@@ -332,7 +330,6 @@ contract AaveV4TokenizationAssetGuard is
         } catch {
             return 0;
         }
-
         return shares < withdrawableShares ? shares : withdrawableShares;
     }
 
@@ -404,7 +401,10 @@ contract AaveV4TokenizationAssetGuard is
     }
 
     /// @notice See IIncompleteValuationGuard.
-    function isValuationComplete(address pool, address asset) external view override returns (bool complete) {
+    function isValuationComplete(
+        address pool,
+        address asset
+    ) external view override returns (bool complete) {
         (, complete) = _valuePosition(pool, asset);
     }
 

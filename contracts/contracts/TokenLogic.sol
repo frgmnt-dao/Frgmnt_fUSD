@@ -95,9 +95,10 @@ contract TokenLogic is
     mapping(address => uint256) public depositNonces;
 
     // EIP-712 typed data for deposit authorization by the recipient.
-    bytes32 private constant DEPOSIT_AUTH_TYPEHASH = keccak256(
-        "DepositAuth(address depositor,address asset,uint256 amount,address to,uint256 minFusdAmount,uint256 nonce,uint256 deadline)"
-    );
+    bytes32 private constant DEPOSIT_AUTH_TYPEHASH =
+        keccak256(
+            "DepositAuth(address depositor,address asset,uint256 amount,address to,uint256 minFusdAmount,uint256 nonce,uint256 deadline)"
+        );
 
     /// @notice Collateral asset configuration.
     struct AssetConfig {
@@ -633,10 +634,9 @@ contract TokenLogic is
             return (newPrincipal, block.timestamp);
         }
 
-        bool expired =
-            prevTimestamp != 0 &&
-                cooldownPeriod != 0 &&
-                block.timestamp >= prevTimestamp + cooldownPeriod;
+        bool expired = prevTimestamp != 0 &&
+            cooldownPeriod != 0 &&
+            block.timestamp >= prevTimestamp + cooldownPeriod;
 
         if (prevPrincipal == 0 || expired) {
             return (amount, block.timestamp);

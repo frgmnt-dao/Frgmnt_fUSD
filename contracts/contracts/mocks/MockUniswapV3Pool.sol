@@ -70,7 +70,10 @@ contract MockUniswapV3Pool {
         _tick = newTick;
     }
 
-    function setFeeGrowthGlobal(uint256 feeGrowthGlobal0X128_, uint256 feeGrowthGlobal1X128_) external {
+    function setFeeGrowthGlobal(
+        uint256 feeGrowthGlobal0X128_,
+        uint256 feeGrowthGlobal1X128_
+    ) external {
         feeGrowthGlobal0X128 = feeGrowthGlobal0X128_;
         feeGrowthGlobal1X128 = feeGrowthGlobal1X128_;
     }
@@ -103,16 +106,7 @@ contract MockUniswapV3Pool {
         )
     {
         TickData memory data = _ticks[tick];
-        return (
-            0,
-            0,
-            data.feeGrowthOutside0X128,
-            data.feeGrowthOutside1X128,
-            0,
-            0,
-            0,
-            true
-        );
+        return (0, 0, data.feeGrowthOutside0X128, data.feeGrowthOutside1X128, 0, 0, 0, true);
     }
 
     /// @dev FNA-16: exposed so tests can drive OracleLibrary.consult()'s harmonic-mean liquidity
@@ -126,7 +120,10 @@ contract MockUniswapV3Pool {
     )
         external
         view
-        returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s)
+        returns (
+            int56[] memory tickCumulatives,
+            uint160[] memory secondsPerLiquidityCumulativeX128s
+        )
     {
         tickCumulatives = new int56[](secondsAgos.length);
         secondsPerLiquidityCumulativeX128s = new uint160[](secondsAgos.length);

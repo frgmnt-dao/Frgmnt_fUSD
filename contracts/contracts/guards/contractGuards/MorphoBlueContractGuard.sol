@@ -22,7 +22,9 @@ import {
     Position,
     Market
 } from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
-import { MorphoBalancesLib } from "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
+import {
+    MorphoBalancesLib
+} from "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 import { MarketParamsLib } from "@morpho-org/morpho-blue/src/libraries/MarketParamsLib.sol";
 import { SharesMathLib } from "@morpho-org/morpho-blue/src/libraries/SharesMathLib.sol";
 
@@ -60,43 +62,54 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
                                 FUNCTION SELECTORS
     //////////////////////////////////////////////////////////////////////////*/
 
-    bytes4 private constant SEL_SUPPLY = bytes4(
-        keccak256("supply((address,address,address,address,uint256),uint256,uint256,address,bytes)")
-    );
+    bytes4 private constant SEL_SUPPLY =
+        bytes4(
+            keccak256(
+                "supply((address,address,address,address,uint256),uint256,uint256,address,bytes)"
+            )
+        );
 
-    bytes4 private constant SEL_WITHDRAW = bytes4(
-        keccak256(
-            "withdraw((address,address,address,address,uint256),uint256,uint256,address,address)"
-        )
-    );
+    bytes4 private constant SEL_WITHDRAW =
+        bytes4(
+            keccak256(
+                "withdraw((address,address,address,address,uint256),uint256,uint256,address,address)"
+            )
+        );
 
-    bytes4 private constant SEL_BORROW = bytes4(
-        keccak256(
-            "borrow((address,address,address,address,uint256),uint256,uint256,address,address)"
-        )
-    );
+    bytes4 private constant SEL_BORROW =
+        bytes4(
+            keccak256(
+                "borrow((address,address,address,address,uint256),uint256,uint256,address,address)"
+            )
+        );
 
-    bytes4 private constant SEL_REPAY = bytes4(
-        keccak256("repay((address,address,address,address,uint256),uint256,uint256,address,bytes)")
-    );
+    bytes4 private constant SEL_REPAY =
+        bytes4(
+            keccak256(
+                "repay((address,address,address,address,uint256),uint256,uint256,address,bytes)"
+            )
+        );
 
-    bytes4 private constant SEL_SUPPLY_COLL = bytes4(
-        keccak256(
-            "supplyCollateral((address,address,address,address,uint256),uint256,address,bytes)"
-        )
-    );
+    bytes4 private constant SEL_SUPPLY_COLL =
+        bytes4(
+            keccak256(
+                "supplyCollateral((address,address,address,address,uint256),uint256,address,bytes)"
+            )
+        );
 
-    bytes4 private constant SEL_WITHDRAW_COLL = bytes4(
-        keccak256(
-            "withdrawCollateral((address,address,address,address,uint256),uint256,address,address)"
-        )
-    );
+    bytes4 private constant SEL_WITHDRAW_COLL =
+        bytes4(
+            keccak256(
+                "withdrawCollateral((address,address,address,address,uint256),uint256,address,address)"
+            )
+        );
 
-    bytes4 private constant SEL_LIQUIDATE = bytes4(
-        keccak256(
-            "liquidate((address,address,address,address,uint256),address,uint256,uint256,bytes)"
-        )
-    );
+    bytes4 private constant SEL_LIQUIDATE =
+        bytes4(
+            keccak256(
+                "liquidate((address,address,address,address,uint256),address,uint256,uint256,bytes)"
+            )
+        );
 
     /*//////////////////////////////////////////////////////////////////////////
                                     EVENTS
@@ -232,10 +245,9 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
             // Only check if there is outstanding debt
             if (pos.borrowShares > 0) {
                 // Collateral value
-                uint256 collateralValue =
-                    (uint256(pos.collateral) *
-                        IHasAssetInfo(factory).getAssetPrice(mp.collateralToken)) /
-                        (10 ** IERC20Extended(mp.collateralToken).decimals());
+                uint256 collateralValue = (uint256(pos.collateral) *
+                    IHasAssetInfo(factory).getAssetPrice(mp.collateralToken)) /
+                    (10 ** IERC20Extended(mp.collateralToken).decimals());
 
                 (, , uint256 totalBorrowAssets, uint256 totalBorrowShares) = MorphoBalancesLib
                     .expectedMarketBalances(morpho, mp);
@@ -246,9 +258,9 @@ contract MorphoBlueContractGuard is TxDataUtils, IGuard, ITxTrackingGuard, ITran
                 );
 
                 // Borrowed value
-                uint256 borrowedValue =
-                    (borrowAssets * IHasAssetInfo(factory).getAssetPrice(mp.loanToken)) /
-                        (10 ** IERC20Extended(mp.loanToken).decimals());
+                uint256 borrowedValue = (borrowAssets *
+                    IHasAssetInfo(factory).getAssetPrice(mp.loanToken)) /
+                    (10 ** IERC20Extended(mp.loanToken).decimals());
 
                 // Health Factor = (Collateral * LLTV) / Borrowed
                 uint256 hf = (collateralValue * mp.lltv) / borrowedValue;

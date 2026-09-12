@@ -106,7 +106,13 @@ contract ERC20Guard is TxDataUtils, IGuard, IAssetGuard, ITransactionTypes {
                 }
             }
 
-            emit Approve(pool, IManaged(_poolManagerLogic).manager(), spender, amount, block.timestamp);
+            emit Approve(
+                pool,
+                IManaged(_poolManagerLogic).manager(),
+                spender,
+                amount,
+                block.timestamp
+            );
 
             txType = uint16(TransactionType.Approve);
         }

@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import { ERC20Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
-import { OwnableUpgradeable } from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import { ReentrancyGuardUpgradeable } from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+import {
+    ERC20Upgradeable
+} from "@openzeppelin/contracts-upgradeable/token/ERC20/ERC20Upgradeable.sol";
+import {
+    OwnableUpgradeable
+} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {
+    ReentrancyGuardUpgradeable
+} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
@@ -420,7 +426,11 @@ contract PoolLogic is
     ///      deliberately keeps using the gross _totalValueWithCompleteness() above — it is a
     ///      general display figure ("everything the pool currently holds"), not an accrual input.
     function _activeTotalValueWithCompleteness() internal view returns (uint256, bool) {
-        return FundCalculationLibrary.activeTotalValueWithCompleteness(address(this), poolManagerLogic);
+        return
+            FundCalculationLibrary.activeTotalValueWithCompleteness(
+                address(this),
+                poolManagerLogic
+            );
     }
 
     function _unclaimedRewards() internal view returns (uint256) {
@@ -686,10 +696,7 @@ contract PoolLogic is
     }
 
     /// @notice Stake with user-defined minimum shares
-    function stake(
-        uint256 amountFusd,
-        uint256 minShares
-    ) public nonReentrant {
+    function stake(uint256 amountFusd, uint256 minShares) public nonReentrant {
         address user = _actionSender();
         _updateFeesAndRewardsFor(user);
         _stake(user, amountFusd, minShares);
@@ -821,9 +828,7 @@ contract PoolLogic is
      * NOTE: Pro-rata withdrawal is performed across all supported assets (dHedge-style).
      */
 
-    function withdrawCashImmediate(
-        uint256 fusdAmount
-    ) external nonReentrant {
+    function withdrawCashImmediate(uint256 fusdAmount) external nonReentrant {
         address user = _actionSender();
         _updateFeesAndRewardsFor(user);
 
@@ -877,8 +882,7 @@ contract PoolLogic is
             netFusd = amount;
         } else {
             // cooldown enforced only on CASH withdraw (not unstake)
-            if (ITokenLogic(fusd).getExitRemainingCooldown(user) != 0)
-                revert CooldownActive();
+            if (ITokenLogic(fusd).getExitRemainingCooldown(user) != 0) revert CooldownActive();
 
             (netFusd, feeFusd) = _applyWithdrawFeeFusd(amount);
             if (netFusd == 0) revert ZeroAmount();
@@ -920,14 +924,7 @@ contract PoolLogic is
 
         // Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
         emit CashWithdrawImmediate(user, amount, netFusd, feeFusd);
-        emit CashWithdrawImmediateProRata(
-            user,
-            amount,
-            netFusd,
-            feeFusd,
-            outAssets,
-            outAmounts
-        );
+        emit CashWithdrawImmediateProRata(user, amount, netFusd, feeFusd, outAssets, outAmounts);
     }
 
     /// @dev Helper to reduce stack usage in withdrawCashImmediate (compile fix: avoids "stack too deep")
@@ -1106,8 +1103,15 @@ contract PoolLogic is
         // see FundCalculationLibrary.computeFinalizeAssetAmount and FNA-05. FUSD backing this
         // request is transferred-not-burned until claimCashWithdraw, so totalSupply() already
         // reflects outstanding claims as of this finalization.
-        (uint256 assetAmount, uint256 totalClaims, uint256 completeFundValue) = FundCalculationLibrary
-            .computeFinalizeAssetAmount(address(this), asset, fusdNetForAsset);
+        (
+            uint256 assetAmount,
+            uint256 totalClaims,
+            uint256 completeFundValue
+        ) = FundCalculationLibrary.computeFinalizeAssetAmount(
+                address(this),
+                asset,
+                fusdNetForAsset
+            );
         if (assetAmount == 0) revert ZeroAmount();
 
         // Finalization does not transfer assets to the user; assets remain on the contract until claim.
@@ -1162,13 +1166,7 @@ contract PoolLogic is
         // see finalizedUnclaimedFusd's own docs.
         finalizedUnclaimedFusd += fusdNetForAsset;
 
-        emit CashWithdrawFinalized(
-            requestId,
-            totalFusd,
-            fusdNetForAsset,
-            asset,
-            assetAmount
-        );
+        emit CashWithdrawFinalized(requestId, totalFusd, fusdNetForAsset, asset, assetAmount);
     }
 
     function claimCashWithdraw(
