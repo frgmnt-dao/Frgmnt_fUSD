@@ -1,0 +1,46 @@
+name: SECURITY
+
+on:
+    push:
+    pull_request:
+
+permissions:
+    contents: read
+
+jobs:
+    gitleaks:
+        name: Secret scan (gitleaks)
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+            # Report-only for its first run: gitleaks' default ruleset hasn't been
+            # validated yet against this repo's own hex-constant fixtures (Morpho
+            # market IDs, keccak hashes in scripts/setTrading.ts) for false positives.
+            # Drop `continue-on-error` once a clean run confirms there are none.
+            - name: Gitleaks
+              continue-on-error: true
+              run: |
+                  docker run --rm -v "$PWD:/repo" -w /repo \
+                    ghcr.io/gitleaks/gitleaks:v8.30.1 dir -v --redact=100
+
+    slither:
+        name: Static analysis (Slither)
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+            - name: Setup
+              uses: ./.github/actions/setup
+
+            # Report-only for its first run: this repo carries 60+ previously-fixed
+            # CertiK findings and no Slither baseline yet, so an unfiltered blocking
+            # gate today would fail on a backlog nobody has triaged. Once that triage
+            # pass is done, tighten fail-on (e.g. "high") to make this a real gate.
+            - name: Slither
+              uses: crytic/slither-action@b52cc1cbfee9ca3e8722dd5224299d16c9a6b80f # v0.4.2
+              with:
+                  node-version: 22
+                  fail-on: none
