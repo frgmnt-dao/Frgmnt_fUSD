@@ -1,0 +1,22 @@
+version: 2
+updates:
+    # npm dependency updates. Grouped so routine devDependency bumps don't open
+    # a separate PR each; runtime `dependencies` (OpenZeppelin, Chainlink, Morpho,
+    # Uniswap) are left ungrouped since a bump there can change compiled bytecode
+    # and deserves its own review, not a batch.
+    - package-ecosystem: 'npm'
+      directory: '/'
+      schedule:
+          interval: 'weekly'
+      groups:
+          dev-dependencies:
+              dependency-type: 'development'
+      open-pull-requests-limit: 10
+
+    # Keeps the SHA pins on actions/checkout, actions/setup-node, crytic/slither-action
+    # etc. (see .github/workflows/*.yml) current — Dependabot updates the trailing
+    # version comment and the pinned SHA together in the same PR.
+    - package-ecosystem: 'github-actions'
+      directory: '/'
+      schedule:
+          interval: 'weekly'

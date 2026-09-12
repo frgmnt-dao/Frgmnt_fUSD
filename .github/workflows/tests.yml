@@ -8,8 +8,22 @@ permissions:
     contents: read
 
 jobs:
+    build:
+        name: BUILD
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+            - name: Setup
+              uses: ./.github/actions/setup
+
+            - name: Contract size check (EIP-170 / EIP-3860)
+              run: npm run check:contract-size
+
     tests:
         name: TESTS
+        needs: build
         runs-on: ubuntu-latest
 
         steps:
@@ -21,5 +35,5 @@ jobs:
             - name: Branch parity check
               run: bash scripts/check-branch-parity.sh
 
-            - name: Test
-              run: npm run coverage # or npm run test
+            - name: Test with coverage
+              run: npm run coverage
