@@ -256,7 +256,6 @@ contract MorphoVaultV2AssetGuard is
         } catch {
             return (0, false);
         }
-
         return ((underlyingAmount * price) / (10 ** underlyingDecimals), true);
     }
 
@@ -347,7 +346,6 @@ contract MorphoVaultV2AssetGuard is
         } catch {
             return 0;
         }
-
         return shares < withdrawableShares ? shares : withdrawableShares;
     }
 
@@ -419,7 +417,10 @@ contract MorphoVaultV2AssetGuard is
     }
 
     /// @notice See IIncompleteValuationGuard.
-    function isValuationComplete(address pool, address asset) external view override returns (bool complete) {
+    function isValuationComplete(
+        address pool,
+        address asset
+    ) external view override returns (bool complete) {
         (, complete) = _valuePosition(pool, asset);
     }
 

@@ -277,10 +277,7 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
         UniswapV3NonfungiblePositionGuard guard = UniswapV3NonfungiblePositionGuard(
             IHasGuardInfo(factory).getContractGuard(asset)
         );
-        require(
-            guard.getOwnedTokenIds(pool).length == 0,
-            "UniswapV3AssetGuard: positions tracked"
-        );
+        require(guard.getOwnedTokenIds(pool).length == 0, "UniswapV3AssetGuard: positions tracked");
     }
 
     function removeTokenCheck(

@@ -259,7 +259,11 @@ contract AaveV4SpokeContractGuard is TxDataUtils, IGuard, ITransactionTypes {
             "AaveV4SpokeGuard: spoke not enabled"
         );
         require(
-            IAaveV4SpokeManager(aaveV4SpokeManager).isTrackedPoolReserve(poolLogic, spoke, reserveId),
+            IAaveV4SpokeManager(aaveV4SpokeManager).isTrackedPoolReserve(
+                poolLogic,
+                spoke,
+                reserveId
+            ),
             "AaveV4SpokeGuard: reserve not tracked"
         );
         _requireSupportedUnderlying(poolManagerLogic, spoke, reserveId);

@@ -95,7 +95,9 @@ contract MockMorphoBlueManager is IMorphoBlueManager {
         return _poolMarkets[pool].length;
     }
 
-    function getTrackedPoolMarkets(address pool) external view override returns (Id[] memory markets) {
+    function getTrackedPoolMarkets(
+        address pool
+    ) external view override returns (Id[] memory markets) {
         bytes32[] memory keys = _trackedPoolMarkets[pool];
         markets = new Id[](keys.length);
         for (uint256 i = 0; i < keys.length; i++) {

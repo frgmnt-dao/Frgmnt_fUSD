@@ -21,11 +21,7 @@ contract MockAaveV3Pool {
         return _flashloanPremiumTotal;
     }
 
-    function setReserveTokens(
-        address asset,
-        address aToken,
-        address variableDebtToken
-    ) external {
+    function setReserveTokens(address asset, address aToken, address variableDebtToken) external {
         _aTokens[asset] = aToken;
         _variableDebtTokens[asset] = variableDebtToken;
     }
@@ -61,29 +57,65 @@ contract MockAaveV3Pool {
 
     // Required by IAaveV3Pool but not used in asset guard tests
     function getReserveData(address) external pure returns (DataTypes.ReserveDataLegacy memory) {
-        return DataTypes.ReserveDataLegacy(
-            DataTypes.ReserveConfigurationMap(0),
-            0, 0, 0, 0, 0, 0, 0, address(0), address(0), address(0), address(0), 0, 0, 0
-        );
+        return
+            DataTypes.ReserveDataLegacy(
+                DataTypes.ReserveConfigurationMap(0),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                address(0),
+                address(0),
+                address(0),
+                address(0),
+                0,
+                0,
+                0
+            );
     }
 
     function supply(address, uint256, address, uint16) external {}
-    function withdraw(address, uint256, address) external returns (uint256) { return 0; }
+    function withdraw(address, uint256, address) external returns (uint256) {
+        return 0;
+    }
     function borrow(address, uint256, uint256, uint16, address) external {}
-    function repay(address, uint256, uint256, address) external returns (uint256) { return 0; }
+    function repay(address, uint256, uint256, address) external returns (uint256) {
+        return 0;
+    }
     function setUserUseReserveAsCollateral(address, bool) external {}
-    function flashLoan(address, address[] calldata, uint256[] calldata, uint256[] calldata, address, bytes calldata, uint16) external {}
-    function getConfiguration(address) external pure returns (DataTypes.ReserveConfigurationMap memory) {
+    function flashLoan(
+        address,
+        address[] calldata,
+        uint256[] calldata,
+        uint256[] calldata,
+        address,
+        bytes calldata,
+        uint16
+    ) external {}
+    function getConfiguration(
+        address
+    ) external pure returns (DataTypes.ReserveConfigurationMap memory) {
         return DataTypes.ReserveConfigurationMap(0);
     }
-    function getUserConfiguration(address) external pure returns (DataTypes.UserConfigurationMap memory) {
+    function getUserConfiguration(
+        address
+    ) external pure returns (DataTypes.UserConfigurationMap memory) {
         return DataTypes.UserConfigurationMap(0);
     }
-    function getReserveAddressById(uint16) external pure returns (address) { return address(0); }
+    function getReserveAddressById(uint16) external pure returns (address) {
+        return address(0);
+    }
     function deposit(address, uint256, address, uint16) external {}
     function setUserEMode(uint8) external {}
-    function getUserEMode(address) external pure returns (uint256) { return 0; }
-    function repayWithATokens(address, uint256, uint256) external returns (uint256) { return 0; }
+    function getUserEMode(address) external pure returns (uint256) {
+        return 0;
+    }
+    function repayWithATokens(address, uint256, uint256) external returns (uint256) {
+        return 0;
+    }
     function swapBorrowRateMode(address, uint256) external {}
     function rebalanceStableBorrowRate(address, address) external {}
 }

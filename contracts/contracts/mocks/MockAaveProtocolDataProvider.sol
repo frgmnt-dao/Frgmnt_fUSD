@@ -72,7 +72,11 @@ contract MockAaveProtocolDataProvider is IAaveProtocolDataProvider {
         external
         view
         override
-        returns (address aTokenAddress, address stableDebtTokenAddress, address variableDebtTokenAddress)
+        returns (
+            address aTokenAddress,
+            address stableDebtTokenAddress,
+            address variableDebtTokenAddress
+        )
     {
         ReserveTokens memory rt = _reserveTokens[asset];
         return (rt.aToken, rt.stableDebtToken, rt.variableDebtToken);

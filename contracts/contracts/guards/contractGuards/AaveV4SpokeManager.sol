@@ -66,7 +66,11 @@ contract AaveV4SpokeManager is IAaveV4SpokeManager, Ownable {
 
     event PoolReservesUpdated(address indexed pool, address indexed spoke, uint256[] reserveIds);
 
-    event TrackedReservePruned(address indexed pool, address indexed spoke, uint256 indexed reserveId);
+    event TrackedReservePruned(
+        address indexed pool,
+        address indexed spoke,
+        uint256 indexed reserveId
+    );
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -183,7 +187,10 @@ contract AaveV4SpokeManager is IAaveV4SpokeManager, Ownable {
     }
 
     /// @notice Returns the number of reserveIds in getTrackedPoolReserves().
-    function getTrackedPoolReservesLength(address pool, address spoke) external view returns (uint256) {
+    function getTrackedPoolReservesLength(
+        address pool,
+        address spoke
+    ) external view returns (uint256) {
         return trackedPoolReserves[pool][spoke].length;
     }
 }

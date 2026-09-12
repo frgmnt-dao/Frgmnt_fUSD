@@ -3,7 +3,9 @@ pragma solidity ^0.8.24;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
-import { IMorphoBlueLendingPoolAssetGuard } from "../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
+import {
+    IMorphoBlueLendingPoolAssetGuard
+} from "../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
 import { CallResultChecker } from "./CallResultChecker.sol";
 

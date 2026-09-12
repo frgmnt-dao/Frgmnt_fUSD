@@ -12,12 +12,7 @@ contract MockPoolLogicCaller {
         bytes calldata data
     ) external returns (uint16 txType, bool isPublic) {
         (bool ok, bytes memory result) = guard.call(
-            abi.encodeWithSignature(
-                "txGuard(address,address,bytes)",
-                poolManagerLogic,
-                to,
-                data
-            )
+            abi.encodeWithSignature("txGuard(address,address,bytes)", poolManagerLogic, to, data)
         );
         if (!ok) {
             assembly {

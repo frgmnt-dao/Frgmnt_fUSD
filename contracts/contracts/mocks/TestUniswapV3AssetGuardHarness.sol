@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import { INonfungiblePositionManager } from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
+import {
+    INonfungiblePositionManager
+} from "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import { UniswapV3AssetGuard } from "../guards/assetGuards/UniswapV3AssetGuard.sol";
 
 contract TestUniswapV3AssetGuardHarness is UniswapV3AssetGuard {

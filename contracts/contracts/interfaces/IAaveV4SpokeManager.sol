@@ -62,5 +62,8 @@ interface IAaveV4SpokeManager {
     ) external view returns (uint256[] memory);
 
     /// @notice Returns the number of reserveIds in getTrackedPoolReserves().
-    function getTrackedPoolReservesLength(address pool, address spoke) external view returns (uint256);
+    function getTrackedPoolReservesLength(
+        address pool,
+        address spoke
+    ) external view returns (uint256);
 }

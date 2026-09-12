@@ -131,11 +131,13 @@ contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTyp
         bytes4 method = getMethod(data);
         bytes memory params = getParams(data);
 
-        if (method == SEL_DEPOSIT) txType = _handleDeposit(poolLogic, to, _poolManagerLogic, params);
+        if (method == SEL_DEPOSIT)
+            txType = _handleDeposit(poolLogic, to, _poolManagerLogic, params);
         else if (method == SEL_MINT) txType = _handleMint(poolLogic, to, _poolManagerLogic, params);
         else if (method == SEL_WITHDRAW)
             txType = _handleWithdraw(poolLogic, to, _poolManagerLogic, params);
-        else if (method == SEL_REDEEM) txType = _handleRedeem(poolLogic, to, _poolManagerLogic, params);
+        else if (method == SEL_REDEEM)
+            txType = _handleRedeem(poolLogic, to, _poolManagerLogic, params);
         else txType = uint16(TransactionType.NotUsed);
 
         return (txType, false);
@@ -144,13 +146,20 @@ contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTyp
     /// @dev Entry-side validation (FNA-51): the vault must be a registered supported asset of
     ///      the pool AND actively whitelisted by the protocol owner. See the contract-level
     ///      documentation above for why deposit/mint use the active (not tracked) set.
-    function _requireActiveVault(address poolManagerLogic, address poolLogic, address vault) internal view {
+    function _requireActiveVault(
+        address poolManagerLogic,
+        address poolLogic,
+        address vault
+    ) internal view {
         require(
             IHasSupportedAsset(poolManagerLogic).isSupportedAsset(vault),
             "AaveV4TokenizationGuard: vault not enabled"
         );
         require(
-            IAaveV4TokenizationManager(aaveV4TokenizationManager).isValidPoolVault(poolLogic, vault),
+            IAaveV4TokenizationManager(aaveV4TokenizationManager).isValidPoolVault(
+                poolLogic,
+                vault
+            ),
             "AaveV4TokenizationGuard: vault not whitelisted"
         );
     }
@@ -159,13 +168,20 @@ contract AaveV4TokenizationContractGuard is TxDataUtils, IGuard, ITransactionTyp
     ///      of the pool, but only needs to be TRACKED, not actively whitelisted — see the
     ///      contract-level documentation above for why a delisted vault must still be exitable
     ///      through this manual path.
-    function _requireTrackedVault(address poolManagerLogic, address poolLogic, address vault) internal view {
+    function _requireTrackedVault(
+        address poolManagerLogic,
+        address poolLogic,
+        address vault
+    ) internal view {
         require(
             IHasSupportedAsset(poolManagerLogic).isSupportedAsset(vault),
             "AaveV4TokenizationGuard: vault not enabled"
         );
         require(
-            IAaveV4TokenizationManager(aaveV4TokenizationManager).isTrackedPoolVault(poolLogic, vault),
+            IAaveV4TokenizationManager(aaveV4TokenizationManager).isTrackedPoolVault(
+                poolLogic,
+                vault
+            ),
             "AaveV4TokenizationGuard: vault not tracked"
         );
     }

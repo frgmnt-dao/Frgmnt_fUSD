@@ -170,8 +170,8 @@ contract SlippageAccumulator is Ownable {
         }
 
         // Time passed since the last trade.
-        uint256 timeSinceLastTrade =
-            block.timestamp - uint256(managerSlippageData.lastTradeTimestamp);
+        uint256 timeSinceLastTrade = block.timestamp -
+            uint256(managerSlippageData.lastTradeTimestamp);
 
         // Clamp the elapsed time to [0, decayTime].
         uint256 elapsed = Math.min(uint256(decayTime), timeSinceLastTrade);
@@ -180,8 +180,8 @@ contract SlippageAccumulator is Ownable {
         uint256 effectiveTime = uint256(decayTime) - elapsed;
 
         // cumulative = accumulatedSlippage * effectiveTime / decayTime
-        uint256 adjusted =
-            (uint256(managerSlippageData.accumulatedSlippage) * effectiveTime) / uint256(decayTime);
+        uint256 adjusted = (uint256(managerSlippageData.accumulatedSlippage) * effectiveTime) /
+            uint256(decayTime);
 
         return adjusted.toUint128();
     }

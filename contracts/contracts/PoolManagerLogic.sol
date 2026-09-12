@@ -2,7 +2,9 @@
 pragma solidity ^0.8.24;
 
 import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import { ERC721Upgradeable } from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
+import {
+    ERC721Upgradeable
+} from "@openzeppelin/contracts-upgradeable/token/ERC721/ERC721Upgradeable.sol";
 
 import { IPoolLogic } from "./interfaces/IPoolLogic.sol";
 import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
@@ -11,7 +13,9 @@ import { IHasSupportedAsset } from "./interfaces/IHasSupportedAsset.sol";
 import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
 import { IAddAssetCheckGuard } from "./interfaces/guards/IAddAssetCheckGuard.sol";
 import { IAssetHandler } from "./interfaces/IAssetHandler.sol";
-import { IMorphoBlueLendingPoolAssetGuard } from "./interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
+import {
+    IMorphoBlueLendingPoolAssetGuard
+} from "./interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 import { IPreValuedAssetGuard } from "./interfaces/guards/IPreValuedAssetGuard.sol";
 import { Managed } from "./Managed.sol";
 

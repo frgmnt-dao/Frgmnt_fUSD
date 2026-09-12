@@ -6,12 +6,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface ITokenLogicUserActions {
-    function deposit(
-        address asset,
-        uint256 amount,
-        address to,
-        uint256 minFusdAmount
-    ) external;
+    function deposit(address asset, uint256 amount, address to, uint256 minFusdAmount) external;
 }
 
 interface IPoolLogicUserActions {

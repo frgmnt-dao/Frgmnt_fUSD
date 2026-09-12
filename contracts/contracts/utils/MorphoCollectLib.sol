@@ -14,7 +14,9 @@ import {
 
 import { SharesMathLib } from "@morpho-org/morpho-blue/src/libraries/SharesMathLib.sol";
 
-import { MorphoBalancesLib } from "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
+import {
+    MorphoBalancesLib
+} from "@morpho-org/morpho-blue/src/libraries/periphery/MorphoBalancesLib.sol";
 
 import { IMorphoBlueManager } from "../interfaces/IMorphoBlueManager.sol";
 
