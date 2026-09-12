@@ -47,22 +47,7 @@ contract TestUniswapV3AssetGuardHarness is UniswapV3AssetGuard {
         INonfungiblePositionManager nonfungiblePositionManager,
         uint256 tokenId,
         uint256 portion
-    )
-        external
-        view
-        returns (
-            uint128 lpAmount,
-            uint256 amount0,
-            uint256 amount1,
-            uint256 principal0,
-            uint256 principal1
-        )
-    {
-        DecreaseLiquidity memory dec = _calcDecreaseLiquidity(
-            nonfungiblePositionManager,
-            tokenId,
-            portion
-        );
-        return (dec.lpAmount, dec.amount0, dec.amount1, dec.principal0, dec.principal1);
+    ) external view returns (DecreaseLiquidity memory) {
+        return _calcDecreaseLiquidity(nonfungiblePositionManager, tokenId, portion);
     }
 }

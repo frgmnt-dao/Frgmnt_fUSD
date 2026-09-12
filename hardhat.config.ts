@@ -43,6 +43,60 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY;
 // Hardhat config
 // ============================================================
 
+// ============================================================
+// Coverage-only compiler overrides
+// ============================================================
+// solidity-coverage instruments every contract with extra bytecode, which
+// increases stack pressure well beyond normal compilation. A handful of
+// complex guard contracts (and the two UniswapV3AssetGuard test harnesses
+// that inherit/wrap one of them) need viaIR + a low `runs` value to compile
+// under instrumentation, but forcing that globally would slow down (and
+// risk changing bytecode for) the normal `hardhat compile` / `hardhat test`
+// path. These overrides only apply when COVERAGE_BUILD=true (set by the
+// `coverage` npm script), i.e. only for `npm run coverage`.
+const COVERAGE_BUILD = process.env.COVERAGE_BUILD === 'true';
+
+const coverageOnlyOverrides = COVERAGE_BUILD
+  ? {
+      'contracts/contracts/guards/contractGuards/MorphoBlueContractGuard.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/guards/contractGuards/AaveLendingPoolGuardV3.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/guards/contractGuards/uniswapV3/UniswapV3NonfungiblePositionGuard.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/guards/contractGuards/uniswapV3/UniswapV3RouterGuard.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/guards/assetGuards/AaveLendingPoolAssetGuard.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/guards/assetGuards/MorphoBlueLendingPoolAssetGuard.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/guards/assetGuards/UniswapV3AssetGuard.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/mocks/TestUniswapV3AssetGuardHarness.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/mocks/TestUniswapV3AssetGuardStubbed.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+    }
+  : {};
+
 const config: HardhatUserConfig = {
   defaultNetwork: 'hardhat',
 
@@ -146,6 +200,8 @@ const config: HardhatUserConfig = {
           viaIR: true,
         },
       },
+
+      ...coverageOnlyOverrides,
     },
   },
 };
