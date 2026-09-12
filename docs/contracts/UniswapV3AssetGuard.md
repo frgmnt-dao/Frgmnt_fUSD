@@ -13,10 +13,10 @@ UniswapV3AssetGuard manages the valuation and withdrawal of Uniswap V3 LP NFT po
 
 ## Guard Markers Implemented
 
-| Interface | Meaning |
-|-----------|---------|
-| `IPreValuedAssetGuard` | `getBalance()` returns a fully priced USD-18 figure; `getUnitPrice()` reverts unconditionally (CertiK FNA-45 follow-up) — the registered "asset" has no meaningful per-unit price |
-| `IIncompleteValuationGuard` | `isValuationComplete()` reports whether every owned NFT's pool spot price was inside the fair-price band as of `getBalance()`'s own last read (CertiK FNA-37) |
+| Interface                   | Meaning                                                                                                                                                                           |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IPreValuedAssetGuard`      | `getBalance()` returns a fully priced USD-18 figure; `getUnitPrice()` reverts unconditionally (CertiK FNA-45 follow-up) — the registered "asset" has no meaningful per-unit price |
+| `IIncompleteValuationGuard` | `isValuationComplete()` reports whether every owned NFT's pool spot price was inside the fair-price band as of `getBalance()`'s own last read (CertiK FNA-37)                     |
 
 ---
 
@@ -67,11 +67,11 @@ Sets the minimum harmonic-mean liquidity a given Uniswap V3 pool must have (over
 
 ### Administrative Functions (Owner Only)
 
-| Function | Description |
-|----------|-------------|
-| `setAdmin(address)` | Transfers guard admin |
-| `setWithdrawalSlippageBps(uint256)` | Slippage tolerance for liquidity removal (default: 100 bps = 1%) |
-| `setWithdrawalTwapWindow(uint32)` | TWAP observation window in seconds |
+| Function                                    | Description                                                                      |
+| ------------------------------------------- | -------------------------------------------------------------------------------- |
+| `setAdmin(address)`                         | Transfers guard admin                                                            |
+| `setWithdrawalSlippageBps(uint256)`         | Slippage tolerance for liquidity removal (default: 100 bps = 1%)                 |
+| `setWithdrawalTwapWindow(uint32)`           | TWAP observation window in seconds                                               |
 | `setMinimumPoolLiquidity(address, uint128)` | Per-pool harmonic-mean liquidity floor for the TWAP sanity check (CertiK FNA-16) |
 
 ---
@@ -89,10 +89,10 @@ minAmount1 = twapAmount1 × (10000 - slippageBps) / 10000
 
 ## Access Control
 
-| Role | Permissions |
-|------|------------|
-| Admin | Configure slippage tolerance, TWAP window, per-pool liquidity floors |
-| PoolLogic | Calls `withdrawProcessing()` during pro-rata withdrawals |
+| Role      | Permissions                                                          |
+| --------- | -------------------------------------------------------------------- |
+| Admin     | Configure slippage tolerance, TWAP window, per-pool liquidity floors |
+| PoolLogic | Calls `withdrawProcessing()` during pro-rata withdrawals             |
 
 ---
 

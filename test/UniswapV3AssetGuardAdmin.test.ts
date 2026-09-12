@@ -84,7 +84,17 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
     const guard = await Guard.deploy();
     await guard.waitForDeployment();
 
-    return { guard, token0, token1, invalidToken, poolAndFactory, uniFactory, uniPool, nfpm, posGuard };
+    return {
+      guard,
+      token0,
+      token1,
+      invalidToken,
+      poolAndFactory,
+      uniFactory,
+      uniPool,
+      nfpm,
+      posGuard,
+    };
   }
 
   it('admin is set to deployer', async () => {
@@ -179,7 +189,7 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
     expect(await guard.getDecimals(ethers.ZeroAddress)).to.equal(18n);
   });
 
-  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+  it("isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard's balance)", async () => {
     const { guard } = await deployReal();
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
@@ -229,7 +239,10 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
   it('getBalance values supported NFTs and skips unsupported underlying tokens', async () => {
     const { guard, poolAndFactory, nfpm } = await deployPositionFixture();
 
-    const balance = await guard.getBalance(await poolAndFactory.getAddress(), await nfpm.getAddress());
+    const balance = await guard.getBalance(
+      await poolAndFactory.getAddress(),
+      await nfpm.getAddress(),
+    );
 
     expect(balance).to.be.gt(0n);
   });
@@ -356,9 +369,8 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
       const pool = await MockPool.deploy(ethers.ZeroAddress, await factory.getAddress());
       await pool.waitForDeployment();
 
-      await expect(
-        guard.removeAssetCheck(await pool.getAddress(), await nfpm.getAddress()),
-      ).to.not.be.reverted;
+      await expect(guard.removeAssetCheck(await pool.getAddress(), await nfpm.getAddress())).to.not
+        .be.reverted;
     });
 
     it('reverts when any NFT position is still tracked, even one worth zero (fully decreased and collected but not burned)', async () => {
@@ -494,8 +506,9 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
         500,
       ),
     ).to.equal(ethers.ZeroAddress);
-    expect(await guard.exposedCalcLiquidityPortion(1000n, ethers.parseUnits('0.25', 18))).to
-      .equal(250n);
+    expect(await guard.exposedCalcLiquidityPortion(1000n, ethers.parseUnits('0.25', 18))).to.equal(
+      250n,
+    );
     await expect(
       guard.exposedCalcLiquidityPortion((1n << 128n) - 1n, ethers.parseUnits('2', 18)),
     ).to.be.revertedWith('UniswapV3AssetGuard: lpAmount overflow');

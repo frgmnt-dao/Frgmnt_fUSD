@@ -48,10 +48,10 @@ async function main() {
 
   //const tx2 = await tokenLogic.setMinDepositUSD(MIN_DEPOSIT_USD, {
   //  ...overrides,
- //   nonce: nonceStart,
- // });
+  //   nonce: nonceStart,
+  // });
   //await tx2.wait();
- // console.log(' Min deposit set to 5 USD');
+  // console.log(' Min deposit set to 5 USD');
 
   // --------------------------------------------------
   // 3️ configureAsset → USDC / allowed / cap = 100 USDC

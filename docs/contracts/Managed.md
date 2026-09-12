@@ -21,13 +21,13 @@ Managed is the role management base contract inherited by PoolManagerLogic. It d
 
 ## State Variables
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `manager` | `address` | Current manager address |
-| `managerName` | `string` | Human-readable manager identifier |
-| `_memberList` | `address[]` | Dynamic array of registered member addresses |
+| Variable          | Type                         | Description                                                         |
+| ----------------- | ---------------------------- | ------------------------------------------------------------------- |
+| `manager`         | `address`                    | Current manager address                                             |
+| `managerName`     | `string`                     | Human-readable manager identifier                                   |
+| `_memberList`     | `address[]`                  | Dynamic array of registered member addresses                        |
 | `_memberPosition` | `mapping(address → uint256)` | 1-based position of each member in `_memberList` (0 = not a member) |
-| `trader` | `address` | Optional trader role address |
+| `trader`          | `address`                    | Optional trader role address                                        |
 
 ---
 
@@ -119,21 +119,21 @@ Returns current member count.
 
 ## Events
 
-| Event | Parameters | Emitted When |
-|-------|-----------|-------------|
+| Event            | Parameters                | Emitted When    |
+| ---------------- | ------------------------- | --------------- |
 | `ManagerUpdated` | `manager (indexed), name` | Manager changed |
-| `MemberAdded` | `member (indexed)` | Member added |
-| `MemberRemoved` | `member (indexed)` | Member removed |
-| `TraderUpdated` | `trader (indexed)` | Trader assigned |
-| `TraderRemoved` | `trader (indexed)` | Trader removed |
+| `MemberAdded`    | `member (indexed)`        | Member added    |
+| `MemberRemoved`  | `member (indexed)`        | Member removed  |
+| `TraderUpdated`  | `trader (indexed)`        | Trader assigned |
+| `TraderRemoved`  | `trader (indexed)`        | Trader removed  |
 
 ---
 
 ## Access Control
 
-| Modifier | Allows |
-|---------|--------|
-| `onlyManager` | Manager address only |
+| Modifier              | Allows                    |
+| --------------------- | ------------------------- |
+| `onlyManager`         | Manager address only      |
 | `onlyManagerOrTrader` | Manager or Trader address |
 
 ---

@@ -72,9 +72,7 @@ export async function validateEurUsdFeed(
   const minPrice = scaleEightDecimalPrice(MIN_EUR_USD_PRICE_8_DECIMALS, decimals);
   const maxPrice = scaleEightDecimalPrice(MAX_EUR_USD_PRICE_8_DECIMALS, decimals);
   if (answer < minPrice || answer > maxPrice) {
-    throw new Error(
-      `EUR/USD feed price out of range: ${formatUnits(answer, Number(decimals))}`,
-    );
+    throw new Error(`EUR/USD feed price out of range: ${formatUnits(answer, Number(decimals))}`);
   }
 
   return {

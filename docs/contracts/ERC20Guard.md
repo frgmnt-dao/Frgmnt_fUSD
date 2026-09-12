@@ -22,6 +22,7 @@ function txGuard(address poolManagerLogic, address to, bytes calldata data) exte
 Only handles `approve(address spender, uint256 amount)` on `to` (the ERC20 asset). Any other selector returns `(0, false)` — a no-op, not a revert.
 
 **Validation:**
+
 - `spender` must have a registered contract guard in `Governance`, and that guard must not be this generic `ERC20Guard` itself (`UnsupportedApproval()`) — approvals may only target whitelisted protocol contracts, never an arbitrary address.
 - **CertiK FNA-03 follow-up**: if the asset has a nonzero `reservedAssetBalance` (liquidity earmarked for a finalized-but-unclaimed queued withdrawal), the approval is capped: it reverts (`ApprovalExceedsUnreservedBalance()`) unless `amount <= unreservedBalance` **or** `amount <= the spender's existing allowance already` (a reduction, or no change, is never a new risk). `approve()` does not move `balanceOf`, so `PoolTxExecutor`'s post-call reserved-balance check can never catch an over-large approval here — once granted, the spender can call `transferFrom()` directly at any later time of their choosing, entirely outside this pool's own guarded transaction flow, draining liquidity reserved for a withdrawal claim long after this `approve()` call itself passed every check. Blocking it at the source is the only place this can actually be caught.
 
@@ -43,18 +44,18 @@ Plain passthroughs to `IERC20(asset).balanceOf(pool)` / `IERC20Extended(asset).d
 function removeAssetCheck(address pool, address asset) public view virtual override
 ```
 
-Reverts (`NonZeroAssetBalance()`) only if the pool holds a nonzero balance of `asset`. The cross-asset dependency check that used to live here too (asking every *other* supported asset's guard whether it still depends on `asset`, via `removeTokenCheck()`) moved to `PoolManagerLogic._removeAsset()` itself — it now runs for every removal regardless of the candidate's own guard type, not only when the candidate happens to be ERC20Guard-typed. See [PoolManagerLogic](PoolManagerLogic.md)'s own documentation.
+Reverts (`NonZeroAssetBalance()`) only if the pool holds a nonzero balance of `asset`. The cross-asset dependency check that used to live here too (asking every _other_ supported asset's guard whether it still depends on `asset`, via `removeTokenCheck()`) moved to `PoolManagerLogic._removeAsset()` itself — it now runs for every removal regardless of the candidate's own guard type, not only when the candidate happens to be ERC20Guard-typed. See [PoolManagerLogic](PoolManagerLogic.md)'s own documentation.
 
 ### `removeTokenCheck`
 
-Always returns `true` (permissive) — a plain ERC-20 balance is never itself the *underlying* token of some other position, so there is nothing for it to block.
+Always returns `true` (permissive) — a plain ERC-20 balance is never itself the _underlying_ token of some other position, so there is nothing for it to block.
 
 ---
 
 ## Events
 
-| Event | Emitted When |
-|-------|-------------|
+| Event     | Emitted When                                |
+| --------- | ------------------------------------------- |
 | `Approve` | A valid `approve()` call passes every check |
 
 ---

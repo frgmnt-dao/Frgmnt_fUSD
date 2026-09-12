@@ -7,7 +7,7 @@
 
 ## Overview
 
-Base class for asset guards covering positions that should not be freely transferable or callable through the manager/trader's own `execTransaction()` router. Nearly every position-style asset guard in this codebase inherits from it — [AaveV4SpokeAssetGuard](AaveV4SpokeAssetGuard.md), [AaveV4TokenizationAssetGuard](AaveV4TokenizationAssetGuard.md), [MorphoVaultV2AssetGuard](MorphoVaultV2AssetGuard.md), [MorphoBlueLendingPoolAssetGuard](MorphoBlueLendingPoolAssetGuard.md), [AaveLendingPoolAssetGuard](AaveLendingPoolAssetGuard.md), [UniswapV3AssetGuard](UniswapV3AssetGuard.md) — the common shape being: no arbitrary calls, but a paired *contract guard* separately authorizes a specific, narrow set of protocol calls (supply, withdraw, deposit, etc.).
+Base class for asset guards covering positions that should not be freely transferable or callable through the manager/trader's own `execTransaction()` router. Nearly every position-style asset guard in this codebase inherits from it — [AaveV4SpokeAssetGuard](AaveV4SpokeAssetGuard.md), [AaveV4TokenizationAssetGuard](AaveV4TokenizationAssetGuard.md), [MorphoVaultV2AssetGuard](MorphoVaultV2AssetGuard.md), [MorphoBlueLendingPoolAssetGuard](MorphoBlueLendingPoolAssetGuard.md), [AaveLendingPoolAssetGuard](AaveLendingPoolAssetGuard.md), [UniswapV3AssetGuard](UniswapV3AssetGuard.md) — the common shape being: no arbitrary calls, but a paired _contract guard_ separately authorizes a specific, narrow set of protocol calls (supply, withdraw, deposit, etc.).
 
 ---
 
@@ -43,7 +43,7 @@ Default implementation: requires `getBalance(pool, asset) == 0`. A guard with re
 function removeTokenCheck(address, address, address) public view virtual returns (bool)
 ```
 
-Default implementation: always returns `true` (permissive) — a child guard whose asset can hold a *different* ERC-20 as part of its position (e.g. a Uniswap V3 NFT's two underlying tokens) overrides this to block removal of a token still referenced by a live position. See CertiK FNA-53 (centralized cross-asset removal check in `PoolManagerLogic._removeAsset()`) for how this hook composes with the rest of the removal-safety system, and [MorphoVaultV2AssetGuard](MorphoVaultV2AssetGuard.md)'s own documentation for a guard that deliberately does **not** override this default — noted there as a factual scope statement (its position never holds a separate ERC-20 token beyond the vault share itself), not a flagged gap.
+Default implementation: always returns `true` (permissive) — a child guard whose asset can hold a _different_ ERC-20 as part of its position (e.g. a Uniswap V3 NFT's two underlying tokens) overrides this to block removal of a token still referenced by a live position. See CertiK FNA-53 (centralized cross-asset removal check in `PoolManagerLogic._removeAsset()`) for how this hook composes with the rest of the removal-safety system, and [MorphoVaultV2AssetGuard](MorphoVaultV2AssetGuard.md)'s own documentation for a guard that deliberately does **not** override this default — noted there as a factual scope statement (its position never holds a separate ERC-20 token beyond the vault share itself), not a flagged gap.
 
 ---
 

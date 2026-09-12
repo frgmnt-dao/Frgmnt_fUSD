@@ -26,11 +26,11 @@ All privileged admin operations — including contract upgrades, configuration c
 
 All state is inherited from `TimelockController`:
 
-| Variable | Description |
-|----------|-------------|
-| `_minDelay` | Minimum delay in seconds before an operation can be executed |
-| Scheduled operations | Mapping of operation IDs to timestamps and status |
-| Role assignments | `PROPOSER_ROLE`, `EXECUTOR_ROLE`, `TIMELOCK_ADMIN_ROLE` |
+| Variable             | Description                                                  |
+| -------------------- | ------------------------------------------------------------ |
+| `_minDelay`          | Minimum delay in seconds before an operation can be executed |
+| Scheduled operations | Mapping of operation IDs to timestamps and status            |
+| Role assignments     | `PROPOSER_ROLE`, `EXECUTOR_ROLE`, `TIMELOCK_ADMIN_ROLE`      |
 
 ---
 
@@ -47,12 +47,12 @@ constructor(
 
 **Parameters:**
 
-| Name | Type | Description |
-|------|------|-------------|
-| `minDelay` | `uint256` | Minimum execution delay in seconds (recommended: 172800 = 48 hours) |
-| `proposers` | `address[]` | Addresses authorized to schedule operations (recommended: DAO multisig) |
-| `executors` | `address[]` | Addresses authorized to execute operations (can be empty array for open execution) |
-| `admin` | `address` | Address that can grant/revoke roles (recommended: DAO multisig or zero address after setup) |
+| Name        | Type        | Description                                                                                 |
+| ----------- | ----------- | ------------------------------------------------------------------------------------------- |
+| `minDelay`  | `uint256`   | Minimum execution delay in seconds (recommended: 172800 = 48 hours)                         |
+| `proposers` | `address[]` | Addresses authorized to schedule operations (recommended: DAO multisig)                     |
+| `executors` | `address[]` | Addresses authorized to execute operations (can be empty array for open execution)          |
+| `admin`     | `address`   | Address that can grant/revoke roles (recommended: DAO multisig or zero address after setup) |
 
 ---
 
@@ -124,23 +124,23 @@ Cancels a pending operation before it executes.
 
 Inherited from `TimelockController`:
 
-| Event | Description |
-|-------|-------------|
-| `CallScheduled` | Operation scheduled |
-| `CallExecuted` | Operation executed |
-| `Cancelled` | Operation cancelled |
+| Event            | Description           |
+| ---------------- | --------------------- |
+| `CallScheduled`  | Operation scheduled   |
+| `CallExecuted`   | Operation executed    |
+| `Cancelled`      | Operation cancelled   |
 | `MinDelayChange` | Minimum delay updated |
 
 ---
 
 ## Access Control
 
-| Role | Description | Recommended Holder |
-|------|-------------|-------------------|
-| `PROPOSER_ROLE` | Can schedule operations | DAO multisig |
-| `CANCELLER_ROLE` | Can cancel scheduled operations | DAO multisig |
-| `EXECUTOR_ROLE` | Can execute operations after delay | Open (any address) or DAO multisig |
-| `TIMELOCK_ADMIN_ROLE` | Can grant/revoke roles | Zero address (after renouncing) or DAO multisig |
+| Role                  | Description                        | Recommended Holder                              |
+| --------------------- | ---------------------------------- | ----------------------------------------------- |
+| `PROPOSER_ROLE`       | Can schedule operations            | DAO multisig                                    |
+| `CANCELLER_ROLE`      | Can cancel scheduled operations    | DAO multisig                                    |
+| `EXECUTOR_ROLE`       | Can execute operations after delay | Open (any address) or DAO multisig              |
+| `TIMELOCK_ADMIN_ROLE` | Can grant/revoke roles             | Zero address (after renouncing) or DAO multisig |
 
 ---
 

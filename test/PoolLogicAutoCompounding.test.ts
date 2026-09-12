@@ -96,16 +96,12 @@ describe('PoolLogic auto-compounding rewards', () => {
     await poolManager.setTotalFundValue(ethers.parseUnits('110', 18));
     await poolManager.callMintManagerFee(await pool.getAddress());
 
-    expect(await pool.pendingReward(await user.getAddress())).to.equal(
-      ethers.parseUnits('10', 18),
-    );
+    expect(await pool.pendingReward(await user.getAddress())).to.equal(ethers.parseUnits('10', 18));
 
     await poolManager.setTotalFundValue(ethers.parseUnits('121', 18));
     await poolManager.callMintManagerFee(await pool.getAddress());
 
-    expect(await pool.pendingReward(await user.getAddress())).to.equal(
-      ethers.parseUnits('21', 18),
-    );
+    expect(await pool.pendingReward(await user.getAddress())).to.equal(ethers.parseUnits('21', 18));
   });
 
   it('converts harvested pending rewards into minted fUSD liability', async () => {
@@ -134,15 +130,11 @@ describe('PoolLogic auto-compounding rewards', () => {
 
     await pool.connect(user).unstake(stakeAmount);
     expect(await pool.balanceOf(await user.getAddress())).to.equal(0n);
-    expect(await pool.pendingReward(await user.getAddress())).to.equal(
-      ethers.parseUnits('10', 18),
-    );
+    expect(await pool.pendingReward(await user.getAddress())).to.equal(ethers.parseUnits('10', 18));
 
     await poolManager.setTotalFundValue(ethers.parseUnits('121', 18));
     await poolManager.callMintManagerFee(await pool.getAddress());
 
-    expect(await pool.pendingReward(await user.getAddress())).to.equal(
-      ethers.parseUnits('21', 18),
-    );
+    expect(await pool.pendingReward(await user.getAddress())).to.equal(ethers.parseUnits('21', 18));
   });
 });

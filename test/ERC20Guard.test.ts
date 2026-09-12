@@ -202,9 +202,10 @@ describe('ERC20Guard', () => {
     const tooMuch = total - reserved + 1n;
     const data = erc20Iface.encodeFunctionData('approve', [spender.address, tooMuch]);
 
-    await expect(
-      guard.txGuard(poolAddress, tokenAddress, data),
-    ).to.be.revertedWithCustomError(guard, 'ApprovalExceedsUnreservedBalance');
+    await expect(guard.txGuard(poolAddress, tokenAddress, data)).to.be.revertedWithCustomError(
+      guard,
+      'ApprovalExceedsUnreservedBalance',
+    );
   });
 
   it('reverts when approving the full balance while any amount is reserved (e.g. an unlimited/type(uint256).max approval)', async () => {
@@ -217,9 +218,10 @@ describe('ERC20Guard', () => {
 
     const data = erc20Iface.encodeFunctionData('approve', [spender.address, ethers.MaxUint256]);
 
-    await expect(
-      guard.txGuard(poolAddress, tokenAddress, data),
-    ).to.be.revertedWithCustomError(guard, 'ApprovalExceedsUnreservedBalance');
+    await expect(guard.txGuard(poolAddress, tokenAddress, data)).to.be.revertedWithCustomError(
+      guard,
+      'ApprovalExceedsUnreservedBalance',
+    );
   });
 
   it('allows reducing an existing allowance even if the new amount still exceeds unreserved balance', async () => {
@@ -282,9 +284,10 @@ describe('ERC20Guard', () => {
       existingAllowance + 1n,
     ]);
 
-    await expect(
-      guard.txGuard(poolAddress, tokenAddress, data),
-    ).to.be.revertedWithCustomError(guard, 'ApprovalExceedsUnreservedBalance');
+    await expect(guard.txGuard(poolAddress, tokenAddress, data)).to.be.revertedWithCustomError(
+      guard,
+      'ApprovalExceedsUnreservedBalance',
+    );
   });
 
   it('always allows revoking an allowance (approve to 0) regardless of reservation', async () => {

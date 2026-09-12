@@ -34,7 +34,6 @@ async function main() {
   // --------------------------------------------------
   const assetGuards = [
     { assetType: 1, guard: '0x27BeceFb6CF59b26CD73dac227Ae3597065E2850' }, // MorphoBlue
-
   ];
 
   // --------------------------------------------------

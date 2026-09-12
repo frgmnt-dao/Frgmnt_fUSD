@@ -20,15 +20,15 @@ Validates and classifies swaps executed via Uniswap V3's `SwapRouter` (`exactInp
 function txGuard(address poolManagerLogic, address to, bytes memory data) public override returns (uint16 txType, bool)
 ```
 
-| Selector | Checks | Snapshot event |
-|----------|--------|------------------|
-| `exactInput` | `dstAsset` (path's final token, via `_decodePath`) must be supported; `recipient == pool` | `ExchangeFrom` |
-| `exactInputSingle` | `tokenOut` must be supported; `recipient == pool` | `ExchangeFrom` |
-| `exactOutput` | `dstAsset` (path's final token) must be supported; `recipient == pool` | `ExchangeTo` |
-| `exactOutputSingle` | `tokenOut` must be supported; `recipient == pool` | `ExchangeTo` |
-| `multicall(uint256,bytes[])` | exactly one inner call, recursively validated by re-invoking `txGuard()` | — |
+| Selector                     | Checks                                                                                    | Snapshot event |
+| ---------------------------- | ----------------------------------------------------------------------------------------- | -------------- |
+| `exactInput`                 | `dstAsset` (path's final token, via `_decodePath`) must be supported; `recipient == pool` | `ExchangeFrom` |
+| `exactInputSingle`           | `tokenOut` must be supported; `recipient == pool`                                         | `ExchangeFrom` |
+| `exactOutput`                | `dstAsset` (path's final token) must be supported; `recipient == pool`                    | `ExchangeTo`   |
+| `exactOutputSingle`          | `tokenOut` must be supported; `recipient == pool`                                         | `ExchangeTo`   |
+| `multicall(uint256,bytes[])` | exactly one inner call, recursively validated by re-invoking `txGuard()`                  | —              |
 
-**Only the destination asset is required to be a supported asset — the source asset is not checked here.** A pool can swap *out of* an unsupported-but-held token via this guard as long as the destination is supported; the source side's own valuation (or lack of it) is governed by whether it's a supported asset elsewhere, not by this guard.
+**Only the destination asset is required to be a supported asset — the source asset is not checked here.** A pool can swap _out of_ an unsupported-but-held token via this guard as long as the destination is supported; the source side's own valuation (or lack of it) is governed by whether it's a supported asset elsewhere, not by this guard.
 
 For every non-multicall selector, `txGuard()` snapshots the pool's current `srcAsset`/`dstAsset` balances into `intermediateSwapData[msg.sender]` (inherited from `SlippageAccumulatorUser`) before the swap executes — `afterTxGuard()` reads this back post-execution to compute the actual deltas.
 
@@ -52,16 +52,16 @@ Reads back `intermediateSwapData[msg.sender]`, computes `srcAmount = preSrcBalan
 
 ### Cross-Caller Snapshot Isolation (CertiK FNA-47)
 
-`intermediateSwapData` is keyed by `msg.sender` (== the calling pool's own `poolLogic`, per the same check `txGuard()`/`afterTxGuard()` both perform) — **not** a single shared contract-level slot. Before this fix, any caller supplying a self-referential, attacker-forged `poolManagerLogic` (there is no trusted pool-registry lookup anywhere in this codebase's guard layer) — or a malicious intermediate-hop token that briefly gets control mid-swap, since the multi-hop path decoder only validates the first/last token — could overwrite the *real* pool's pending snapshot before its own `afterTxGuard` read it back, either masking a real loss past the deployed cumulative-slippage bound or forcing an arithmetic underflow that reverts the honest pool's swap. Keying by `msg.sender` closes this structurally without needing a pool registry or per-hop validation: `msg.sender` can never be forged, so a forged or hijacked call only ever writes to *its own* mapping entry. This repo's EVM target is `paris` (pre-Cancun), ruling out transient storage (`tstore`/`tload`) as an alternative mechanism.
+`intermediateSwapData` is keyed by `msg.sender` (== the calling pool's own `poolLogic`, per the same check `txGuard()`/`afterTxGuard()` both perform) — **not** a single shared contract-level slot. Before this fix, any caller supplying a self-referential, attacker-forged `poolManagerLogic` (there is no trusted pool-registry lookup anywhere in this codebase's guard layer) — or a malicious intermediate-hop token that briefly gets control mid-swap, since the multi-hop path decoder only validates the first/last token — could overwrite the _real_ pool's pending snapshot before its own `afterTxGuard` read it back, either masking a real loss past the deployed cumulative-slippage bound or forcing an arithmetic underflow that reverts the honest pool's swap. Keying by `msg.sender` closes this structurally without needing a pool registry or per-hop validation: `msg.sender` can never be forged, so a forged or hijacked call only ever writes to _its own_ mapping entry. This repo's EVM target is `paris` (pre-Cancun), ruling out transient storage (`tstore`/`tload`) as an alternative mechanism.
 
 ---
 
 ## Access Control
 
-| Caller | Permissions |
-|--------|------------|
-| PoolLogic | Can invoke `txGuard()`/`afterTxGuard()` (both enforce `msg.sender == poolLogic`) |
-| Manager / Trader | Must originate the `execTransaction()` call |
+| Caller           | Permissions                                                                      |
+| ---------------- | -------------------------------------------------------------------------------- |
+| PoolLogic        | Can invoke `txGuard()`/`afterTxGuard()` (both enforce `msg.sender == poolLogic`) |
+| Manager / Trader | Must originate the `execTransaction()` call                                      |
 
 Stateless (beyond the per-caller `intermediateSwapData` scratch mapping) — no owner, no privileged configuration.
 

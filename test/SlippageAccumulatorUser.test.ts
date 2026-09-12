@@ -164,7 +164,14 @@ describe('SlippageAccumulatorUser', () => {
       slippageUser.connect(other).afterTxGuard(otherPoolManagerAddr, routerAddress, '0x'),
     )
       .to.emit(mockAccumulator, 'ImpactUpdated')
-      .withArgs(otherPoolManagerAddr, routerAddress, tokenAddr, tokenAddr, ethers.parseEther('999'), 0n);
+      .withArgs(
+        otherPoolManagerAddr,
+        routerAddress,
+        tokenAddr,
+        tokenAddr,
+        ethers.parseEther('999'),
+        0n,
+      );
 
     // `other`'s own entry is now cleared...
     const otherData = await slippageUser.getIntermediateSwapData(otherAddress);

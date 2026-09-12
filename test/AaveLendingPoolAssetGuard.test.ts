@@ -36,14 +36,22 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     const guard = await Guard.deploy(
       await dataProvider.getAddress(),
       await aavePool.getAddress(),
-      await usdc.getAddress(),  // preferredSettlementAsset
+      await usdc.getAddress(), // preferredSettlementAsset
       swapRouter,
     );
     await guard.waitForDeployment();
 
     return {
-      guard, aavePool, dataProvider, usdc, weth, aToken, debtToken,
-      deployer, other, swapRouter,
+      guard,
+      aavePool,
+      dataProvider,
+      usdc,
+      weth,
+      aToken,
+      debtToken,
+      deployer,
+      other,
+      swapRouter,
     };
   }
 
@@ -352,7 +360,7 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     expect(await guard.getDecimals(ethers.ZeroAddress)).to.equal(18n);
   });
 
-  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+  it("isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard's balance)", async () => {
     const { guard } = await deploy();
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
@@ -371,7 +379,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
 
     // Deploy a pool logic mock
     const PMF = await ethers.getContractFactory('MockPoolManagerLogicWithAssets');
-    const pm = await PMF.deploy(ethers.ZeroAddress, ethers.ZeroAddress, ethers.Wallet.createRandom().address);
+    const pm = await PMF.deploy(
+      ethers.ZeroAddress,
+      ethers.ZeroAddress,
+      ethers.Wallet.createRandom().address,
+    );
     await pm.waitForDeployment();
 
     const PLF = await ethers.getContractFactory('MockPoolLogicWithManager');
@@ -400,7 +412,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     const plAddr = await pl.getAddress();
 
     // Set up Aave reserve tokens
-    await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), ethers.ZeroAddress);
+    await aavePool.setReserveTokens(
+      await usdc.getAddress(),
+      await aToken.getAddress(),
+      ethers.ZeroAddress,
+    );
 
     // Mint aTokens to the pool address
     await aToken.mint(plAddr, 1000n * 10n ** 6n);
@@ -449,7 +465,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       await supportAsset(pm, factory, usdc);
       const plAddr = await pl.getAddress();
 
-      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), ethers.ZeroAddress);
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+      );
       await aToken.mint(plAddr, 1000n * 10n ** 6n);
 
       expect(await guard.getDeficit(plAddr, ethers.ZeroAddress)).to.equal(0n);
@@ -475,7 +495,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       await debt.mint(plAddr, 200n * 10n ** 6n); // $200 debt
 
       expect(await guard.getBalance(plAddr, ethers.ZeroAddress)).to.equal(0n);
-      expect(await guard.getDeficit(plAddr, ethers.ZeroAddress)).to.equal(ethers.parseUnits('100', 18));
+      expect(await guard.getDeficit(plAddr, ethers.ZeroAddress)).to.equal(
+        ethers.parseUnits('100', 18),
+      );
     });
   });
 
@@ -505,7 +527,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       await supportAsset(pm, factory, usdc);
       const plAddr = await pl.getAddress();
 
-      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), ethers.ZeroAddress);
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+      );
       await aToken.mint(plAddr, 1000n * 10n ** 6n);
 
       const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
@@ -521,7 +547,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       // USDC both supplied and borrowed: the debt's underlying is then also the guard's own
       // chosen settlement token, so the flash-amount estimate takes the same-token shortcut
       // (no swap/oracle-slippage math involved) — isolating just the premium deduction.
-      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
       await usdcDebt.waitForDeployment();
       await supportAsset(pm, factory, usdc);
       const plAddr = await pl.getAddress();
@@ -556,12 +584,18 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       const { guard, aavePool, dataProvider, usdc, aToken } = await deploy();
       const [signer] = await ethers.getSigners();
       const { factory, pm, pl } = await deployPool(signer.address);
-      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
       await usdcDebt.waitForDeployment();
       await supportAsset(pm, factory, usdc);
       const plAddr = await pl.getAddress();
 
-      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
       await dataProvider.setReserveTokensAddresses(
         await usdc.getAddress(),
         await aToken.getAddress(),
@@ -588,7 +622,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       const { guard, aavePool, dataProvider, usdc, aToken } = await deploy();
       const [signer] = await ethers.getSigners();
       const { factory, pm, pl } = await deployPool(signer.address);
-      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
       await usdcDebt.waitForDeployment();
       await supportAsset(pm, factory, usdc);
       const plAddr = await pl.getAddress();
@@ -630,9 +666,13 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
       const [signer] = await ethers.getSigners();
       const { factory, pm, pl } = await deployPool(signer.address);
-      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
       await usdcDebt.waitForDeployment();
-      const wethDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dWETH', 'dWETH', 18));
+      const wethDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dWETH', 'dWETH', 18));
       await wethDebt.waitForDeployment();
       const plAddr = await pl.getAddress();
 
@@ -654,8 +694,16 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
         ethers.ZeroAddress,
         await wethDebt.getAddress(),
       );
-      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
-      await aavePool.setReserveTokens(await weth.getAddress(), ethers.ZeroAddress, await wethDebt.getAddress());
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await weth.getAddress(),
+        ethers.ZeroAddress,
+        await wethDebt.getAddress(),
+      );
 
       await aToken.mint(plAddr, 10_000n * 10n ** 6n);
       await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
@@ -713,9 +761,13 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
       const [signer] = await ethers.getSigners();
       const { factory, pm, pl } = await deployPool(signer.address);
-      const wethAToken = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('aWETH', 'aWETH', 18));
+      const wethAToken = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('aWETH', 'aWETH', 18));
       await wethAToken.waitForDeployment();
-      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
       await usdcDebt.waitForDeployment();
       const plAddr = await pl.getAddress();
 
@@ -736,8 +788,16 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
         ethers.ZeroAddress,
         ethers.ZeroAddress,
       );
-      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
-      await aavePool.setReserveTokens(await weth.getAddress(), await wethAToken.getAddress(), ethers.ZeroAddress);
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+      );
 
       await aToken.mint(plAddr, 10_000n * 10n ** 6n);
       await wethAToken.mint(plAddr, ethers.parseEther('1'));
@@ -777,7 +837,7 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       expect(await guard.isWithdrawableBalanceGuard()).to.equal(true);
     });
 
-    it('matches getNetRealizableBalance when the aToken\'s underlying fully covers its balance', async () => {
+    it("matches getNetRealizableBalance when the aToken's underlying fully covers its balance", async () => {
       const { guard, aavePool, usdc, aToken } = await deploy();
       const [signer] = await ethers.getSigners();
       const { factory, pm, pl } = await deployPool(signer.address);
@@ -887,7 +947,12 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       const aTokenAddr = await aToken.getAddress();
       const usdcAddr = await usdc.getAddress();
 
-      await dataProvider.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress, ethers.ZeroAddress);
+      await dataProvider.setReserveTokens(
+        usdcAddr,
+        aTokenAddr,
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
       await aavePool.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress);
       await aToken.mint(plAddr, 1000n * 10n ** 6n);
       // Only 30% of this reserve is actually liquid right now.
@@ -920,7 +985,12 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       const aTokenAddr = await aToken.getAddress();
       const usdcAddr = await usdc.getAddress();
 
-      await dataProvider.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress, ethers.ZeroAddress);
+      await dataProvider.setReserveTokens(
+        usdcAddr,
+        aTokenAddr,
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
       await aavePool.setReserveTokens(usdcAddr, aTokenAddr, ethers.ZeroAddress);
       await aToken.mint(plAddr, 1000n * 10n ** 6n);
       // 40% of this reserve is actually liquid right now.
@@ -1009,7 +1079,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
   it('removeAssetCheck passes when no positions', async () => {
     const { guard } = await deploy();
     const PMF = await ethers.getContractFactory('MockPoolManagerLogicWithAssets');
-    const pm = await PMF.deploy(ethers.ZeroAddress, ethers.ZeroAddress, ethers.Wallet.createRandom().address);
+    const pm = await PMF.deploy(
+      ethers.ZeroAddress,
+      ethers.ZeroAddress,
+      ethers.Wallet.createRandom().address,
+    );
     const PLF = await ethers.getContractFactory('MockPoolLogicWithManager');
     const pl = await PLF.deploy(await pm.getAddress(), ethers.ZeroAddress);
     await guard.removeAssetCheck(await pl.getAddress(), ethers.ZeroAddress); // no revert
@@ -1039,8 +1113,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     const { factory: factory2, pm: pm2, pl: pl2 } = await deployPool(signer.address);
     await supportAsset(pm2, factory2, usdc);
     await debt.mint(await pl2.getAddress(), 1n);
-    await expect(guard.removeAssetCheck(await pl2.getAddress(), ethers.ZeroAddress)).to.be
-      .revertedWith('Frgmnt: cannot remove non-empty asset');
+    await expect(
+      guard.removeAssetCheck(await pl2.getAddress(), ethers.ZeroAddress),
+    ).to.be.revertedWith('Frgmnt: cannot remove non-empty asset');
   });
 
   it('removeTokenCheck returns false when collateral or debt exists for the token', async () => {
@@ -1060,14 +1135,19 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       await debt.getAddress(),
     );
     await aToken.mint(plAddr, 1n);
-    expect(await guard.removeTokenCheck(plAddr, ethers.ZeroAddress, await usdc.getAddress())).to
-      .equal(false);
+    expect(
+      await guard.removeTokenCheck(plAddr, ethers.ZeroAddress, await usdc.getAddress()),
+    ).to.equal(false);
 
     const { factory: factory2, pm: pm2, pl: pl2 } = await deployPool(signer.address);
     await supportAsset(pm2, factory2, usdc);
     await debt.mint(await pl2.getAddress(), 1n);
     expect(
-      await guard.removeTokenCheck(await pl2.getAddress(), ethers.ZeroAddress, await usdc.getAddress()),
+      await guard.removeTokenCheck(
+        await pl2.getAddress(),
+        ethers.ZeroAddress,
+        await usdc.getAddress(),
+      ),
     ).to.equal(false);
   });
 
@@ -1084,7 +1164,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     );
 
     expect(
-      await guard.removeTokenCheck(await pl.getAddress(), ethers.ZeroAddress, await usdc.getAddress()),
+      await guard.removeTokenCheck(
+        await pl.getAddress(),
+        ethers.ZeroAddress,
+        await usdc.getAddress(),
+      ),
     ).to.equal(true);
   });
 
@@ -1096,7 +1180,12 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     const pl = await PLF.deploy(await pm.getAddress(), ethers.ZeroAddress);
     const portion = ethers.parseUnits('2', 18); // > 1e18
     await expect(
-      guard.withdrawProcessing(await pl.getAddress(), ethers.ZeroAddress, portion, ethers.Wallet.createRandom().address),
+      guard.withdrawProcessing(
+        await pl.getAddress(),
+        ethers.ZeroAddress,
+        portion,
+        ethers.Wallet.createRandom().address,
+      ),
     ).to.be.revertedWith('Frgmnt: bad portion');
   });
 
@@ -1107,14 +1196,23 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     const pm = await PMF.deploy(ethers.ZeroAddress, ethers.ZeroAddress, ethers.ZeroAddress);
     const pl = await PLF.deploy(await pm.getAddress(), ethers.ZeroAddress);
     await expect(
-      guard.withdrawProcessing(await pl.getAddress(), ethers.ZeroAddress, ethers.parseUnits('1', 18), ethers.ZeroAddress),
+      guard.withdrawProcessing(
+        await pl.getAddress(),
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18),
+        ethers.ZeroAddress,
+      ),
     ).to.be.revertedWith('Frgmnt: to=0');
   });
 
   it('withdrawProcessing with no debt returns collateral withdraw txs', async () => {
     const { guard } = await deploy();
     const PMF = await ethers.getContractFactory('MockPoolManagerLogicWithAssets');
-    const pm = await PMF.deploy(ethers.ZeroAddress, ethers.ZeroAddress, ethers.Wallet.createRandom().address);
+    const pm = await PMF.deploy(
+      ethers.ZeroAddress,
+      ethers.ZeroAddress,
+      ethers.Wallet.createRandom().address,
+    );
     const PLF = await ethers.getContractFactory('MockPoolLogicWithManager');
     const pl = await PLF.deploy(await pm.getAddress(), ethers.ZeroAddress);
 
@@ -1164,7 +1262,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     expect(txs.length).to.equal(2);
     expect(txs[0].to).to.equal(await aavePool.getAddress());
     expect(txs[1].to).to.equal(await usdc.getAddress());
-    expect(txs[0].txData.slice(0, 10)).to.equal(aavePool.interface.getFunction('withdraw').selector);
+    expect(txs[0].txData.slice(0, 10)).to.equal(
+      aavePool.interface.getFunction('withdraw').selector,
+    );
     expect(txs[1].txData.slice(0, 10)).to.equal(usdc.interface.getFunction('transfer').selector);
   });
 
@@ -1328,7 +1428,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       await aToken.getAddress(),
       await usdcDebt.getAddress(),
     );
-    await aavePool.setReserveTokens(await weth.getAddress(), ethers.ZeroAddress, await wethDebt.getAddress());
+    await aavePool.setReserveTokens(
+      await weth.getAddress(),
+      ethers.ZeroAddress,
+      await wethDebt.getAddress(),
+    );
     await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
     await wethDebt.mint(plAddr, ethers.parseEther('1'));
     // CertiK FNA-36 follow-up: withdrawProcessing() now skips a position with zero-or-negative
@@ -1379,7 +1483,11 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       await aToken.getAddress(),
       await usdcDebt.getAddress(),
     );
-    await aavePool.setReserveTokens(await weth.getAddress(), ethers.ZeroAddress, await wethDebt.getAddress());
+    await aavePool.setReserveTokens(
+      await weth.getAddress(),
+      ethers.ZeroAddress,
+      await wethDebt.getAddress(),
+    );
     await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
     await wethDebt.mint(plAddr, ethers.parseEther('1'));
     await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000);
@@ -1406,12 +1514,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     const [signer] = await ethers.getSigners();
     const { pl } = await deployPool(signer.address);
     const usdcAddress = await usdc.getAddress();
-    const params = encodeFlashloanParams(
-      ethers.parseUnits('1', 18),
-      usdcAddress,
-      100n,
-      [[usdcAddress, 0n, 0n]],
-    );
+    const params = encodeFlashloanParams(ethers.parseUnits('1', 18), usdcAddress, 100n, [
+      [usdcAddress, 0n, 0n],
+    ]);
 
     const txs = await guard.flashloanProcessing.staticCall(
       await pl.getAddress(),
@@ -1430,12 +1535,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     const [signer] = await ethers.getSigners();
     const { pl } = await deployPool(signer.address);
     const usdcAddress = await usdc.getAddress();
-    const params = encodeFlashloanParams(
-      ethers.parseUnits('1', 18),
-      usdcAddress,
-      100n,
-      [[usdcAddress, 100n * 10n ** 6n, 0n]],
-    );
+    const params = encodeFlashloanParams(ethers.parseUnits('1', 18), usdcAddress, 100n, [
+      [usdcAddress, 100n * 10n ** 6n, 0n],
+    ]);
 
     const txs = await guard.flashloanProcessing.staticCall(
       await pl.getAddress(),
@@ -1486,12 +1588,7 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     await daiAToken.mint(plAddr, 1n);
 
     const usdcAddress = await usdc.getAddress();
-    const params = encodeFlashloanParams(
-      1n,
-      usdcAddress,
-      100n,
-      [[usdcAddress, 0n, 0n]],
-    );
+    const params = encodeFlashloanParams(1n, usdcAddress, 100n, [[usdcAddress, 0n, 0n]]);
 
     const txs = await guard.flashloanProcessing.staticCall(plAddr, usdcAddress, 100n, 0n, params);
 
@@ -1746,9 +1843,13 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
       const [signer] = await ethers.getSigners();
       const { factory, pm, pl } = await deployPool(signer.address);
-      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
       await usdcDebt.waitForDeployment();
-      const wethDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dWETH', 'dWETH', 18));
+      const wethDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dWETH', 'dWETH', 18));
       await wethDebt.waitForDeployment();
       const plAddr = await pl.getAddress();
 
@@ -1771,8 +1872,16 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
         ethers.ZeroAddress,
         await wethDebt.getAddress(),
       );
-      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
-      await aavePool.setReserveTokens(await weth.getAddress(), ethers.ZeroAddress, await wethDebt.getAddress());
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await weth.getAddress(),
+        ethers.ZeroAddress,
+        await wethDebt.getAddress(),
+      );
 
       await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
       await wethDebt.mint(plAddr, ethers.parseEther('1'));
@@ -1808,10 +1917,12 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
     // collateral value narrowly exceeds the outlay can still fail to produce enough real
     // settlement-token proceeds — exactly the case the prior gate would have missed (built the
     // flashloan anyway, which would then revert for real during execution).
-    it('reverts when a non-settlement collateral leg\'s gross value covers the outlay but its actual swap-bounded proceeds do not', async () => {
+    it("reverts when a non-settlement collateral leg's gross value covers the outlay but its actual swap-bounded proceeds do not", async () => {
       const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
       const [signer] = await ethers.getSigners();
-      const wethAToken = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('aWETH', 'aWETH', 18));
+      const wethAToken = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('aWETH', 'aWETH', 18));
       await wethAToken.waitForDeployment();
       const { factory, pm, pl } = await deployPool(signer.address);
       const plAddr = await pl.getAddress();
@@ -1821,7 +1932,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
 
       // Debt: 1,000 USDC, same asset as settlement -> zero settlement<->debt swap cost, isolating
       // the WETH collateral leg's own swap-back cost specifically.
-      const usdcDebt = await ethers.getContractFactory('MockERC20Custom').then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
       await usdcDebt.waitForDeployment();
       await dataProvider.setReserveTokensAddresses(
         await usdc.getAddress(),
@@ -1835,8 +1948,16 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
         ethers.ZeroAddress,
         ethers.ZeroAddress,
       );
-      await aavePool.setReserveTokens(await usdc.getAddress(), await aToken.getAddress(), await usdcDebt.getAddress());
-      await aavePool.setReserveTokens(await weth.getAddress(), await wethAToken.getAddress(), ethers.ZeroAddress);
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+      );
 
       await usdcDebt.mint(plAddr, 1_000n * 10n ** 6n);
       // Collateral: 0.5025 WETH @ $2000 = $1,005 gross — narrowly covers the $1,000 flashloan
@@ -1999,7 +2120,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
       // gross-up — this call passes slippageBps=0, so the composed and maxed forms coincide
       // here and only the floor-direction correction is visible in this assertion.
       const routeSlippageBps = feeOnlySlippageBps(routeFee);
-      const expectedOut = (amountIn * ethers.parseUnits('2000', 18) * 10n ** 6n) / (10n ** 18n * ethers.parseUnits('1', 18));
+      const expectedOut =
+        (amountIn * ethers.parseUnits('2000', 18) * 10n ** 6n) /
+        (10n ** 18n * ethers.parseUnits('1', 18));
       const expectedMinOut = (expectedOut * (BPS_DENOM - routeSlippageBps)) / BPS_DENOM;
 
       expect(decoded!.params.amountOutMinimum).to.equal(expectedMinOut);
@@ -2045,7 +2168,9 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
 
       const routeFee = combinedFee([3000n, 3000n]);
       const routeSlippageBps = grossUpSlippageBps(routeFee);
-      const expectedIn = (desiredDebtOut * ethers.parseUnits('2000', 18) * 10n ** 6n) / (10n ** 18n * ethers.parseUnits('1', 18));
+      const expectedIn =
+        (desiredDebtOut * ethers.parseUnits('2000', 18) * 10n ** 6n) /
+        (10n ** 18n * ethers.parseUnits('1', 18));
       const expectedMaxIn = (expectedIn * (BPS_DENOM + routeSlippageBps)) / BPS_DENOM;
 
       expect(decoded!.params.amountInMaximum).to.equal(expectedMaxIn);

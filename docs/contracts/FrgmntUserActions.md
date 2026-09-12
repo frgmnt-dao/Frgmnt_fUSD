@@ -53,16 +53,16 @@ Single-step immediate withdrawal with an optional permit.
 function _permitIfEnabled(address token, address owner, address spender, PermitData calldata permitData) internal
 ```
 
-Skips the `permit()` call entirely if `permitData.enabled` is false, **or** if the current allowance already covers `permitData.value`. The allowance pre-check exists because a raw EIP-2612 signature submitted in calldata is inherently front-runnable: anyone watching the mempool can copy `(owner, spender, value, deadline, v, r, s)` and call `permit()` themselves before the user's own transaction lands. That consumes the signature's nonce but still sets the allowance the user intended — without this check, the user's own call would then revert on the now-stale signature even though the allowance it was meant to create already exists. Checking the current allowance first means a front-run permit only ever *helps* (skips a redundant call) rather than griefing the transaction into failing.
+Skips the `permit()` call entirely if `permitData.enabled` is false, **or** if the current allowance already covers `permitData.value`. The allowance pre-check exists because a raw EIP-2612 signature submitted in calldata is inherently front-runnable: anyone watching the mempool can copy `(owner, spender, value, deadline, v, r, s)` and call `permit()` themselves before the user's own transaction lands. That consumes the signature's nonce but still sets the allowance the user intended — without this check, the user's own call would then revert on the now-stale signature even though the allowance it was meant to create already exists. Checking the current allowance first means a front-run permit only ever _helps_ (skips a redundant call) rather than griefing the transaction into failing.
 
 ---
 
 ## Configuration
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
-| `tokenLogic` | constructor (immutable) | The `TokenLogic` proxy this router deposits through |
-| `poolLogic` | constructor (immutable) | The `PoolLogic` proxy this router stakes/unstakes/withdraws through |
+| Parameter    | Set at                  | Description                                                         |
+| ------------ | ----------------------- | ------------------------------------------------------------------- |
+| `tokenLogic` | constructor (immutable) | The `TokenLogic` proxy this router deposits through                 |
+| `poolLogic`  | constructor (immutable) | The `PoolLogic` proxy this router stakes/unstakes/withdraws through |
 
 Immutable, per-pool binding — a new pool needs its own `FrgmntUserActions` instance (or the protocol simply doesn't require users to go through this router at all; it's a convenience layer, not a mandatory entry point).
 

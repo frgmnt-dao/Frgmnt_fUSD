@@ -150,7 +150,6 @@ describe('PoolLogic', () => {
     await fusd.connect(signer).approve(await pool.getAddress(), amount);
   }
 
-
   // 1) init + fund summary
   it('initializes correctly and exposes a consistent fund summary', async () => {
     const { pool, fusd, poolManager } = await loadFixture(deployPoolFixture);
@@ -350,8 +349,14 @@ describe('PoolLogic', () => {
     await poolManager.setTotalFundValue(reward);
 
     // Trigger accrual via user harvest (which runs updateFeesAndRewards)
-    await pool.connect(user).harvest().catch(() => {}); // may or may not have pending
-    await pool.connect(user2).harvest().catch(() => {});
+    await pool
+      .connect(user)
+      .harvest()
+      .catch(() => {}); // may or may not have pending
+    await pool
+      .connect(user2)
+      .harvest()
+      .catch(() => {});
     // Reward distributed equally (50/50 split)
     // Just verify both users have some reward or 0 (depending on when trigger happens)
     const p1 = await pool.pendingReward(await user.getAddress());
@@ -448,10 +453,7 @@ describe('PoolLogic', () => {
     await fusd.mint(await user.getAddress(), amount);
     await fusd.connect(user).approve(await pool.getAddress(), amount);
     await fusd.setExitCooldown(await user.getAddress(), 100);
-    await expectRevert(
-      pool.connect(user).withdrawCashImmediate(amount),
-      'CooldownActive',
-    );
+    await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'CooldownActive');
   });
 
   // 18) reverts if asset not supported (immediate withdraw)
@@ -461,10 +463,7 @@ describe('PoolLogic', () => {
     await fusd.mint(await user.getAddress(), amount);
     await fusd.connect(user).approve(await pool.getAddress(), amount);
     // No supported assets with balance → fund value = 0 → EmptyFund revert
-    await expectRevert(
-      pool.connect(user).withdrawCashImmediate(amount),
-      'EmptyFund',
-    );
+    await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'EmptyFund');
   });
 
   // 19) reverts if fund value is zero (immediate withdraw)
@@ -474,10 +473,7 @@ describe('PoolLogic', () => {
     const amount = ethers.parseUnits('1000', 18);
     await fusd.mint(await user.getAddress(), amount);
     await fusd.connect(user).approve(await pool.getAddress(), amount);
-    await expectRevert(
-      pool.connect(user).withdrawCashImmediate(amount),
-      'EmptyFund',
-    );
+    await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'EmptyFund');
   });
 
   // 20) reverts if exit fee makes netFusd=0 (immediate withdraw)
@@ -495,10 +491,7 @@ describe('PoolLogic', () => {
       ethers.parseUnits('1000', 18),
     );
 
-    await expectRevert(
-      pool.connect(user).withdrawCashImmediate(amount),
-      'ZeroAmount',
-    );
+    await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'ZeroAmount');
   });
 
   // 21) request, finalize, and claim flow works (queued withdraw)
@@ -519,7 +512,13 @@ describe('PoolLogic', () => {
     const receipt = await tx.wait();
 
     const event = receipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
 
     const requestId = event!.args.requestId;
@@ -573,14 +572,17 @@ describe('PoolLogic', () => {
     const tx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
     const receipt = await tx.wait();
     const event = receipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
     const requestId = event!.args.requestId;
 
-    await expectRevert(
-      pool.connect(user).finalizeCashWithdraw(requestId),
-      'OnlyManager',
-    );
+    await expectRevert(pool.connect(user).finalizeCashWithdraw(requestId), 'OnlyManager');
   });
 
   // 24) claim reverts if not owner
@@ -595,7 +597,13 @@ describe('PoolLogic', () => {
     const tx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
     const receipt = await tx.wait();
     const event = receipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
     const requestId = event!.args.requestId;
 
@@ -650,16 +658,14 @@ describe('PoolLogic', () => {
     await poolManager.setSupportedAsset(targetAddr, true, ethers.parseUnits('1', 18), 18);
 
     // Before the fix this would have silently succeeded via the asset guard fallback.
-    await expectRevert(
-      pool.connect(user).execTransaction(targetAddr, data),
-      'InvalidTransaction',
-    );
+    await expectRevert(pool.connect(user).execTransaction(targetAddr, data), 'InvalidTransaction');
     expect(await target.lastValue()).to.equal(0n);
   });
 
   // 27) reverts when non-manager/trader executes non-public tx
   it('reverts when non-manager/trader executes non-public tx', async () => {
-    const { pool, poolManager, txGuard, target, manager, trader, user } = await loadFixture(deployPoolFixture);
+    const { pool, poolManager, txGuard, target, manager, trader, user } =
+      await loadFixture(deployPoolFixture);
     await poolManager.setContractGuard(await target.getAddress(), await txGuard.getAddress());
     await txGuard.setTxType(1, false); // non-public
     const data = target.interface.encodeFunctionData('doSomething', [7n]);
@@ -675,10 +681,7 @@ describe('PoolLogic', () => {
   // 28) only manager can toggle immediate withdraw mode
   it('only manager can setImmediateWithdrawEnabled', async () => {
     const { pool, manager, user } = await loadFixture(deployPoolFixture);
-    await expectRevert(
-      pool.connect(user).setImmediateWithdrawEnabled(false),
-      'OnlyManager',
-    );
+    await expectRevert(pool.connect(user).setImmediateWithdrawEnabled(false), 'OnlyManager');
     await pool.connect(manager).setImmediateWithdrawEnabled(false);
     expect(await pool.isImmediateWithdrawEnabled()).to.equal(false);
   });
@@ -697,9 +700,16 @@ describe('PoolLogic', () => {
     const r1 = await tx1.wait();
     const r2 = await tx2.wait();
 
-    const parseReq = (logs: any[]) => logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
-      .find((e: any) => e && e.name === 'CashWithdrawRequested');
+    const parseReq = (logs: any[]) =>
+      logs
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
+        .find((e: any) => e && e.name === 'CashWithdrawRequested');
 
     const e1 = parseReq(r1!.logs);
     const e2 = parseReq(r2!.logs);
@@ -751,7 +761,10 @@ describe('PoolLogic', () => {
     const amount = ethers.parseUnits('1', 18);
 
     await pool.connect(manager).setImmediateWithdrawEnabled(false);
-    await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'ImmediateWithdrawalDisabled');
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediate(amount),
+      'ImmediateWithdrawalDisabled',
+    );
 
     await pool.connect(manager).setImmediateWithdrawEnabled(true);
     await expectRevert(pool.connect(user).withdrawCashImmediate(0n), 'ZeroAmount');
@@ -774,7 +787,10 @@ describe('PoolLogic', () => {
     await asset.mint(await pool.getAddress(), poolAsset);
     await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
 
-    await expectRevert(pool.connect(user).withdrawCashImmediateSafe(amount, []), 'InvalidAssetData');
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateSafe(amount, []),
+      'InvalidAssetData',
+    );
   });
 
   it('lets the manager withdraw immediately to a recipient without applying exit fees', async () => {
@@ -820,9 +836,11 @@ describe('PoolLogic', () => {
     await assetGuard.setWithdrawMode(false, false, 5_000);
 
     await expectRevert(
-      pool.connect(user).withdrawCashImmediateSafe(amount, [
-        { supportedAsset: await asset.getAddress(), withdrawData: '0x', slippageTolerance: 100 },
-      ]),
+      pool
+        .connect(user)
+        .withdrawCashImmediateSafe(amount, [
+          { supportedAsset: await asset.getAddress(), withdrawData: '0x', slippageTolerance: 100 },
+        ]),
       'SlippageExceeded',
     );
   });
@@ -850,9 +868,11 @@ describe('PoolLogic', () => {
     // Before the fix, expectedValue was derived from the UNCAPPED v.portionBalance
     // (1000 * 25% = 250) instead — making this same, fully-correct 100 delivery look like a
     // >50% shortfall and revert.
-    await pool.connect(user).withdrawCashImmediateSafe(amount, [
-      { supportedAsset: await asset.getAddress(), withdrawData: '0x', slippageTolerance: 100 },
-    ]);
+    await pool
+      .connect(user)
+      .withdrawCashImmediateSafe(amount, [
+        { supportedAsset: await asset.getAddress(), withdrawData: '0x', slippageTolerance: 100 },
+      ]);
     const after = await asset.balanceOf(await user.getAddress());
 
     expect(after - before).to.equal(ethers.parseUnits('100', 18));
@@ -868,16 +888,22 @@ describe('PoolLogic', () => {
     await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset * 3n);
 
     await expectRevert(
-      pool.connect(user).withdrawCashImmediateSafe(amount, [
-        { supportedAsset: await fusd.getAddress(), withdrawData: '0x1234', slippageTolerance: 0 },
-      ]),
+      pool
+        .connect(user)
+        .withdrawCashImmediateSafe(amount, [
+          { supportedAsset: await fusd.getAddress(), withdrawData: '0x1234', slippageTolerance: 0 },
+        ]),
       'InvalidAssetData',
     );
 
     await assetGuard.setComplexShouldRevert(true);
     await expectRevert(
       pool.connect(user).withdrawCashImmediateSafe(amount, [
-        { supportedAsset: await asset.getAddress(), withdrawData: '0x1234', slippageTolerance: 0 },
+        {
+          supportedAsset: await asset.getAddress(),
+          withdrawData: '0x1234',
+          slippageTolerance: 0,
+        },
       ]),
       'ComplexWithdrawFailed',
     );
@@ -885,7 +911,11 @@ describe('PoolLogic', () => {
     await assetGuard.setComplexShouldRevert(false);
     const before = await asset.balanceOf(await user.getAddress());
     await pool.connect(user).withdrawCashImmediateSafe(amount, [
-      { supportedAsset: await asset.getAddress(), withdrawData: '0x1234', slippageTolerance: 5_000 },
+      {
+        supportedAsset: await asset.getAddress(),
+        withdrawData: '0x1234',
+        slippageTolerance: 5_000,
+      },
     ]);
     const after = await asset.balanceOf(await user.getAddress());
     expect(after - before).to.be.closeTo(amount, 1_000n);
@@ -919,13 +949,27 @@ describe('PoolLogic', () => {
     const { pool, poolManager, txGuard, target, user } = await loadFixture(deployPoolFixture);
     const data = target.interface.encodeFunctionData('doSomething', [99n]);
 
-    await expectRevert(pool.connect(user).execTransaction(ethers.ZeroAddress, data), 'InvalidTransaction');
-    await expectRevert(pool.connect(user).execTransaction(await target.getAddress(), data), 'InvalidGuard');
+    await expectRevert(
+      pool.connect(user).execTransaction(ethers.ZeroAddress, data),
+      'InvalidTransaction',
+    );
+    await expectRevert(
+      pool.connect(user).execTransaction(await target.getAddress(), data),
+      'InvalidGuard',
+    );
 
     await poolManager.setAssetGuard(await target.getAddress(), await txGuard.getAddress());
-    await expectRevert(pool.connect(user).execTransaction(await target.getAddress(), data), 'AssetDisabled');
+    await expectRevert(
+      pool.connect(user).execTransaction(await target.getAddress(), data),
+      'AssetDisabled',
+    );
 
-    await poolManager.setSupportedAsset(await target.getAddress(), true, ethers.parseUnits('1', 18), 18);
+    await poolManager.setSupportedAsset(
+      await target.getAddress(),
+      true,
+      ethers.parseUnits('1', 18),
+      18,
+    );
     await txGuard.setTxType(2, true);
     await pool.connect(user).execTransaction(await target.getAddress(), data);
     expect(await target.lastValue()).to.equal(99n);
@@ -940,7 +984,10 @@ describe('PoolLogic', () => {
 
     const MissingTracking = await ethers.getContractFactory('TestTxGuardMissingTrackingFunction');
     const missingTracking = await MissingTracking.deploy();
-    await poolManager.setContractGuard(await target.getAddress(), await missingTracking.getAddress());
+    await poolManager.setContractGuard(
+      await target.getAddress(),
+      await missingTracking.getAddress(),
+    );
     await pool.connect(user).execTransaction(await target.getAddress(), data);
     expect(await target.lastValue()).to.equal(123n);
 
@@ -979,12 +1026,17 @@ describe('PoolLogic', () => {
       [await fusd.getAddress(), ethers.ZeroAddress, await owner.getAddress(), NAME, SYMBOL],
       [await fusd.getAddress(), await poolManager.getAddress(), ethers.ZeroAddress, NAME, SYMBOL],
       // FNA-11: empty name/symbol must also revert.
-      [await fusd.getAddress(), await poolManager.getAddress(), await owner.getAddress(), '', SYMBOL],
+      [
+        await fusd.getAddress(),
+        await poolManager.getAddress(),
+        await owner.getAddress(),
+        '',
+        SYMBOL,
+      ],
       [await fusd.getAddress(), await poolManager.getAddress(), await owner.getAddress(), NAME, ''],
     ]) {
       const initData = PoolLogic.interface.encodeFunctionData('initialize', args);
-      await expect(PoolLogicTestProxy.deploy(await poolImpl.getAddress(), initData)).to.be
-        .reverted;
+      await expect(PoolLogicTestProxy.deploy(await poolImpl.getAddress(), initData)).to.be.reverted;
     }
   });
 
@@ -995,7 +1047,10 @@ describe('PoolLogic', () => {
     await mintAndApproveFUSD(fusd, pool, user, amount);
     await pool.connect(user).stake(amount);
 
-    await expectRevert(pool.connect(user).transfer(await user2.getAddress(), 1n), 'NonTransferable');
+    await expectRevert(
+      pool.connect(user).transfer(await user2.getAddress(), 1n),
+      'NonTransferable',
+    );
     await expectRevert(pool.connect(user).approve(await user2.getAddress(), 1n), 'NonTransferable');
     await expectRevert(
       pool.connect(user2).transferFrom(await user.getAddress(), await user2.getAddress(), 1n),
@@ -1048,13 +1103,19 @@ describe('PoolLogic', () => {
       'ZeroAmount',
     );
 
-    await poolManager.setSupportedAsset(await asset.getAddress(), true, ethers.parseUnits('1', 18), 18);
+    await poolManager.setSupportedAsset(
+      await asset.getAddress(),
+      true,
+      ethers.parseUnits('1', 18),
+      18,
+    );
     await mintAndApproveFUSD(fusd, pool, manager, amount);
     await pool.connect(manager).requestCashWithdraw(amount, await asset.getAddress());
   });
 
   it('covers queued finalize and claim failure branches', async () => {
-    const { pool, fusd, poolManager, asset, assetGuard, manager, user } = await loadFixture(deployPoolFixture);
+    const { pool, fusd, poolManager, asset, assetGuard, manager, user } =
+      await loadFixture(deployPoolFixture);
     const amount = ethers.parseUnits('100', 18);
 
     await pool.connect(manager).setImmediateWithdrawEnabled(false);
@@ -1062,18 +1123,37 @@ describe('PoolLogic', () => {
 
     await expectRevert(pool.connect(manager).finalizeCashWithdraw(999n), 'InvalidWithdrawRequest');
 
-    const pendingTx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
+    const pendingTx = await pool
+      .connect(user)
+      .requestCashWithdraw(amount, await asset.getAddress());
     const pendingReceipt = await pendingTx.wait();
     const pendingEvent = pendingReceipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
     const pendingRequestId = pendingEvent!.args.requestId;
-    await expectRevert(pool.connect(user).claimCashWithdraw(pendingRequestId), 'InvalidWithdrawRequest');
+    await expectRevert(
+      pool.connect(user).claimCashWithdraw(pendingRequestId),
+      'InvalidWithdrawRequest',
+    );
 
-    const noPriceTx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
+    const noPriceTx = await pool
+      .connect(user)
+      .requestCashWithdraw(amount, await asset.getAddress());
     const noPriceReceipt = await noPriceTx.wait();
     const noPriceEvent = noPriceReceipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
     await poolManager.setSupportedAsset(await asset.getAddress(), true, 0n, 18);
     await expectRevert(
@@ -1081,7 +1161,12 @@ describe('PoolLogic', () => {
       'ZeroAmount',
     );
 
-    await poolManager.setSupportedAsset(await asset.getAddress(), true, ethers.parseUnits('1', 18), 18);
+    await poolManager.setSupportedAsset(
+      await asset.getAddress(),
+      true,
+      ethers.parseUnits('1', 18),
+      18,
+    );
 
     // FNA-05: the finalize haircut now floors the payout by the pool's *aggregate* withdrawable
     // value (across all supported assets), so an insufficient-local-balance revert on `asset`
@@ -1091,13 +1176,26 @@ describe('PoolLogic', () => {
     const asset2 = await TestTokenLogic.deploy('Mock Asset 2', 'MA2', 18);
     await asset2.waitForDeployment();
     await poolManager.setAssetGuard(await asset2.getAddress(), await assetGuard.getAddress());
-    await poolManager.setSupportedAsset(await asset2.getAddress(), true, ethers.parseUnits('1', 18), 18);
+    await poolManager.setSupportedAsset(
+      await asset2.getAddress(),
+      true,
+      ethers.parseUnits('1', 18),
+      18,
+    );
     await asset2.mint(await pool.getAddress(), ethers.parseUnits('1000', 18));
 
-    const insufficientTx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
+    const insufficientTx = await pool
+      .connect(user)
+      .requestCashWithdraw(amount, await asset.getAddress());
     const insufficientReceipt = await insufficientTx.wait();
     const insufficientEvent = insufficientReceipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
     await expectRevert(
       pool.connect(manager).finalizeCashWithdraw(insufficientEvent!.args.requestId),
@@ -1114,10 +1212,18 @@ describe('PoolLogic', () => {
 
     await pool.connect(manager).setImmediateWithdrawEnabled(false);
     await mintAndApproveFUSD(fusd, pool, user, requestAmount);
-    const tx = await pool.connect(user).requestCashWithdraw(requestAmount, await asset.getAddress());
+    const tx = await pool
+      .connect(user)
+      .requestCashWithdraw(requestAmount, await asset.getAddress());
     const receipt = await tx.wait();
     const event = receipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
 
     await asset.mint(await pool.getAddress(), poolAsset);
@@ -1157,9 +1263,10 @@ describe('PoolLogic', () => {
 
     await fundPool();
     await assetGuard.setTransaction(await target.getAddress(), '0x12');
-    await expect(
-      pool.connect(user).withdrawCashImmediate(amount),
-    ).to.be.revertedWithCustomError(pool, 'InvalidCallData');
+    await expect(pool.connect(user).withdrawCashImmediate(amount)).to.be.revertedWithCustomError(
+      pool,
+      'InvalidCallData',
+    );
 
     await fundPool();
     await assetGuard.setTransaction(
@@ -1268,9 +1375,11 @@ describe('PoolLogic', () => {
     await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
 
     const before = await asset.balanceOf(userAddr);
-    await pool.connect(user).withdrawCashImmediateSafe(amount, [
-      { supportedAsset: await asset.getAddress(), withdrawData: '0x', slippageTolerance: 100 },
-    ]);
+    await pool
+      .connect(user)
+      .withdrawCashImmediateSafe(amount, [
+        { supportedAsset: await asset.getAddress(), withdrawData: '0x', slippageTolerance: 100 },
+      ]);
     const after = await asset.balanceOf(userAddr);
 
     expect(after - before).to.equal(amount);
@@ -1279,9 +1388,10 @@ describe('PoolLogic', () => {
   it('restricts accounted asset increments to TokenLogic and rejects zero increments', async () => {
     const { pool, fusd, user } = await loadFixture(deployPoolFixture);
 
-    await expect(
-      pool.connect(user).incrementAccountedAssets(1n),
-    ).to.be.revertedWithCustomError(pool, 'OnlyTokenLogic');
+    await expect(pool.connect(user).incrementAccountedAssets(1n)).to.be.revertedWithCustomError(
+      pool,
+      'OnlyTokenLogic',
+    );
     await expect(
       fusd.triggerIncrementAccountedAssets(await pool.getAddress(), 0n),
     ).to.be.revertedWith('incrementAccountedAssets failed');
@@ -1322,7 +1432,13 @@ describe('PoolLogic', () => {
     const tx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
     const receipt = await tx.wait();
     const event = receipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
 
     await asset.mint(await pool.getAddress(), amount);
@@ -1359,7 +1475,7 @@ describe('PoolLogic', () => {
   // must not still attempt its own withdrawal transaction (e.g. a flashloan unwind) purely
   // because it exists as a supported asset — if that doomed attempt reverts, it previously took
   // down the *entire* pro-rata withdrawal, including every other, healthy asset's share.
-  it("skips a zero-equity leveraged leg instead of reverting the whole immediate withdrawal (FNA-36)", async () => {
+  it('skips a zero-equity leveraged leg instead of reverting the whole immediate withdrawal (FNA-36)', async () => {
     const { pool, fusd, poolManager, asset, assetGuard, target, user } =
       await loadFixture(deployPoolFixture);
     const amount = ethers.parseUnits('100', 18);
@@ -1409,7 +1525,8 @@ describe('PoolLogic', () => {
   });
 
   it('detects a corrupted mock balance on immediate withdraw, and finalizes the genuinely-available remainder', async () => {
-    const { pool, fusd, asset, manager, user, user2, withdrawalEscrow } = await loadFixture(deployPoolFixture);
+    const { pool, fusd, asset, manager, user, user2, withdrawalEscrow } =
+      await loadFixture(deployPoolFixture);
     const firstAmount = ethers.parseUnits('100', 18);
     const secondAmount = ethers.parseUnits('50', 18);
     const poolAsset = ethers.parseUnits('1000', 18);
@@ -1418,15 +1535,31 @@ describe('PoolLogic', () => {
     await mintAndApproveFUSD(fusd, pool, user, firstAmount);
     await mintAndApproveFUSD(fusd, pool, user2, secondAmount * 2n);
 
-    const firstTx = await pool.connect(user).requestCashWithdraw(firstAmount, await asset.getAddress());
-    const secondTx = await pool.connect(user2).requestCashWithdraw(secondAmount, await asset.getAddress());
+    const firstTx = await pool
+      .connect(user)
+      .requestCashWithdraw(firstAmount, await asset.getAddress());
+    const secondTx = await pool
+      .connect(user2)
+      .requestCashWithdraw(secondAmount, await asset.getAddress());
     const firstReceipt = await firstTx.wait();
     const secondReceipt = await secondTx.wait();
     const firstEvent = firstReceipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
     const secondEvent = secondReceipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
 
     await asset.mint(await pool.getAddress(), poolAsset);
@@ -1475,7 +1608,13 @@ describe('PoolLogic', () => {
     const tx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
     const receipt = await tx.wait();
     const event = receipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
     const requestId = event!.args.requestId;
 
@@ -1516,7 +1655,13 @@ describe('PoolLogic', () => {
     const tx = await pool.connect(user).requestCashWithdraw(amount, await asset.getAddress());
     const receipt = await tx.wait();
     const event = receipt!.logs
-      .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+      .map((log: any) => {
+        try {
+          return pool.interface.parseLog(log);
+        } catch {
+          return null;
+        }
+      })
       .find((e: any) => e && e.name === 'CashWithdrawRequested');
     const requestId = event!.args.requestId;
 
@@ -1554,7 +1699,10 @@ describe('PoolLogic', () => {
       await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
       await fusd.mint(await bob.getAddress(), ethers.parseUnits('50', 18));
       await asset.mint(await pool.getAddress(), ethers.parseUnits('80', 18));
-      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), ethers.parseUnits('80', 18));
+      await fusd.triggerIncrementAccountedAssets(
+        await pool.getAddress(),
+        ethers.parseUnits('80', 18),
+      );
 
       // Old vulnerable formula (portion = netFusd / fundValue) would let Alice redeem at full par
       // (50), leaving only 30 in assets for Bob's 50 claim (a 60% ratio — degraded from 80%).
@@ -1592,7 +1740,10 @@ describe('PoolLogic', () => {
       await fusd.mint(await bob.getAddress(), ethers.parseUnits('50', 18));
       // Fully backed: 100 in assets for 100 total claims.
       await asset.mint(await pool.getAddress(), ethers.parseUnits('100', 18));
-      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), ethers.parseUnits('100', 18));
+      await fusd.triggerIncrementAccountedAssets(
+        await pool.getAddress(),
+        ethers.parseUnits('100', 18),
+      );
 
       const before = await asset.balanceOf(await alice.getAddress());
       await pool.connect(alice).withdrawCashImmediate(ethers.parseUnits('50', 18));
@@ -1603,7 +1754,8 @@ describe('PoolLogic', () => {
     });
 
     it('haircuts a queued finalizeCashWithdraw payout pro-rata instead of paying par against a deficit', async () => {
-      const { pool, fusd, asset, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, asset, poolManager, manager, user, user2 } =
+        await loadFixture(deployPoolFixture);
       const alice = user;
       const bob = user2;
 
@@ -1616,13 +1768,18 @@ describe('PoolLogic', () => {
       // and Alice's queued 50 FUSD both still count toward totalClaims at finalization.
       await asset.mint(await pool.getAddress(), ethers.parseUnits('80', 18));
 
-      const tx = await pool.connect(alice).requestCashWithdraw(
-        ethers.parseUnits('50', 18),
-        await asset.getAddress(),
-      );
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('50', 18), await asset.getAddress());
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const requestId = event!.args.requestId;
 
@@ -1654,7 +1811,8 @@ describe('PoolLogic', () => {
     // finalizedUnclaimedFusd, which excludes it from totalClaims the same way its backing is
     // already excluded from fundValue.
     it('gives a later finalize its true fair share even while an earlier finalized-but-unclaimed reservation is outstanding (FNA-38)', async () => {
-      const { pool, fusd, asset, poolManager, manager, user, user2, withdrawalEscrow } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, asset, poolManager, manager, user, user2, withdrawalEscrow } =
+        await loadFixture(deployPoolFixture);
       const alice = user;
       const bob = user2;
 
@@ -1667,26 +1825,36 @@ describe('PoolLogic', () => {
       await asset.mint(await pool.getAddress(), ethers.parseUnits('100', 18));
       await poolManager.setTotalFundValue(ethers.parseUnits('100', 18));
 
-      const aliceTx = await pool.connect(alice).requestCashWithdraw(
-        ethers.parseUnits('100', 18),
-        await asset.getAddress(),
-      );
+      const aliceTx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('100', 18), await asset.getAddress());
       const aliceReceipt = await aliceTx.wait();
       const aliceEvent = aliceReceipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       await pool.connect(manager).finalizeCashWithdraw(aliceEvent!.args.requestId);
       const aliceStored = await pool.cashWithdrawRequests(aliceEvent!.args.requestId);
       // Alice finalizes first, against the pool's true 100/200 = 50% collateralization ratio.
       expect(aliceStored.assetAmount).to.equal(ethers.parseUnits('50', 18));
 
-      const bobTx = await pool.connect(bob).requestCashWithdraw(
-        ethers.parseUnits('100', 18),
-        await asset.getAddress(),
-      );
+      const bobTx = await pool
+        .connect(bob)
+        .requestCashWithdraw(ethers.parseUnits('100', 18), await asset.getAddress());
       const bobReceipt = await bobTx.wait();
       const bobEvent = bobReceipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       // Bob finalizes while Alice's reservation is still outstanding (unclaimed). His true fair
       // share is 50 — with Alice's 100 FUSD excluded from totalClaims (finalizedUnclaimedFusd),
@@ -1788,7 +1956,8 @@ describe('PoolLogic', () => {
   // accountedAssets by the haircut gap and let a later accrual mint phantom FUSD against it.
   describe('FNA-26: haircut queued-withdrawal accounting must not manufacture phantom yield', () => {
     it("finalizeCashWithdraw immediately reduces accountedAssets by the reservation's own NAV impact", async () => {
-      const { pool, fusd, asset, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, asset, poolManager, manager, user } =
+        await loadFixture(deployPoolFixture);
       const alice = user;
       const assetAddr = await asset.getAddress();
       const poolAddr = await pool.getAddress();
@@ -1801,10 +1970,18 @@ describe('PoolLogic', () => {
       expect(await pool.accountedAssets()).to.equal(ethers.parseUnits('100', 18));
 
       await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('50', 18));
-      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('50', 18), assetAddr);
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('50', 18), assetAddr);
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const requestId = event!.args.requestId;
 
@@ -1816,7 +1993,8 @@ describe('PoolLogic', () => {
     });
 
     it('closes the phantom-yield gap: a synced, haircut-finalized claim leaves accountedAssets exactly aligned with active NAV, and harvest mints nothing', async () => {
-      const { pool, fusd, asset, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, asset, poolManager, manager, user, user2 } =
+        await loadFixture(deployPoolFixture);
       const alice = user;
       const bob = user2;
       const assetAddr = await asset.getAddress();
@@ -1836,10 +2014,18 @@ describe('PoolLogic', () => {
       await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('50', 18));
       await pool.connect(bob).stake(ethers.parseUnits('50', 18));
 
-      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('50', 18), assetAddr);
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('50', 18), assetAddr);
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const requestId = event!.args.requestId;
 
@@ -1892,7 +2078,8 @@ describe('PoolLogic', () => {
       const reservedNow = await pool.reservedAssetBalance(assetAddr);
       expect(reservedNow).to.equal(0n);
       const activeNav =
-        (await poolManager.totalFundValue()) - (await poolManager.assetValue(assetAddr, reservedNow));
+        (await poolManager.totalFundValue()) -
+        (await poolManager.assetValue(assetAddr, reservedNow));
 
       // The fix: accountedAssets stays exactly where it was (150), matching active NAV exactly —
       // no gap for the next accrual to misread as yield. Pre-fix, this would have dropped to
@@ -1904,7 +2091,10 @@ describe('PoolLogic', () => {
       // accrual recognizes zero additional net yield. Pre-fix, the 50 phantom gap left by the
       // claim's over-decrement would have minted Bob ~50 more FUSD from nothing.
       expect(await pool.pendingReward(await bob.getAddress())).to.equal(0n);
-      await expect(pool.connect(bob).harvest()).to.be.revertedWithCustomError(pool, 'NothingToHarvest');
+      await expect(pool.connect(bob).harvest()).to.be.revertedWithCustomError(
+        pool,
+        'NothingToHarvest',
+      );
       expect(await fusd.balanceOf(await bob.getAddress())).to.equal(bobFusdBeforeClaim);
     });
   });
@@ -1920,7 +2110,8 @@ describe('PoolLogic', () => {
   // UtilityLibraries.test.ts for a precise, isolated proof of the underlying arithmetic.
   describe('FNA-17: reserved withdrawal value must not be accrued as pool yield', () => {
     it('a price increase on a finalized-but-unclaimed reservation is not credited as yield, and the withdrawer receives exactly their fixed pre-bump amount', async () => {
-      const { pool, fusd, asset, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, asset, poolManager, manager, user, user2 } =
+        await loadFixture(deployPoolFixture);
       const alice = user;
       const bob = user2;
       const assetAddr = await asset.getAddress();
@@ -1933,13 +2124,18 @@ describe('PoolLogic', () => {
       await fusd.mint(await bob.getAddress(), ethers.parseUnits('100000', 18));
       await asset.mint(await pool.getAddress(), ethers.parseUnits('200000', 18));
 
-      const tx = await pool.connect(alice).requestCashWithdraw(
-        ethers.parseUnits('100000', 18),
-        assetAddr,
-      );
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('100000', 18), assetAddr);
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const requestId = event!.args.requestId;
 
@@ -2011,13 +2207,18 @@ describe('PoolLogic', () => {
       await pool.connect(bob).stake(ethers.parseUnits('10000', 18));
 
       await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('40000', 18));
-      const tx = await pool.connect(alice).requestCashWithdraw(
-        ethers.parseUnits('40000', 18),
-        assetAddr,
-      );
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('40000', 18), assetAddr);
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const requestId = event!.args.requestId;
 
@@ -2074,7 +2275,10 @@ describe('PoolLogic', () => {
       // The opposite of CertiK's demonstrated pre-fix outcome (there: Tom captured >80%, Bob was
       // diluted below 20%): Bob, the sole incumbent while the yield was earned, gets essentially
       // all of it, and Tom — who staked only after it was already recognized — gets none.
-      expect(bobHarvested).to.be.approximately(ethers.parseUnits('5000', 18), ethers.parseUnits('1', 18));
+      expect(bobHarvested).to.be.approximately(
+        ethers.parseUnits('5000', 18),
+        ethers.parseUnits('1', 18),
+      );
       expect(tomHarvested).to.equal(0n);
     });
 
@@ -2104,13 +2308,18 @@ describe('PoolLogic', () => {
       await pool.connect(bob).stake(ethers.parseUnits('10000', 18));
 
       await mintAndApproveFUSD(fusd, pool, alice, ethers.parseUnits('40000', 18));
-      const tx = await pool.connect(alice).requestCashWithdraw(
-        ethers.parseUnits('40000', 18),
-        assetAddr,
-      );
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('40000', 18), assetAddr);
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const requestId = event!.args.requestId;
 
@@ -2191,13 +2400,18 @@ describe('PoolLogic', () => {
       // of the transferred amount, exactly like a real deflationary token's supply mechanics would.
       await feeToken.mint(await pool.getAddress(), ethers.parseUnits('2000', 18));
 
-      const tx = await pool.connect(alice).requestCashWithdraw(
-        ethers.parseUnits('1000', 18),
-        feeTokenAddr,
-      );
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('1000', 18), feeTokenAddr);
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const requestId = event!.args.requestId;
 
@@ -2239,7 +2453,7 @@ describe('PoolLogic', () => {
       expect(await fx.pool.reservedAssetBalance(feeTokenAddr)).to.equal(0n);
     });
 
-    it("the claimed event reports what the claimant actually received, not the reserved nominal amount", async () => {
+    it('the claimed event reports what the claimant actually received, not the reserved nominal amount', async () => {
       const fx = await loadFixture(deployPoolFixture);
       const { alice, feeTokenAddr, requestId } = await setUpFeeTokenWithdraw(fx, 500, 0);
 
@@ -2248,14 +2462,18 @@ describe('PoolLogic', () => {
         .withArgs(requestId, await alice.getAddress(), feeTokenAddr, ethers.parseUnits('950', 18));
     });
 
-    it('sender-fee/burn-on-transfer: a coexisting second reservation in the same escrow is unaffected by another claim\'s extra burn, and remains fully claimable', async () => {
+    it("sender-fee/burn-on-transfer: a coexisting second reservation in the same escrow is unaffected by another claim's extra burn, and remains fully claimable", async () => {
       const fx = await loadFixture(deployPoolFixture);
       const { fusd, manager, user2, withdrawalEscrow } = fx;
       const bob = user2;
       const escrowAddr = await withdrawalEscrow.getAddress();
 
-      const { alice, feeToken, feeTokenAddr, requestId: aliceRequestId } =
-        await setUpFeeTokenWithdraw(fx, 0, 1000); // 10% extra burn beyond the transferred amount
+      const {
+        alice,
+        feeToken,
+        feeTokenAddr,
+        requestId: aliceRequestId,
+      } = await setUpFeeTokenWithdraw(fx, 0, 1000); // 10% extra burn beyond the transferred amount
 
       // Bob independently requests and finalizes a second, coexisting reservation in the same
       // fee token *before* Alice claims — both reservations' full nominal amounts (1000 + 500)
@@ -2264,13 +2482,18 @@ describe('PoolLogic', () => {
       // reservation now — see FNA-03).
       await mintAndApproveFUSD(fusd, fx.pool, bob, ethers.parseUnits('500', 18));
       await feeToken.mint(await fx.pool.getAddress(), ethers.parseUnits('500', 18));
-      const bobTx = await fx.pool.connect(bob).requestCashWithdraw(
-        ethers.parseUnits('500', 18),
-        feeTokenAddr,
-      );
+      const bobTx = await fx.pool
+        .connect(bob)
+        .requestCashWithdraw(ethers.parseUnits('500', 18), feeTokenAddr);
       const bobReceipt = await bobTx.wait();
       const bobEvent = bobReceipt!.logs
-        .map((log: any) => { try { return fx.pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return fx.pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       const bobRequestId = bobEvent!.args.requestId;
       await fx.pool.connect(manager).finalizeCashWithdraw(bobRequestId);
@@ -2316,7 +2539,7 @@ describe('PoolLogic', () => {
   // could exit at a more favorable (less haircut) ratio than fair, leaving insufficient real
   // backing for a staker's legitimate, already-earned-but-unharvested reward.
   describe('FNA-34: immediate withdrawal haircut must include unharvested reward claims', () => {
-    it('haircuts an immediate withdrawal for the pool\'s unharvested reward claim, not just its fUSD supply', async () => {
+    it("haircuts an immediate withdrawal for the pool's unharvested reward claim, not just its fUSD supply", async () => {
       const { pool, fusd, asset, poolManager, manager, user, user2 } =
         await loadFixture(deployPoolFixture);
       const alice = user;
@@ -2370,7 +2593,7 @@ describe('PoolLogic', () => {
   // until claim — so it stayed counted as an "active" claim in totalSupply() in the meantime,
   // double-counting the same value and understating every other still-active claim's fair share.
   describe('FNA-38: finalized-but-unclaimed reservations must not inflate other claims (totalClaims)', () => {
-    it("gives an immediate withdrawer their true fair share instead of over-haircutting against a coexisting finalized reservation", async () => {
+    it('gives an immediate withdrawer their true fair share instead of over-haircutting against a coexisting finalized reservation', async () => {
       const { pool, fusd, asset, manager, user, user2 } = await loadFixture(deployPoolFixture);
       const alice = user;
       const bob = user2;
@@ -2386,10 +2609,18 @@ describe('PoolLogic', () => {
       // Alice queues and finalizes her full 50 — fully collateralized, so no haircut: she's
       // reserved (escrowed) exactly 50, physically leaving the pool's own balance.
       await pool.connect(manager).setImmediateWithdrawEnabled(false);
-      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('50', 18), await asset.getAddress());
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('50', 18), await asset.getAddress());
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       await pool.connect(manager).finalizeCashWithdraw(event!.args.requestId);
       const aliceStored = await pool.cashWithdrawRequests(event!.args.requestId);
@@ -2424,7 +2655,8 @@ describe('PoolLogic', () => {
   // agree, or the manager is minted a fee on value no longer backing anything.
   describe('CertiK FNA-59: management fee base excludes finalized-but-unclaimed FUSD', () => {
     it('calculateAvailableManagerFee excludes finalizedUnclaimedFusd from the management-fee base', async () => {
-      const { pool, fusd, asset, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, asset, poolManager, manager, user } =
+        await loadFixture(deployPoolFixture);
       const alice = user;
       const poolAddr = await pool.getAddress();
 
@@ -2441,10 +2673,18 @@ describe('PoolLogic', () => {
       // Alice queues and finalizes 40 of her 100 FUSD — fully collateralized, so no haircut.
       // fusd.totalSupply() stays 100 (finalize never burns), but finalizedUnclaimedFusd is now 40.
       await pool.connect(manager).setImmediateWithdrawEnabled(false);
-      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('40', 18), await asset.getAddress());
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('40', 18), await asset.getAddress());
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
       await pool.connect(manager).finalizeCashWithdraw(event!.args.requestId);
       expect(await pool.finalizedUnclaimedFusd()).to.equal(ethers.parseUnits('40', 18));
@@ -2467,7 +2707,8 @@ describe('PoolLogic', () => {
 
       // Old (buggy) formula would instead have charged the fee on the full 100 FUSD, including
       // Alice's already-departed 40 — strictly larger than the fixed result.
-      const oldBuggyFee = (ethers.parseUnits('100', 18) * 1000n * dt) / 10_000n / (365n * 24n * 60n * 60n);
+      const oldBuggyFee =
+        (ethers.parseUnits('100', 18) * 1000n * dt) / 10_000n / (365n * 24n * 60n * 60n);
       expect(fee).to.be.lt(oldBuggyFee);
     });
   });
@@ -2491,10 +2732,18 @@ describe('PoolLogic', () => {
 
       expect(await pool.pendingCashWithdrawCount(assetAddr)).to.equal(0n);
 
-      const tx = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('40', 18), assetAddr);
+      const tx = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('40', 18), assetAddr);
       const receipt = await tx.wait();
       const event = receipt!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
 
       expect(await pool.pendingCashWithdrawCount(assetAddr)).to.equal(1n);
@@ -2517,10 +2766,18 @@ describe('PoolLogic', () => {
       await mintAndApproveFUSD(fusd, pool, bob, ethers.parseUnits('20', 18));
       await pool.connect(manager).setImmediateWithdrawEnabled(false);
 
-      const tx1 = await pool.connect(alice).requestCashWithdraw(ethers.parseUnits('20', 18), assetAddr);
+      const tx1 = await pool
+        .connect(alice)
+        .requestCashWithdraw(ethers.parseUnits('20', 18), assetAddr);
       const receipt1 = await tx1.wait();
       const event1 = receipt1!.logs
-        .map((log: any) => { try { return pool.interface.parseLog(log); } catch { return null; } })
+        .map((log: any) => {
+          try {
+            return pool.interface.parseLog(log);
+          } catch {
+            return null;
+          }
+        })
         .find((e: any) => e && e.name === 'CashWithdrawRequested');
 
       await pool.connect(bob).requestCashWithdraw(ethers.parseUnits('20', 18), assetAddr);
@@ -2545,7 +2802,8 @@ describe('PoolLogic', () => {
   // with the pool's own effective supply, an economically irrational cost once supply is healthy.
   describe('FNA-06: unbounded compoundedRewardIndex', () => {
     it('neutralizes the dust-supply donation/harvest attack: no panic, index frozen, value preserved via accountedAssets', async () => {
-      const { pool, fusd, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, poolManager, manager, user, user2 } =
+        await loadFixture(deployPoolFixture);
       const attacker = user;
       const victim = user2;
 
@@ -2590,7 +2848,7 @@ describe('PoolLogic', () => {
       await expect(poolManager.callMintManagerFee(await pool.getAddress())).to.not.be.reverted;
     });
 
-    it('caps a single checkpoint\'s applied yield to at most effectiveSupply*1e6 once real supply exists', async () => {
+    it("caps a single checkpoint's applied yield to at most effectiveSupply*1e6 once real supply exists", async () => {
       const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
 
       // Real, meaningful supply right at the compounding floor.
@@ -2763,7 +3021,17 @@ describe('PoolLogic', () => {
       await poolManager.setAssetGuard(vaultAddr, await vaultGuard.getAddress());
       await poolManager.setSupportedAsset(vaultAddr, true, ethers.parseUnits('1', 18), 18);
 
-      return { ...fixture, pool, poolAddr, poolManager, user, vaultGuard, underlying, vault, vaultAddr };
+      return {
+        ...fixture,
+        pool,
+        poolAddr,
+        poolManager,
+        user,
+        vaultGuard,
+        underlying,
+        vault,
+        vaultAddr,
+      };
     }
 
     // FNA-25: MorphoVaultV2AssetGuard no longer caps by maxRedeem(pool) — canonical Morpho Vault
@@ -3032,7 +3300,17 @@ describe('PoolLogic', () => {
         await poolManager.setAssetGuard(spokeAddr, await spokeGuard.getAddress());
         await poolManager.setSupportedAsset(spokeAddr, true, ethers.parseUnits('1', 18), 18);
 
-        return { pool, poolAddr, poolManager, manager, spoke, spokeAddr, spokeGuard, giverAddr, takerAddr };
+        return {
+          pool,
+          poolAddr,
+          poolManager,
+          manager,
+          spoke,
+          spokeAddr,
+          spokeGuard,
+          giverAddr,
+          takerAddr,
+        };
       }
 
       it('allows the pool to approve the Giver PositionManager, unblocking its very first supply', async () => {
@@ -3079,9 +3357,10 @@ describe('PoolLogic', () => {
     it('checkpointFeesForDeposit reverts unless called by TokenLogic (fusd)', async () => {
       const { pool, user } = await loadFixture(deployPoolFixture);
 
-      await expect(
-        pool.connect(user).checkpointFeesForDeposit(),
-      ).to.be.revertedWithCustomError(pool, 'OnlyTokenLogic');
+      await expect(pool.connect(user).checkpointFeesForDeposit()).to.be.revertedWithCustomError(
+        pool,
+        'OnlyTokenLogic',
+      );
     });
 
     it('checkpointFeesForDeposit settles the management fee against the pre-call fUSD supply and resets the accrual clock', async () => {
@@ -3115,7 +3394,8 @@ describe('PoolLogic', () => {
       // read from the actual mined block rather than assumed, since intervening transactions
       // (the mint above) can each advance the chain's timestamp by a second or more.
       const mgrBalAfter = await fusd.balanceOf(managerAddr);
-      const expectedFee = (ethers.parseUnits('1000', 18) * 1000n * BigInt(dt)) / 10_000n / (365n * 24n * 60n * 60n);
+      const expectedFee =
+        (ethers.parseUnits('1000', 18) * 1000n * BigInt(dt)) / 10_000n / (365n * 24n * 60n * 60n);
       expect(mgrBalAfter - mgrBalBefore).to.equal(expectedFee);
 
       // The accrual clock is reset, so an immediate second checkpoint (dt ~= 0) mints nothing.
@@ -3130,7 +3410,8 @@ describe('PoolLogic', () => {
       // would charge the entire elapsed dt (here, 30 days + 1 day) against the post-increase
       // (large) supply — see the sibling 'without the fix' test below for that exact scenario,
       // reproduced against the same numbers for direct comparison.
-      const { pool, fusd, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, poolManager, manager, user, user2 } =
+        await loadFixture(deployPoolFixture);
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n); // 10%/year mgmt, 0% perf
       await poolManager.setTotalFundValue(ampleFundValue);
 
@@ -3170,7 +3451,8 @@ describe('PoolLogic', () => {
       // Same inputs as the previous test, but skipping the pre-deposit checkpoint entirely —
       // reproduces exactly what TokenLogic._deposit() did before FNA-22, and what any other
       // future caller that forgets to checkpoint before minting fUSD would still do.
-      const { pool, fusd, poolManager, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, poolManager, manager, user, user2 } =
+        await loadFixture(deployPoolFixture);
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n);
       await poolManager.setTotalFundValue(ampleFundValue);
 
@@ -3283,7 +3565,7 @@ describe('PoolLogic', () => {
     // compoundedRewardIndex == 0, so this early return can never let a deposit's freshly minted
     // supply be retroactively taxed for a period before it existed (the actual FNA-22 bug). If this were
     // ever untrue, harvest() below would settle a checkpoint despite the guard, not revert.
-    it('proves checkpointFeesForDeposit\'s compoundedRewardIndex==0 no-op is safe: no lastFeeMintTime change here, and every other accrual path reverts outright in this same state', async () => {
+    it("proves checkpointFeesForDeposit's compoundedRewardIndex==0 no-op is safe: no lastFeeMintTime change here, and every other accrual path reverts outright in this same state", async () => {
       const { pool, fusd, poolManager } = await loadFixture(deployPoolFixture);
       const poolAddr = await pool.getAddress();
 

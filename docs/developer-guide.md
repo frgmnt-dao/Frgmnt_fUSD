@@ -2,10 +2,10 @@
 
 ## Prerequisites
 
-| Requirement | Version |
-|------------|---------|
-| Node.js | ≥ 18 |
-| npm / pnpm | Latest |
+| Requirement                  | Version                      |
+| ---------------------------- | ---------------------------- |
+| Node.js                      | ≥ 18                         |
+| npm / pnpm                   | Latest                       |
 | Hardhat shorthand (optional) | `npm i -g hardhat-shorthand` |
 
 ---
@@ -142,10 +142,10 @@ hh ignition verify chain-8453   # Base mainnet chain ID
 ### Depositing Collateral (Mint fUSD)
 
 ```typescript
-import { ethers } from "ethers";
+import { ethers } from 'ethers';
 
-const fusd = await ethers.getContractAt("TokenLogic", FUSD_ADDRESS);
-const usdc = await ethers.getContractAt("IERC20", USDC_ADDRESS);
+const fusd = await ethers.getContractAt('TokenLogic', FUSD_ADDRESS);
+const usdc = await ethers.getContractAt('IERC20', USDC_ADDRESS);
 
 // 1. Approve TokenLogic to spend USDC
 await usdc.approve(FUSD_ADDRESS, depositAmount);
@@ -154,29 +154,29 @@ await usdc.approve(FUSD_ADDRESS, depositAmount);
 await fusd.deposit(USDC_ADDRESS, depositAmount, userAddress);
 
 // With minimum output protection
-const minFusd = ethers.parseUnits("99", 18); // at least 99 fUSD
-await fusd["deposit(address,uint256,address,uint256)"](
-  USDC_ADDRESS,
-  depositAmount,
-  userAddress,
-  minFusd
+const minFusd = ethers.parseUnits('99', 18); // at least 99 fUSD
+await fusd['deposit(address,uint256,address,uint256)'](
+    USDC_ADDRESS,
+    depositAmount,
+    userAddress,
+    minFusd,
 );
 ```
 
 ### Staking fUSD (Receive sfUSD)
 
 ```typescript
-const pool = await ethers.getContractAt("PoolLogic", POOL_ADDRESS);
+const pool = await ethers.getContractAt('PoolLogic', POOL_ADDRESS);
 
 // Approve PoolLogic to spend fUSD
 await fusd.approve(POOL_ADDRESS, stakeAmount);
 
 // Stake
-await pool["stake(uint256)"](stakeAmount);
+await pool['stake(uint256)'](stakeAmount);
 
 // With minimum shares protection
-const minShares = ethers.parseUnits("98", 18);
-await pool["stake(uint256,uint256)"](stakeAmount, minShares);
+const minShares = ethers.parseUnits('98', 18);
+await pool['stake(uint256,uint256)'](stakeAmount, minShares);
 ```
 
 ### Harvesting Rewards
@@ -187,7 +187,7 @@ await pool.harvest();
 
 // Check pending before claiming
 const pending = await pool.pendingReward(userAddress);
-console.log("Pending fUSD:", ethers.formatUnits(pending, 18));
+console.log('Pending fUSD:', ethers.formatUnits(pending, 18));
 ```
 
 ### Unstaking sfUSD
@@ -242,6 +242,7 @@ governance.setContractGuard(
      it was corrected against the live registry (Governance.assetGuards(uint16) on Base,
      block 49894684). Verify against that table (or the registry directly) before adding a
      new asset type — do not assume this numbering carries over to a type not listed here. -->
+
 ```solidity
 // Asset types (see docs/deployments.md's Asset Guards table for the authoritative,
 // on-chain-verified mapping):
@@ -273,15 +274,15 @@ poolManagerLogic.changeAssets([asset], []);
 Vault transactions are executed via `PoolLogic.execTransaction()`. Only the manager or trader can call this.
 
 ```typescript
-const pool = await ethers.getContractAt("PoolLogic", POOL_ADDRESS);
+const pool = await ethers.getContractAt('PoolLogic', POOL_ADDRESS);
 const aavePool = new ethers.Interface(AAVE_ABI);
 
 // Supply USDC to Aave V3
-const calldata = aavePool.encodeFunctionData("supply", [
-  USDC_ADDRESS,
-  supplyAmount,
-  POOL_ADDRESS,   // onBehalfOf must be the vault
-  0               // referralCode
+const calldata = aavePool.encodeFunctionData('supply', [
+    USDC_ADDRESS,
+    supplyAmount,
+    POOL_ADDRESS, // onBehalfOf must be the vault
+    0, // referralCode
 ]);
 
 await pool.connect(manager).execTransaction(AAVE_V3_POOL_ADDRESS, calldata);
@@ -292,14 +293,14 @@ await pool.connect(manager).execTransaction(AAVE_V3_POOL_ADDRESS, calldata);
 ## Configuring Fees
 
 ```typescript
-const pml = await ethers.getContractAt("PoolManagerLogic", PML_ADDRESS);
+const pml = await ethers.getContractAt('PoolManagerLogic', PML_ADDRESS);
 
 // Decrease fees immediately (no delay required)
 await pml.connect(manager).setFeeNumerator(
-  performanceFeeNumerator,   // e.g., 2000 = 20%
-  managerFeeNumerator,       // e.g., 200 = 2% per year
-  entryFeeNumerator,         // e.g., 0
-  exitFeeNumerator           // e.g., 50 = 0.5%
+    performanceFeeNumerator, // e.g., 2000 = 20%
+    managerFeeNumerator, // e.g., 200 = 2% per year
+    entryFeeNumerator, // e.g., 0
+    exitFeeNumerator, // e.g., 50 = 0.5%
 );
 
 // Announce a fee increase (subject to delay)
@@ -316,30 +317,24 @@ All upgrades go through the Timelock. The general pattern:
 
 ```typescript
 // 1. Encode the upgrade call
-const pf = await ethers.getContractAt("ERC1967Proxy", PROXY_ADDRESS);
-const upgradeCalldata = pf.interface.encodeFunctionData("upgradeToAndCall", [
-  NEW_IMPLEMENTATION_ADDRESS,
-  "0x"
+const pf = await ethers.getContractAt('ERC1967Proxy', PROXY_ADDRESS);
+const upgradeCalldata = pf.interface.encodeFunctionData('upgradeToAndCall', [
+    NEW_IMPLEMENTATION_ADDRESS,
+    '0x',
 ]);
 
 // 2. Schedule via Timelock (multisig proposes)
 await timelock.connect(proposer).schedule(
-  PROXY_ADDRESS,
-  0,
-  upgradeCalldata,
-  ethers.ZeroHash,   // predecessor
-  salt,
-  MIN_DELAY          // ≥ 48 hours
+    PROXY_ADDRESS,
+    0,
+    upgradeCalldata,
+    ethers.ZeroHash, // predecessor
+    salt,
+    MIN_DELAY, // ≥ 48 hours
 );
 
 // 3. Execute after delay
-await timelock.connect(executor).execute(
-  PROXY_ADDRESS,
-  0,
-  upgradeCalldata,
-  ethers.ZeroHash,
-  salt
-);
+await timelock.connect(executor).execute(PROXY_ADDRESS, 0, upgradeCalldata, ethers.ZeroHash, salt);
 ```
 
 ---
@@ -348,24 +343,24 @@ await timelock.connect(executor).execute(
 
 Tests are in `test/` and use Hardhat + ethers.js + Chai. Each test file corresponds to a contract or major feature.
 
-| Test File | Coverage |
-|-----------|---------|
-| `PoolLogic.test.ts` / `PoolLogicAutoCompounding.test.ts` | Staking, unstaking, yield accrual, withdrawals, autocompounding migration |
-| `TokenLogic.test.ts` | Deposit, cooldown, minting, deposit cap |
-| `PoolManagerLogic.test.ts` | Asset management, fees, access control, guard dispatch |
-| `Governance.test.ts` | Guard registration |
-| `FundCalculationLibrary` coverage — see `UtilityLibraries.test.ts` | NAV/fee/withdrawal-sizing arithmetic |
-| `AaveLendingPoolAssetGuard.test.ts` / `AaveLendingPoolGuardV3.test.ts` | Aave V3 valuation/withdrawal and transaction validation |
-| `AaveV4Spoke{AssetGuard,ContractGuard,Manager}.test.ts` | Aave V4 Spoke integration (supply-only, no debt) |
-| `AaveV4Tokenization{AssetGuard,ContractGuard,Manager}.test.ts` | Aave V4 Tokenization (ERC-4626 vault) integration |
-| `MorphoBlueContractGuard.test.ts` / `MorphoBlueLendingPoolAssetGuard.test.ts` / `MorphoBlueManager.test.ts` | Morpho Blue transaction validation, valuation/withdrawal, market allowlist |
-| `MorphoVaultV2{AssetGuard,ContractGuard,Manager}.test.ts` | Morpho Vault V2 (ERC-4626 vault) integration |
-| `UniswapV3AssetGuard.test.ts` / `UniswapV3AssetGuardAdmin.test.ts` / `UniswapV3NonfungiblePositionGuard.test.ts` / `UniswapV3RouterGuard.test.ts` / `UniswapV3PriceLibrary.test.ts` | Uniswap V3 LP position valuation/withdrawal, position tracking, swap validation, TWAP pricing |
-| `MerklRewardClaimGuard.test.ts` | Cross-integration Merkl reward claims |
-| `AssetHandler.test.ts` / `USDPriceAggregator.test.ts` / `UniV3TWAPAggregator.test.ts` | Oracle price lookups and aggregator implementations |
-| `SlippageAccumulator.test.ts` / `SlippageAccumulatorUser.test.ts` | Slippage tracking |
-| `FrgmntUserActions.test.ts` | Bundled deposit-and-stake / unstake-and-withdraw user flows |
-| `Timelock.test.ts` / `Managed.test.ts` / `ClosedAssetGuard.test.ts` / `NftTrackerStorage.test.ts` | Governance delay mechanism, role management, shared base-guard behavior, NFT position tracking |
+| Test File                                                                                                                                                                           | Coverage                                                                                       |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `PoolLogic.test.ts` / `PoolLogicAutoCompounding.test.ts`                                                                                                                            | Staking, unstaking, yield accrual, withdrawals, autocompounding migration                      |
+| `TokenLogic.test.ts`                                                                                                                                                                | Deposit, cooldown, minting, deposit cap                                                        |
+| `PoolManagerLogic.test.ts`                                                                                                                                                          | Asset management, fees, access control, guard dispatch                                         |
+| `Governance.test.ts`                                                                                                                                                                | Guard registration                                                                             |
+| `FundCalculationLibrary` coverage — see `UtilityLibraries.test.ts`                                                                                                                  | NAV/fee/withdrawal-sizing arithmetic                                                           |
+| `AaveLendingPoolAssetGuard.test.ts` / `AaveLendingPoolGuardV3.test.ts`                                                                                                              | Aave V3 valuation/withdrawal and transaction validation                                        |
+| `AaveV4Spoke{AssetGuard,ContractGuard,Manager}.test.ts`                                                                                                                             | Aave V4 Spoke integration (supply-only, no debt)                                               |
+| `AaveV4Tokenization{AssetGuard,ContractGuard,Manager}.test.ts`                                                                                                                      | Aave V4 Tokenization (ERC-4626 vault) integration                                              |
+| `MorphoBlueContractGuard.test.ts` / `MorphoBlueLendingPoolAssetGuard.test.ts` / `MorphoBlueManager.test.ts`                                                                         | Morpho Blue transaction validation, valuation/withdrawal, market allowlist                     |
+| `MorphoVaultV2{AssetGuard,ContractGuard,Manager}.test.ts`                                                                                                                           | Morpho Vault V2 (ERC-4626 vault) integration                                                   |
+| `UniswapV3AssetGuard.test.ts` / `UniswapV3AssetGuardAdmin.test.ts` / `UniswapV3NonfungiblePositionGuard.test.ts` / `UniswapV3RouterGuard.test.ts` / `UniswapV3PriceLibrary.test.ts` | Uniswap V3 LP position valuation/withdrawal, position tracking, swap validation, TWAP pricing  |
+| `MerklRewardClaimGuard.test.ts`                                                                                                                                                     | Cross-integration Merkl reward claims                                                          |
+| `AssetHandler.test.ts` / `USDPriceAggregator.test.ts` / `UniV3TWAPAggregator.test.ts`                                                                                               | Oracle price lookups and aggregator implementations                                            |
+| `SlippageAccumulator.test.ts` / `SlippageAccumulatorUser.test.ts`                                                                                                                   | Slippage tracking                                                                              |
+| `FrgmntUserActions.test.ts`                                                                                                                                                         | Bundled deposit-and-stake / unstake-and-withdraw user flows                                    |
+| `Timelock.test.ts` / `Managed.test.ts` / `ClosedAssetGuard.test.ts` / `NftTrackerStorage.test.ts`                                                                                   | Governance delay mechanism, role management, shared base-guard behavior, NFT position tracking |
 
 ---
 
@@ -373,16 +368,16 @@ Tests are in `test/` and use Hardhat + ethers.js + Chai. Each test file correspo
 
 `PoolLogic`/`PoolManagerLogic` use Solidity custom errors; `TokenLogic` and most guards still use `require()` revert strings — check the specific contract's source for its exact identifier before writing tests against it.
 
-| Error / Message | Contract | Cause |
-|-------|----------|-------|
-| `CooldownActive()` | PoolLogic | User's fUSD cooldown has not elapsed |
-| `NonTransferable()` | PoolLogic | Attempting to transfer sfUSD |
-| `AssetNotSupported()` | PoolManagerLogic / PoolLogic | Asset not in pool's supported list |
-| `"TokenLogic: deposit cap exceeded"` | TokenLogic | `protocolFusdOutstanding + fusdAmount > maxDepositFusdSupply` |
-| `"TokenLogic: below minimum deposit"` | TokenLogic | Deposit USD value below `minDepositUSD` |
-| `NoAssetGuard()` | PoolManagerLogic | Guard not registered/resolvable for this asset type (CertiK FNA-52 — fails closed, does not skip the check) |
-| `"Frgmnt: health factor too low"` | AaveLendingPoolGuardV3 / MorphoBlueContractGuard | Post-tx health factor at or below 1.01 |
-| `"Frgmnt: stale price"` (per-feed message set at registration) | AssetHandler | Chainlink price feed exceeds `chainlinkTimeouts[asset]` |
-| `"Frgmnt: sequencer down"` | AssetHandler | L2 sequencer is offline or still in the grace period |
-| `IncompleteNAV()` | PoolLogic (`checkpointFeesForDeposit`) | Active NAV reading is incomplete — a guard's transient valuation failure blocks a new deposit |
-| `WithdrawAmountTooSmall()` | PoolLogic | Requested withdrawal rounds to a fair share of 0 after the CertiK FNA-05 claims haircut |
+| Error / Message                                                | Contract                                         | Cause                                                                                                       |
+| -------------------------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `CooldownActive()`                                             | PoolLogic                                        | User's fUSD cooldown has not elapsed                                                                        |
+| `NonTransferable()`                                            | PoolLogic                                        | Attempting to transfer sfUSD                                                                                |
+| `AssetNotSupported()`                                          | PoolManagerLogic / PoolLogic                     | Asset not in pool's supported list                                                                          |
+| `"TokenLogic: deposit cap exceeded"`                           | TokenLogic                                       | `protocolFusdOutstanding + fusdAmount > maxDepositFusdSupply`                                               |
+| `"TokenLogic: below minimum deposit"`                          | TokenLogic                                       | Deposit USD value below `minDepositUSD`                                                                     |
+| `NoAssetGuard()`                                               | PoolManagerLogic                                 | Guard not registered/resolvable for this asset type (CertiK FNA-52 — fails closed, does not skip the check) |
+| `"Frgmnt: health factor too low"`                              | AaveLendingPoolGuardV3 / MorphoBlueContractGuard | Post-tx health factor at or below 1.01                                                                      |
+| `"Frgmnt: stale price"` (per-feed message set at registration) | AssetHandler                                     | Chainlink price feed exceeds `chainlinkTimeouts[asset]`                                                     |
+| `"Frgmnt: sequencer down"`                                     | AssetHandler                                     | L2 sequencer is offline or still in the grace period                                                        |
+| `IncompleteNAV()`                                              | PoolLogic (`checkpointFeesForDeposit`)           | Active NAV reading is incomplete — a guard's transient valuation failure blocks a new deposit               |
+| `WithdrawAmountTooSmall()`                                     | PoolLogic                                        | Requested withdrawal rounds to a fair share of 0 after the CertiK FNA-05 claims haircut                     |

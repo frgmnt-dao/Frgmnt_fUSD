@@ -11,7 +11,7 @@ AaveV4SpokeAssetGuard values and unwinds a pool's **supply-only** position acros
 
 Unlike Aave V3 ([AaveLendingPoolAssetGuard](AaveLendingPoolAssetGuard.md)) or Morpho Blue ([MorphoBlueLendingPoolAssetGuard](MorphoBlueLendingPoolAssetGuard.md)), the pool's Aave V4 Spoke position carries **no debt by design** — [AaveV4SpokeContractGuard](AaveV4SpokeContractGuard.md) simply doesn't expose any borrowing selectors. That removes the flashloan-based unwind path and health-factor risk entirely: withdrawal is a plain per-reserve `withdraw()` + `transfer()`.
 
-A single Spoke can host reserves with *different* underlying tokens under one registered asset, so this guard cannot rely on `PoolLogic`'s single-`withdrawAsset` balance-delta tracking the way [MorphoVaultV2AssetGuard](MorphoVaultV2AssetGuard.md) does. Instead each reserve's withdrawal includes its own direct `transfer(to, amount)`, and the guard reports `withdrawAsset = address(0)` to tell `PoolLogic` funds have already been delivered.
+A single Spoke can host reserves with _different_ underlying tokens under one registered asset, so this guard cannot rely on `PoolLogic`'s single-`withdrawAsset` balance-delta tracking the way [MorphoVaultV2AssetGuard](MorphoVaultV2AssetGuard.md) does. Instead each reserve's withdrawal includes its own direct `transfer(to, amount)`, and the guard reports `withdrawAsset = address(0)` to tell `PoolLogic` funds have already been delivered.
 
 ---
 
@@ -27,12 +27,12 @@ A single Spoke can host reserves with *different* underlying tokens under one re
 
 ## Guard Markers Implemented
 
-| Interface | Meaning |
-|-----------|---------|
-| `IAddAssetCheckGuard` | `PoolManagerLogic._addAsset()` must call `addAssetCheck()` before registering a Spoke |
-| `IPreValuedAssetGuard` | `getBalance()` already returns a fully priced USD-18 figure; `getUnitPrice()` reverts unconditionally — this "asset" (the Spoke address) is a non-transferable pseudo-position with no per-unit price (CertiK FNA-45/56) |
-| `IIncompleteValuationGuard` | `isValuationComplete()` lets `PoolManagerLogic.totalFundValueWithCompleteness()` tell a genuinely-empty reserve apart from one that's temporarily unpriceable |
-| `IWithdrawableBalanceGuard` | `getWithdrawableBalance()` is the liquidity-capped counterpart to `getBalance()`, used to size *immediate* withdrawals (CertiK FNA-07) |
+| Interface                   | Meaning                                                                                                                                                                                                                  |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `IAddAssetCheckGuard`       | `PoolManagerLogic._addAsset()` must call `addAssetCheck()` before registering a Spoke                                                                                                                                    |
+| `IPreValuedAssetGuard`      | `getBalance()` already returns a fully priced USD-18 figure; `getUnitPrice()` reverts unconditionally — this "asset" (the Spoke address) is a non-transferable pseudo-position with no per-unit price (CertiK FNA-45/56) |
+| `IIncompleteValuationGuard` | `isValuationComplete()` lets `PoolManagerLogic.totalFundValueWithCompleteness()` tell a genuinely-empty reserve apart from one that's temporarily unpriceable                                                            |
+| `IWithdrawableBalanceGuard` | `getWithdrawableBalance()` is the liquidity-capped counterpart to `getBalance()`, used to size _immediate_ withdrawals (CertiK FNA-07)                                                                                   |
 
 ---
 
@@ -54,7 +54,7 @@ function getWithdrawableBalance(address pool, address spoke) external view retur
 
 Same aggregation as `getBalance()`, but each reserve's contribution is capped at `min(suppliedAssets, IHubBase.getAssetLiquidity(assetId))` — what the reserve could actually deliver right now. A per-call `HubLiquidityLedger` dedupes Hub liquidity across reserves that happen to share the same `(hub, assetId)` pair, so two reserves can't each independently claim the same underlying liquidity within one call (CertiK FNA-07 follow-up).
 
-> **Known residual gap** (documented, not fixed): the ledger only dedupes *within this guard's own* multi-reserve loop. A pool that also holds an [AaveV4TokenizationAssetGuard](AaveV4TokenizationAssetGuard.md) vault drawing from the *same* `(hub, assetId)` is not covered — closing that fully needs a pool-level, cross-guard liquidity ledger shared for the duration of one withdrawal transaction, a materially larger change deliberately left as a tracked follow-up.
+> **Known residual gap** (documented, not fixed): the ledger only dedupes _within this guard's own_ multi-reserve loop. A pool that also holds an [AaveV4TokenizationAssetGuard](AaveV4TokenizationAssetGuard.md) vault drawing from the _same_ `(hub, assetId)` is not covered — closing that fully needs a pool-level, cross-guard liquidity ledger shared for the duration of one withdrawal transaction, a materially larger change deliberately left as a tracked follow-up.
 
 ### `withdrawProcessing`
 
@@ -79,17 +79,17 @@ Recognizes exactly one selector on the Spoke itself — `ISpoke.setUserPositionM
 
 ### `removeAssetCheck` / `removeTokenCheck`
 
-`removeAssetCheck` allows removing the Spoke once every tracked reserve's raw `getUserSuppliedAssets` is within a small dust tolerance (100 raw units — deliberately in raw units, not USD, since this check avoids price/decimals lookups to stay revert-safe). `removeTokenCheck` blocks removing a *different* supported asset from the pool while it's still the underlying of a non-dust tracked reserve (CertiK FNA-21).
+`removeAssetCheck` allows removing the Spoke once every tracked reserve's raw `getUserSuppliedAssets` is within a small dust tolerance (100 raw units — deliberately in raw units, not USD, since this check avoids price/decimals lookups to stay revert-safe). `removeTokenCheck` blocks removing a _different_ supported asset from the pool while it's still the underlying of a non-dust tracked reserve (CertiK FNA-21).
 
 ---
 
 ## Configuration
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
-| `aaveV4SpokeManager` | constructor (immutable) | The [AaveV4SpokeManager](AaveV4SpokeManager.md) allowlist this guard consults for tracked/active reserves |
+| Parameter              | Set at                  | Description                                                                                                                                                                                                                                  |
+| ---------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aaveV4SpokeManager`   | constructor (immutable) | The [AaveV4SpokeManager](AaveV4SpokeManager.md) allowlist this guard consults for tracked/active reserves                                                                                                                                    |
 | `takerPositionManager` | constructor (immutable) | Aave V4's singleton TakerPositionManager — still needed for the manager-directed manual withdrawal path in [AaveV4SpokeContractGuard](AaveV4SpokeContractGuard.md), even though automatic `withdrawProcessing()` no longer routes through it |
-| `giverPositionManager` | constructor (immutable) | Aave V4's singleton GiverPositionManager — the only other address a pool may ever approve via `setUserPositionManager` |
+| `giverPositionManager` | constructor (immutable) | Aave V4's singleton GiverPositionManager — the only other address a pool may ever approve via `setUserPositionManager`                                                                                                                       |
 
 No owner-settable parameters — this guard is a stateless, immutable-configured contract; all mutable allowlisting lives in `AaveV4SpokeManager`.
 
@@ -97,10 +97,10 @@ No owner-settable parameters — this guard is a stateless, immutable-configured
 
 ## Access Control
 
-| Role | Permissions |
-|------|-------------|
-| `PoolLogic` (caller) | The only accepted `msg.sender` for `txGuard()` — enforced via `IPoolManagerLogic(poolManagerLogic).poolLogic()` |
-| Protocol owner (via `AaveV4SpokeManager`) | Whitelists which `(pool, spoke, reserveId)` combinations may hold *new* exposure |
+| Role                                      | Permissions                                                                                                     |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `PoolLogic` (caller)                      | The only accepted `msg.sender` for `txGuard()` — enforced via `IPoolManagerLogic(poolManagerLogic).poolLogic()` |
+| Protocol owner (via `AaveV4SpokeManager`) | Whitelists which `(pool, spoke, reserveId)` combinations may hold _new_ exposure                                |
 
 ---
 

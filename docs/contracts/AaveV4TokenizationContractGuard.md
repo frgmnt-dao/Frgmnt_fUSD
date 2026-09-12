@@ -23,12 +23,12 @@ function txGuard(address poolManagerLogic, address to, bytes calldata data) exte
 
 Every operation requires the target vault to be a registered supported asset of the pool. Beyond that, the `AaveV4TokenizationManager` allowlist check differs by **direction** (CertiK FNA-51):
 
-| Selector | Handler | Vault allowlist gate | Receiver/owner restriction |
-|----------|---------|-----------------------|------------------------------|
-| `deposit(assets, receiver)` | `_handleDeposit` | **active** (`isValidPoolVault`) | `receiver == pool` |
-| `mint(shares, receiver)` | `_handleMint` | **active** | `receiver == pool` |
+| Selector                            | Handler           | Vault allowlist gate               | Receiver/owner restriction             |
+| ----------------------------------- | ----------------- | ---------------------------------- | -------------------------------------- |
+| `deposit(assets, receiver)`         | `_handleDeposit`  | **active** (`isValidPoolVault`)    | `receiver == pool`                     |
+| `mint(shares, receiver)`            | `_handleMint`     | **active**                         | `receiver == pool`                     |
 | `withdraw(assets, receiver, owner)` | `_handleWithdraw` | **tracked** (`isTrackedPoolVault`) | `receiver == pool` and `owner == pool` |
-| `redeem(shares, receiver, owner)` | `_handleRedeem` | **tracked** | `receiver == pool` and `owner == pool` |
+| `redeem(shares, receiver, owner)`   | `_handleRedeem`   | **tracked**                        | `receiver == pool` and `owner == pool` |
 
 Withdraw/redeem deliberately gate on the tracked, not active, set — so a delisted vault can still be unwound manually, matching `AaveV4TokenizationAssetGuard`'s own automatic path (which never consults either allowlist at all). The receiver/owner restrictions ensure minted shares or withdrawn assets can never be redirected to an address other than the pool itself.
 
@@ -36,8 +36,8 @@ Withdraw/redeem deliberately gate on the tracked, not active, set — so a delis
 
 ## Configuration
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
+| Parameter                   | Set at                  | Description                                                                                             |
+| --------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------- |
 | `aaveV4TokenizationManager` | constructor (immutable) | The [AaveV4TokenizationManager](AaveV4TokenizationManager.md) allowlist consulted for every vault check |
 
 Stateless, immutable-configured contract — no owner-settable parameters.

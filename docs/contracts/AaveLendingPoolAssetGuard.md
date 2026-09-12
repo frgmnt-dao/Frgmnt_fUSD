@@ -13,13 +13,13 @@ Manages valuation and withdrawal of Aave V3 leveraged positions held by the pool
 
 ## Guard Markers Implemented
 
-| Interface | Meaning |
-|-----------|---------|
-| `ISlippageCheckingGuard` | Marks this guard as one whose swaps should be checked against `SlippageAccumulator` |
-| `IPreValuedAssetGuard` | `getBalance()` returns a fully priced USD-18 figure; `getUnitPrice()` reverts unconditionally (CertiK FNA-45 follow-up) — the registered "asset" has no meaningful per-unit price |
-| `IUnwindCostAwareGuard` | `getNetRealizableBalance()` substitutes for `getBalance()` when sizing NAV for the withdrawal solvency haircut (CertiK FNA-35) |
-| `IDeficitReportingGuard` | `getDeficit()` reports an underwater position's shortfall for aggregate NAV subtraction (CertiK FNA-54) |
-| `IWithdrawableBalanceGuard` | `getWithdrawableBalance()` caps the immediate-withdrawal figure by real Aave reserve liquidity (CertiK FNA-07 follow-up) |
+| Interface                   | Meaning                                                                                                                                                                           |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ISlippageCheckingGuard`    | Marks this guard as one whose swaps should be checked against `SlippageAccumulator`                                                                                               |
+| `IPreValuedAssetGuard`      | `getBalance()` returns a fully priced USD-18 figure; `getUnitPrice()` reverts unconditionally (CertiK FNA-45 follow-up) — the registered "asset" has no meaningful per-unit price |
+| `IUnwindCostAwareGuard`     | `getNetRealizableBalance()` substitutes for `getBalance()` when sizing NAV for the withdrawal solvency haircut (CertiK FNA-35)                                                    |
+| `IDeficitReportingGuard`    | `getDeficit()` reports an underwater position's shortfall for aggregate NAV subtraction (CertiK FNA-54)                                                                           |
+| `IWithdrawableBalanceGuard` | `getWithdrawableBalance()` caps the immediate-withdrawal figure by real Aave reserve liquidity (CertiK FNA-07 follow-up)                                                          |
 
 ---
 
@@ -31,7 +31,7 @@ Manages valuation and withdrawal of Aave V3 leveraged positions held by the pool
 function getBalance(address pool, address) public view override returns (uint256 balance)
 ```
 
-`max(totalCollateralUsd - totalDebtUsd, 0)` — sums aToken and variable-debt-token balances across every supported reserve via `_getBalance()`. Only ever variable debt; stable-rate borrowing is not modeled as a *gross-balance* contributor (see `_collectDebtPlans()`, which does still discover both).
+`max(totalCollateralUsd - totalDebtUsd, 0)` — sums aToken and variable-debt-token balances across every supported reserve via `_getBalance()`. Only ever variable debt; stable-rate borrowing is not modeled as a _gross-balance_ contributor (see `_collectDebtPlans()`, which does still discover both).
 
 ### `getDeficit` (CertiK FNA-54)
 
@@ -39,7 +39,7 @@ function getBalance(address pool, address) public view override returns (uint256
 function getDeficit(address pool, address) external view override returns (uint256 deficit)
 ```
 
-`max(totalDebtUsd - totalCollateralUsd, 0)` — the mirror image of `getBalance()`. An underwater position (debt exceeds collateral) is a real liability, not a zero-value asset: `getBalance()` must still clamp at 0 (every NAV consumer sums non-negative `uint256`s), but that silently *omits* the shortfall instead of *subtracting* it from the rest of the pool's positive balances — including the borrowed tokens this exact position produced, which the pool still holds as a separately-counted balance. Aggregate NAV/withdrawal-sizing consumers sum this alongside the gross positive total and subtract it (floored at 0).
+`max(totalDebtUsd - totalCollateralUsd, 0)` — the mirror image of `getBalance()`. An underwater position (debt exceeds collateral) is a real liability, not a zero-value asset: `getBalance()` must still clamp at 0 (every NAV consumer sums non-negative `uint256`s), but that silently _omits_ the shortfall instead of _subtracting_ it from the rest of the pool's positive balances — including the borrowed tokens this exact position produced, which the pool still holds as a separately-counted balance. Aggregate NAV/withdrawal-sizing consumers sum this alongside the gross positive total and subtract it (floored at 0).
 
 ### `getNetRealizableBalance` / `_netRealizableBalance` (CertiK FNA-35, FNA-35 follow-up)
 
@@ -49,7 +49,7 @@ function getNetRealizableBalance(address pool, address) external view override r
 
 `getBalance()`'s gross collateral-minus-debt figure minus a conservative estimate of what a full unwind actually costs: the settlement↔debt swaps' oracle-based slippage tolerance, the configured flash-amount buffer, and Aave's own flashloan premium — none of which the gross figure reflects. Without debt, gross equity is already net-realizable.
 
-> **FNA-35 follow-up**: previously only deducted the flashloan premium, leaving the route fee, oracle slippage tolerance, and `flashAmountBufferBps` (all baked into `flashAmount`'s own sizing) unaccounted for — small for a same-asset debt position, but silently ignoring the *entire* swap cost for a cross-asset one, exactly the gap CertiK's PoC demonstrated. Fixed by pricing the *whole* flashloan outlay (`flashAmount + premium`, in settlement-token terms) and comparing it against `totalDebtInUsd` directly, rather than isolating each cost component separately (fragile against future changes to `_estimateFlashAmountInSettlement`'s sizing).
+> **FNA-35 follow-up**: previously only deducted the flashloan premium, leaving the route fee, oracle slippage tolerance, and `flashAmountBufferBps` (all baked into `flashAmount`'s own sizing) unaccounted for — small for a same-asset debt position, but silently ignoring the _entire_ swap cost for a cross-asset one, exactly the gap CertiK's PoC demonstrated. Fixed by pricing the _whole_ flashloan outlay (`flashAmount + premium`, in settlement-token terms) and comparing it against `totalDebtInUsd` directly, rather than isolating each cost component separately (fragile against future changes to `_estimateFlashAmountInSettlement`'s sizing).
 
 ### `getWithdrawableBalance` / `_maxSafePortion` (CertiK FNA-07 follow-up)
 
@@ -57,9 +57,9 @@ function getNetRealizableBalance(address pool, address) external view override r
 function getWithdrawableBalance(address pool, address) external view override returns (uint256 balanceUsd18)
 ```
 
-`netRealizableBalance * maxSafePortion / 1e18`. `_maxSafePortion()` computes the single largest portion (≤100%) safe to apply *uniformly* across every reserve's collateral withdrawal and debt repayment — not a per-reserve independent cap, since debt repayment and collateral withdrawal are scaled by the *same* `withdrawPortion` to keep health factor unchanged across a partial exit, and the flashloan is funded entirely by swapping withdrawn collateral back to the settlement token. A per-reserve cap risks under-funding the flashloan for a worse, harder-to-diagnose revert than the plain liquidity revert this fix avoids. Computed from `IERC20Extended(underlying).balanceOf(aToken)` — confirmed against Aave V3's real source (`AToken.burn()`) that a reserve's aToken pays a withdrawal out of its own raw underlying balance, so this is exactly what a `withdraw()` call can pay out right now.
+`netRealizableBalance * maxSafePortion / 1e18`. `_maxSafePortion()` computes the single largest portion (≤100%) safe to apply _uniformly_ across every reserve's collateral withdrawal and debt repayment — not a per-reserve independent cap, since debt repayment and collateral withdrawal are scaled by the _same_ `withdrawPortion` to keep health factor unchanged across a partial exit, and the flashloan is funded entirely by swapping withdrawn collateral back to the settlement token. A per-reserve cap risks under-funding the flashloan for a worse, harder-to-diagnose revert than the plain liquidity revert this fix avoids. Computed from `IERC20Extended(underlying).balanceOf(aToken)` — confirmed against Aave V3's real source (`AToken.burn()`) that a reserve's aToken pays a withdrawal out of its own raw underlying balance, so this is exactly what a `withdraw()` call can pay out right now.
 
-> **Documented residual risk (not fixed)**: since the ceiling is shared across every reserve and an aToken is a plain transferable ERC-20, a third party could permissionlessly donate a tiny aToken balance for a reserve the pool never actually chose to supply to, timed while that reserve's real Aave market is near-fully-utilized — zeroing this guard's contribution to *immediate* withdrawals until cleared. A raw-balance dust tolerance would not meaningfully close this (the binding constraint is a liquidity *ratio*, not an absolute balance). Left as accepted residual risk: low severity (only the immediate withdrawal path is affected; queued withdrawal never consults this at all), and the manager can clear donated dust directly via `execTransaction` at any time.
+> **Documented residual risk (not fixed)**: since the ceiling is shared across every reserve and an aToken is a plain transferable ERC-20, a third party could permissionlessly donate a tiny aToken balance for a reserve the pool never actually chose to supply to, timed while that reserve's real Aave market is near-fully-utilized — zeroing this guard's contribution to _immediate_ withdrawals until cleared. A raw-balance dust tolerance would not meaningfully close this (the binding constraint is a liquidity _ratio_, not an absolute balance). Left as accepted residual risk: low severity (only the immediate withdrawal path is affected; queued withdrawal never consults this at all), and the manager can clear donated dust directly via `execTransaction` at any time.
 
 ### `getUnitPrice` (CertiK FNA-45 follow-up)
 
@@ -77,9 +77,9 @@ function withdrawProcessing(address pool, address, uint256 withdrawPortion, addr
 
 1. Clamps `withdrawPortion` down to `_maxSafePortion()` if smaller (CertiK FNA-07 follow-up — recomputed here rather than trusting the caller, so this stays correct against live on-chain state even if `getWithdrawableBalance()`'s NAV-time snapshot has since moved).
 2. No debt: encodes direct `withdraw()` + `transfer()` calls proportional to the (clamped) portion, returned inline.
-3. With debt: verifies the collateral being freed at this portion actually covers the full flashloan repayment obligation (**CertiK FNA-36 follow-up**, below) — if not, returns an empty transaction set (fails closed for this asset only) rather than planning an unwind that would revert the *entire* pro-rata withdrawal, including every other healthy asset's share. Otherwise encodes a single flashloan-initiation transaction; the actual debt repayment and collateral withdrawal happen inside the flashloan callback.
+3. With debt: verifies the collateral being freed at this portion actually covers the full flashloan repayment obligation (**CertiK FNA-36 follow-up**, below) — if not, returns an empty transaction set (fails closed for this asset only) rather than planning an unwind that would revert the _entire_ pro-rata withdrawal, including every other healthy asset's share. Otherwise encodes a single flashloan-initiation transaction; the actual debt repayment and collateral withdrawal happen inside the flashloan callback.
 
-> **CertiK FNA-36 follow-up**: `getWithdrawableBalance()`/`_netRealizableBalance()` only gate whether the *100%*-position net-realizable value is zero — a thin-but-positive 100% position doesn't guarantee this specific `effectivePortion` (already possibly below the caller's request via the FNA-07 cap) is itself solvent once rounding, route fee/slippage, and the flash buffer all apply to *this portion's* own repay amounts. The added check compares collateral value at this portion directly against the total flashloan outlay.
+> **CertiK FNA-36 follow-up**: `getWithdrawableBalance()`/`_netRealizableBalance()` only gate whether the _100%_-position net-realizable value is zero — a thin-but-positive 100% position doesn't guarantee this specific `effectivePortion` (already possibly below the caller's request via the FNA-07 cap) is itself solvent once rounding, route fee/slippage, and the flash buffer all apply to _this portion's_ own repay amounts. The added check compares collateral value at this portion directly against the total flashloan outlay.
 
 ### `flashloanProcessing`
 
@@ -95,15 +95,15 @@ Both revert/return-false unless the position is fully empty: `removeAssetCheck` 
 
 ### Administrative Functions (Owner Only)
 
-| Function | Description |
-|----------|-------------|
-| `setOwner(address)` | Transfers guard ownership |
-| `setDefaultSlippageBps(uint256)` | Slippage tolerance in basis points, capped at 2,000 (default: 70 bps = 0.70%) |
-| `setFlashAmountBufferBps(uint256)` | Flash loan size buffer, capped at 500 bps (default: 40 bps) |
-| `setUniV3Fee(address, address, uint24)` | Single-hop fallback fee tier for a token pair |
-| `setUniV3PathExactIn(address, address, bytes)` | Multi-hop swap path (exact input, collateral→settlement) |
+| Function                                        | Description                                                                             |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `setOwner(address)`                             | Transfers guard ownership                                                               |
+| `setDefaultSlippageBps(uint256)`                | Slippage tolerance in basis points, capped at 2,000 (default: 70 bps = 0.70%)           |
+| `setFlashAmountBufferBps(uint256)`              | Flash loan size buffer, capped at 500 bps (default: 40 bps)                             |
+| `setUniV3Fee(address, address, uint24)`         | Single-hop fallback fee tier for a token pair                                           |
+| `setUniV3PathExactIn(address, address, bytes)`  | Multi-hop swap path (exact input, collateral→settlement)                                |
 | `setUniV3PathExactOut(address, address, bytes)` | Multi-hop swap path (exact output, settlement→debt, encoded in Uniswap's reversed form) |
-| `setRequiresApproveReset(address, bool)` | Marks a token as needing `approve(0)` before a non-zero approval (USDT-like tokens) |
+| `setRequiresApproveReset(address, bool)`        | Marks a token as needing `approve(0)` before a non-zero approval (USDT-like tokens)     |
 
 ### Route-Derived Swap Fees (CertiK FNA-29)
 
@@ -117,21 +117,21 @@ Both revert/return-false unless the position is fully empty: `removeAssetCheck` 
 
 ## Configuration Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `defaultSlippageBps` | 70 | Slippage tolerance for Uniswap swaps during unwind (basis points) |
-| `flashAmountBufferBps` | 40 | Extra buffer on flash loan size to cover swap costs |
-| `preferredSettlementAsset` | constructor (immutable) | Fallback settlement token when repay plans span multiple distinct debt assets |
-| `requiresApproveReset` | per-token, owner-settable | Whether a token needs `approve(0)` before a non-zero approval (USDT-like tokens) |
+| Parameter                  | Default                   | Description                                                                      |
+| -------------------------- | ------------------------- | -------------------------------------------------------------------------------- |
+| `defaultSlippageBps`       | 70                        | Slippage tolerance for Uniswap swaps during unwind (basis points)                |
+| `flashAmountBufferBps`     | 40                        | Extra buffer on flash loan size to cover swap costs                              |
+| `preferredSettlementAsset` | constructor (immutable)   | Fallback settlement token when repay plans span multiple distinct debt assets    |
+| `requiresApproveReset`     | per-token, owner-settable | Whether a token needs `approve(0)` before a non-zero approval (USDT-like tokens) |
 
 ---
 
 ## Access Control
 
-| Role | Permissions |
-|------|------------|
-| Owner | Configuration: slippage, swap paths/fees, buffers, approve-reset flags |
-| PoolLogic | Calls `withdrawProcessing()` and `flashloanProcessing()` |
+| Role      | Permissions                                                            |
+| --------- | ---------------------------------------------------------------------- |
+| Owner     | Configuration: slippage, swap paths/fees, buffers, approve-reset flags |
+| PoolLogic | Calls `withdrawProcessing()` and `flashloanProcessing()`               |
 
 ---
 

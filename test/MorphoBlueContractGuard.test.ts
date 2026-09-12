@@ -688,7 +688,13 @@ describe('MorphoBlueContractGuard', () => {
     await ctx.morphoManager.setAllMarketsValid(ctx.poolLogicAddr, false);
     const borrower = '0x3000000000000000000000000000000000000003';
     const calls = [
-      ctx.morphoIface.encodeFunctionData('supply', [ctx.marketParams, 100n, 0n, ctx.poolLogicAddr, '0x']),
+      ctx.morphoIface.encodeFunctionData('supply', [
+        ctx.marketParams,
+        100n,
+        0n,
+        ctx.poolLogicAddr,
+        '0x',
+      ]),
       ctx.morphoIface.encodeFunctionData('borrow', [
         ctx.marketParams,
         300n,
@@ -707,7 +713,9 @@ describe('MorphoBlueContractGuard', () => {
 
     for (const data of calls) {
       await expect(
-        ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, data),
+        ctx.guard
+          .connect(ctx.poolLogicSigner)
+          .txGuard(ctx.poolManagerAddr, ctx.morphoAddress, data),
       ).to.be.revertedWith('MorphoGuard: no valid marketParams');
     }
   });
@@ -726,7 +734,13 @@ describe('MorphoBlueContractGuard', () => {
         ctx.poolLogicAddr,
         ctx.poolLogicAddr,
       ]),
-      ctx.morphoIface.encodeFunctionData('repay', [ctx.marketParams, 400n, 5n, ctx.poolLogicAddr, '0x']),
+      ctx.morphoIface.encodeFunctionData('repay', [
+        ctx.marketParams,
+        400n,
+        5n,
+        ctx.poolLogicAddr,
+        '0x',
+      ]),
       ctx.morphoIface.encodeFunctionData('withdrawCollateral', [
         ctx.marketParams,
         600n,
@@ -737,7 +751,9 @@ describe('MorphoBlueContractGuard', () => {
 
     for (const data of calls) {
       await expect(
-        ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, data),
+        ctx.guard
+          .connect(ctx.poolLogicSigner)
+          .txGuard(ctx.poolManagerAddr, ctx.morphoAddress, data),
       ).to.be.revertedWith('MorphoGuard: market not tracked');
     }
   });
@@ -757,7 +773,9 @@ describe('MorphoBlueContractGuard', () => {
       ctx.poolLogicAddr,
     ]);
     await expect(
-      ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, withdrawData),
+      ctx.guard
+        .connect(ctx.poolLogicSigner)
+        .txGuard(ctx.poolManagerAddr, ctx.morphoAddress, withdrawData),
     ).to.emit(ctx.guard, 'MorphoWithdrawEvt');
 
     const repayData = ctx.morphoIface.encodeFunctionData('repay', [
@@ -768,7 +786,9 @@ describe('MorphoBlueContractGuard', () => {
       '0x',
     ]);
     await expect(
-      ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, repayData),
+      ctx.guard
+        .connect(ctx.poolLogicSigner)
+        .txGuard(ctx.poolManagerAddr, ctx.morphoAddress, repayData),
     ).to.emit(ctx.guard, 'MorphoRepayEvt');
 
     const withdrawCollData = ctx.morphoIface.encodeFunctionData('withdrawCollateral', [
@@ -792,7 +812,9 @@ describe('MorphoBlueContractGuard', () => {
       '0x',
     ]);
     await expect(
-      ctx.guard.connect(ctx.poolLogicSigner).txGuard(ctx.poolManagerAddr, ctx.morphoAddress, supplyData),
+      ctx.guard
+        .connect(ctx.poolLogicSigner)
+        .txGuard(ctx.poolManagerAddr, ctx.morphoAddress, supplyData),
     ).to.be.revertedWith('MorphoGuard: no valid marketParams');
   });
 

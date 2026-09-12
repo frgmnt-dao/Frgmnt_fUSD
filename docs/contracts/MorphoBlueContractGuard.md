@@ -30,21 +30,21 @@ Gating exit-side operations on the active allowlist too — as a single shared c
 function txGuard(address poolManagerLogic, address to, bytes calldata data) public override returns (uint16 txType, bool isPublic)
 ```
 
-| Selector | Handler | Market allowlist gate | Additional checks |
-|----------|---------|-------------------------|---------------------|
-| `supply` | `_handleSupply` | **active** | `loanToken` supported; `onBehalf == pool` |
-| `withdraw` | `_handleWithdraw` | **tracked** | `loanToken` supported; `onBehalf == pool`; `receiver == pool` |
-| `borrow` | `_handleBorrow` | **active** | `loanToken` **and** `collateralToken` supported (CertiK FNA-31, below); `onBehalf == pool`; `receiver == pool` |
-| `repay` | `_handleRepay` | **tracked** | `loanToken` supported; `onBehalf == pool` |
-| `supplyCollateral` | `_handleSupplyCollateral` | **active** | `collateralToken` supported; `onBehalf == pool` |
-| `withdrawCollateral` | `_handleWithdrawCollateral` | **tracked** | `collateralToken` supported; `onBehalf == pool`; `receiver == pool` |
-| `liquidate` | `_handleLiquidate` | **active** | `loanToken` **and** `collateralToken` supported; `borrower != address(0)` |
+| Selector             | Handler                     | Market allowlist gate | Additional checks                                                                                              |
+| -------------------- | --------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `supply`             | `_handleSupply`             | **active**            | `loanToken` supported; `onBehalf == pool`                                                                      |
+| `withdraw`           | `_handleWithdraw`           | **tracked**           | `loanToken` supported; `onBehalf == pool`; `receiver == pool`                                                  |
+| `borrow`             | `_handleBorrow`             | **active**            | `loanToken` **and** `collateralToken` supported (CertiK FNA-31, below); `onBehalf == pool`; `receiver == pool` |
+| `repay`              | `_handleRepay`              | **tracked**           | `loanToken` supported; `onBehalf == pool`                                                                      |
+| `supplyCollateral`   | `_handleSupplyCollateral`   | **active**            | `collateralToken` supported; `onBehalf == pool`                                                                |
+| `withdrawCollateral` | `_handleWithdrawCollateral` | **tracked**           | `collateralToken` supported; `onBehalf == pool`; `receiver == pool`                                            |
+| `liquidate`          | `_handleLiquidate`          | **active**            | `loanToken` **and** `collateralToken` supported; `borrower != address(0)`                                      |
 
 Any other selector falls through to `TransactionType.NotUsed`.
 
 ### `_handleBorrow`'s collateral check (CertiK FNA-31)
 
-Every other collateral-touching handler here already required `collateralToken` to be pool-supported; `borrow` was the one omission. Morpho Blue's `supplyCollateral()` is permissionlessly callable by *anyone* for an arbitrary `onBehalf`, entirely outside this guard (no `execTransaction` involved) — so an approved market's collateral leg can carry real balance without ever having passed a pool-level support check. Without this fix, a manager/trader could still borrow a supported `loanToken` against unsupported collateral: `MorphoCollectLib` omits unsupported collateral from NAV and withdrawal planning while continuing to account for the (supported) debt, and `afterTxGuard`'s health-factor check reads the collateral's price from the protocol-wide `AssetHandler` registry regardless of pool-level support — so neither existing safeguard would have caught it.
+Every other collateral-touching handler here already required `collateralToken` to be pool-supported; `borrow` was the one omission. Morpho Blue's `supplyCollateral()` is permissionlessly callable by _anyone_ for an arbitrary `onBehalf`, entirely outside this guard (no `execTransaction` involved) — so an approved market's collateral leg can carry real balance without ever having passed a pool-level support check. Without this fix, a manager/trader could still borrow a supported `loanToken` against unsupported collateral: `MorphoCollectLib` omits unsupported collateral from NAV and withdrawal planning while continuing to account for the (supported) debt, and `afterTxGuard`'s health-factor check reads the collateral's price from the protocol-wide `AssetHandler` registry regardless of pool-level support — so neither existing safeguard would have caught it.
 
 ### `afterTxGuard`
 
@@ -58,8 +58,8 @@ Only checked for `withdrawCollateral` and `borrow` — the two operations that c
 
 ## Configuration
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
+| Parameter       | Set at                  | Description                                                                              |
+| --------------- | ----------------------- | ---------------------------------------------------------------------------------------- |
 | `morphoManager` | constructor (immutable) | The [MorphoBlueManager](MorphoBlueManager.md) allowlist consulted for every market check |
 
 Stateless, immutable-configured contract — no owner-settable parameters.

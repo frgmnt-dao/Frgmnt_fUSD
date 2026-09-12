@@ -29,17 +29,17 @@ function txGuard(address poolManagerLogic, address /* to */, bytes calldata data
 
 Dispatches on the calldata's selector to one of three handlers. Every operation requires the target Spoke to be a registered supported asset of the pool. Beyond that, the reserveId check differs by **direction** (CertiK FNA-10):
 
-| Selector | Handler | reserveId gate | `onBehalfOf`/`spender` |
-|----------|---------|-----------------|--------------------------|
-| `IGiverPositionManager.supplyOnBehalfOf` | `_handleSupply` | **active** allowlist (`isValidPoolReserve`) — new exposure only into governance-sanctioned reserves | `onBehalfOf == pool` |
-| `ITakerPositionManager.approveWithdraw` | `_handleApproveWithdraw` | **tracked** set (`isTrackedPoolReserve`) — includes delisted-but-not-yet-empty reserves | `spender == pool` (the critical check above) |
-| `ITakerPositionManager.withdrawOnBehalfOf` | `_handleWithdraw` | **tracked** set | `onBehalfOf == pool` |
+| Selector                                   | Handler                  | reserveId gate                                                                                      | `onBehalfOf`/`spender`                       |
+| ------------------------------------------ | ------------------------ | --------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `IGiverPositionManager.supplyOnBehalfOf`   | `_handleSupply`          | **active** allowlist (`isValidPoolReserve`) — new exposure only into governance-sanctioned reserves | `onBehalfOf == pool`                         |
+| `ITakerPositionManager.approveWithdraw`    | `_handleApproveWithdraw` | **tracked** set (`isTrackedPoolReserve`) — includes delisted-but-not-yet-empty reserves             | `spender == pool` (the critical check above) |
+| `ITakerPositionManager.withdrawOnBehalfOf` | `_handleWithdraw`        | **tracked** set                                                                                     | `onBehalfOf == pool`                         |
 
-Withdraw-side operations deliberately gate on the *tracked*, not active, set — so a reserve the protocol owner has since delisted can still be unwound through this manual path, matching `AaveV4SpokeAssetGuard`'s own automatic `withdrawProcessing()` (which already iterates the tracked set).
+Withdraw-side operations deliberately gate on the _tracked_, not active, set — so a reserve the protocol owner has since delisted can still be unwound through this manual path, matching `AaveV4SpokeAssetGuard`'s own automatic `withdrawProcessing()` (which already iterates the tracked set).
 
 ### `_requireSupportedUnderlying` (CertiK FNA-44)
 
-Neither the Spoke-level `isSupportedAsset` check nor the reserveId allowlist ever resolves the reserve's actual underlying ERC-20 — Aave V4 addresses a market as `(spoke, reserveId)`, not by the underlying's own address. This resolves the underlying via the same trusted `getReserve(uint256)` raw-staticcall pattern [AaveV4SpokeAssetGuard](AaveV4SpokeAssetGuard.md) uses, and requires it to be a supported pool asset — **reverting** (not failing open) on an unresolvable reserve, since this is a fund-moving transaction gate, not a passive valuation read. The withdraw-side check deliberately does *not* relax for a delisted underlying the way tracked-vs-active does for the reserve itself: withdrawing into an unsupported idle balance is strictly worse than leaving the position parked in the still-valued Spoke.
+Neither the Spoke-level `isSupportedAsset` check nor the reserveId allowlist ever resolves the reserve's actual underlying ERC-20 — Aave V4 addresses a market as `(spoke, reserveId)`, not by the underlying's own address. This resolves the underlying via the same trusted `getReserve(uint256)` raw-staticcall pattern [AaveV4SpokeAssetGuard](AaveV4SpokeAssetGuard.md) uses, and requires it to be a supported pool asset — **reverting** (not failing open) on an unresolvable reserve, since this is a fund-moving transaction gate, not a passive valuation read. The withdraw-side check deliberately does _not_ relax for a delisted underlying the way tracked-vs-active does for the reserve itself: withdrawing into an unsupported idle balance is strictly worse than leaving the position parked in the still-valued Spoke.
 
 ### `_requireActiveReserve` / `_requireTrackedReserve`
 
@@ -55,8 +55,8 @@ Shared validation helpers: both require the Spoke to be `isSupportedAsset`, both
 
 ## Configuration
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
+| Parameter            | Set at                  | Description                                                                                   |
+| -------------------- | ----------------------- | --------------------------------------------------------------------------------------------- |
 | `aaveV4SpokeManager` | constructor (immutable) | The [AaveV4SpokeManager](AaveV4SpokeManager.md) allowlist consulted for every reserveId check |
 
 Stateless, immutable-configured contract — no owner-settable parameters.

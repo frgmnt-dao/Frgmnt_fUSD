@@ -13,7 +13,7 @@ Protocol-owned allowlist of Aave V4 TokenizationSpoke instances each pool is per
 
 ## The Active/Tracked Split (CertiK FNA-51)
 
-`poolVaults`/`isValidPoolVault` (**the active allowlist**) only ever gates *new* manager-directed deposits — see [AaveV4TokenizationContractGuard](AaveV4TokenizationContractGuard.md)'s entry-side handlers and `AaveV4TokenizationAssetGuard.addAssetCheck`. It must never gate withdrawal/valuation — that path (`AaveV4TokenizationAssetGuard.getBalance`/`withdrawProcessing`, and the contract guard's exit-side handlers) instead reads `trackedPoolVaults`, a superset that also retains any vault the protocol owner has since delisted for as long as it may still hold pool shares. Revoking a vault from the active allowlist can therefore never trap a pool's existing position — `trackedPoolVaults` is untouched by `setPoolVaults()` and only ever shrinks via `pruneTrackedVault()` once the position is provably empty.
+`poolVaults`/`isValidPoolVault` (**the active allowlist**) only ever gates _new_ manager-directed deposits — see [AaveV4TokenizationContractGuard](AaveV4TokenizationContractGuard.md)'s entry-side handlers and `AaveV4TokenizationAssetGuard.addAssetCheck`. It must never gate withdrawal/valuation — that path (`AaveV4TokenizationAssetGuard.getBalance`/`withdrawProcessing`, and the contract guard's exit-side handlers) instead reads `trackedPoolVaults`, a superset that also retains any vault the protocol owner has since delisted for as long as it may still hold pool shares. Revoking a vault from the active allowlist can therefore never trap a pool's existing position — `trackedPoolVaults` is untouched by `setPoolVaults()` and only ever shrinks via `pruneTrackedVault()` once the position is provably empty.
 
 ---
 
