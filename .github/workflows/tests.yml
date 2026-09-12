@@ -37,3 +37,6 @@ jobs:
 
             - name: Test with coverage
               run: npm run coverage
+
+            - name: Coverage threshold check
+              run: npx hardhat run scripts/check-coverage-threshold.ts
