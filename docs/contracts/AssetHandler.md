@@ -29,16 +29,16 @@ It includes L2 sequencer uptime validation (critical for Base) and per-asset sta
 
 ## State Variables
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `assetTypes` | `mapping(address → uint16)` | Asset type classification per token address |
-| `priceAggregators` | `mapping(address → address)` | Chainlink aggregator address per token |
-| `chainlinkTimeouts` | `mapping(address → uint256)` | Per-asset staleness threshold in seconds |
-| `sequencerUptimeFeed` | `address` | Chainlink L2 sequencer uptime feed address |
-| `eurUsdAggregator` | `address` | Optional Chainlink EUR/USD conversion feed |
-| `eurUsdTimeout` | `uint256` | Staleness threshold for the EUR/USD feed |
-| `eurUsdModeLocked` | `bool` | CertiK FNA-40: set permanently by the first call to `setEurUsdAggregator()` or `clearEurUsdAggregator()` — see below |
-| `SEQUENCER_GRACE_PERIOD` | `uint256` | Fixed 3600-second grace period after sequencer restart |
+| Variable                 | Type                         | Description                                                                                                          |
+| ------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `assetTypes`             | `mapping(address → uint16)`  | Asset type classification per token address                                                                          |
+| `priceAggregators`       | `mapping(address → address)` | Chainlink aggregator address per token                                                                               |
+| `chainlinkTimeouts`      | `mapping(address → uint256)` | Per-asset staleness threshold in seconds                                                                             |
+| `sequencerUptimeFeed`    | `address`                    | Chainlink L2 sequencer uptime feed address                                                                           |
+| `eurUsdAggregator`       | `address`                    | Optional Chainlink EUR/USD conversion feed                                                                           |
+| `eurUsdTimeout`          | `uint256`                    | Staleness threshold for the EUR/USD feed                                                                             |
+| `eurUsdModeLocked`       | `bool`                       | CertiK FNA-40: set permanently by the first call to `setEurUsdAggregator()` or `clearEurUsdAggregator()` — see below |
+| `SEQUENCER_GRACE_PERIOD` | `uint256`                    | Fixed 3600-second grace period after sequencer restart                                                               |
 
 ---
 
@@ -54,8 +54,8 @@ Initializes the contract and batch-registers the initial asset list.
 
 **Parameters:**
 
-| Name | Type | Description |
-|------|------|-------------|
+| Name     | Type            | Description                                       |
+| -------- | --------------- | ------------------------------------------------- |
 | `assets` | `AssetConfig[]` | Array of `{asset, assetType, aggregator}` structs |
 
 ---
@@ -79,6 +79,7 @@ assetEUR = assetUSD / EURUSD
 Example: `USDC/USD = 1.00`, `EUR/USD = 1.08`, so `USDC/EUR = 0.9259`.
 
 **Reverts if:**
+
 - L2 sequencer is down or within grace period
 - Price data is stale (age > `chainlinkTimeouts[asset]`)
 - EUR/USD data is stale when conversion is enabled
@@ -132,9 +133,9 @@ Updates the staleness window for a specific asset's price feed.
 
 **Parameters:**
 
-| Name | Type | Description |
-|------|------|-------------|
-| `asset` | `address` | Target asset address |
+| Name         | Type      | Description                                         |
+| ------------ | --------- | --------------------------------------------------- |
+| `asset`      | `address` | Target asset address                                |
 | `newTimeout` | `uint256` | New maximum acceptable age of price data in seconds |
 
 **Side effects:** Emits `SetChainlinkTimeout`.
@@ -163,9 +164,9 @@ Configures the Chainlink EUR/USD conversion feed. The feed must return USD per 1
 
 **Parameters:**
 
-| Name | Type | Description |
-|------|------|-------------|
-| `feed` | `address` | Chainlink EUR/USD aggregator address |
+| Name      | Type      | Description                                                   |
+| --------- | --------- | ------------------------------------------------------------- |
+| `feed`    | `address` | Chainlink EUR/USD aggregator address                          |
 | `timeout` | `uint256` | Maximum acceptable age of the EUR/USD feed's data, in seconds |
 
 **Side effects:** Sets `eurUsdAggregator`, `eurUsdTimeout`. Emits `SetEurUsdAggregator`. **Permanently sets `eurUsdModeLocked = true`** — see the one-shot lock note below.
@@ -192,23 +193,23 @@ Disables EUR conversion and returns raw USD-denominated asset prices again.
 
 ## Events
 
-| Event | Parameters | Emitted When |
-|-------|-----------|-------------|
-| `AddedAsset` | `asset, assetType, aggregator` | Asset registered |
-| `RemovedAsset` | `asset` | Asset removed |
-| `SetChainlinkTimeout` | `asset, timeout` | Staleness window updated |
-| `SetSequencerUptimeFeed` | `feed` | Sequencer feed updated |
-| `SetEurUsdAggregator` | `feed, timeout` | EUR/USD conversion feed configured |
-| `ClearedEurUsdAggregator` | `oldFeed` | EUR/USD conversion feed disabled |
+| Event                     | Parameters                     | Emitted When                       |
+| ------------------------- | ------------------------------ | ---------------------------------- |
+| `AddedAsset`              | `asset, assetType, aggregator` | Asset registered                   |
+| `RemovedAsset`            | `asset`                        | Asset removed                      |
+| `SetChainlinkTimeout`     | `asset, timeout`               | Staleness window updated           |
+| `SetSequencerUptimeFeed`  | `feed`                         | Sequencer feed updated             |
+| `SetEurUsdAggregator`     | `feed, timeout`                | EUR/USD conversion feed configured |
+| `ClearedEurUsdAggregator` | `oldFeed`                      | EUR/USD conversion feed disabled   |
 
 ---
 
 ## Access Control
 
-| Role | Permissions |
-|------|------------|
+| Role                             | Permissions                                                                               |
+| -------------------------------- | ----------------------------------------------------------------------------------------- |
 | Owner (Factory Owner / Timelock) | Register/remove assets, update timeouts, set sequencer feed, configure EUR/USD conversion |
-| Any caller | `getUSDPrice()` (view) |
+| Any caller                       | `getUSDPrice()` (view)                                                                    |
 
 ---
 
