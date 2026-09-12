@@ -65,6 +65,7 @@ Each protocol integration above pairs its Contract Guard with an **asset guard**
 TokenLogic is the entry point for users. It mints fUSD stablecoins in exchange for whitelisted collateral.
 
 **Responsibilities:**
+
 - Accept and validate collateral deposits
 - Query Chainlink prices via PoolManagerLogic/AssetHandler
 - Mint fUSD proportional to USD value of collateral
@@ -81,6 +82,7 @@ TokenLogic is the entry point for users. It mints fUSD stablecoins in exchange f
 PoolLogic manages the vault that holds all deposited collateral and deploys it for yield.
 
 **Responsibilities:**
+
 - Accept fUSD stakes and mint non-transferable sfUSD
 - Track yield via `rewardPerShare` accumulator
 - Distribute yield to sfUSD stakers
@@ -96,6 +98,7 @@ PoolLogic manages the vault that holds all deposited collateral and deploys it f
 PoolManagerLogic is the configuration contract for the vault.
 
 **Responsibilities:**
+
 - Maintain the list of supported and deposit-eligible assets
 - Track USD value of all vault positions via guards
 - Store and enforce fee parameters (performance, management, entry, exit)
@@ -111,15 +114,16 @@ The guard system is the protocol's execution firewall. No external transaction c
 
 **Guard types:**
 
-| Type | Purpose |
-|------|---------|
-| **Contract Guard** | Validates the calldata of a specific transaction to an external protocol contract |
-| **Asset Guard** | Manages valuation and withdrawal logic for a specific asset type |
-| **Manager** (Aave V4 Spoke/Tokenization, Morpho Blue, Morpho Vault V2) | Protocol-owner-controlled allowlist of which markets/reserves/vaults a pool may newly enter, separate from `PoolManagerLogic`'s own asset registry — split into an *active* set (gates new exposure) and a superset *tracked* set (gates valuation/withdrawal, retains delisted-but-not-empty positions so a revoked allowlist entry can never trap an existing position) |
+| Type                                                                   | Purpose                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Contract Guard**                                                     | Validates the calldata of a specific transaction to an external protocol contract                                                                                                                                                                                                                                                                                         |
+| **Asset Guard**                                                        | Manages valuation and withdrawal logic for a specific asset type                                                                                                                                                                                                                                                                                                          |
+| **Manager** (Aave V4 Spoke/Tokenization, Morpho Blue, Morpho Vault V2) | Protocol-owner-controlled allowlist of which markets/reserves/vaults a pool may newly enter, separate from `PoolManagerLogic`'s own asset registry — split into an _active_ set (gates new exposure) and a superset _tracked_ set (gates valuation/withdrawal, retains delisted-but-not-empty positions so a revoked allowlist entry can never trap an existing position) |
 
 An asset guard implementing `IDeficitReportingGuard` (leveraged Aave V3/Morpho Blue positions) can report a negative-equity position's shortfall separately from its clamped-at-zero `getBalance()`, so `PoolManagerLogic.totalFundValue()` actually subtracts an underwater position's deficit from the rest of the pool's value rather than merely omitting it.
 
 **Dispatch flow:**
+
 ```
 execTransaction(target, calldata)
      │
@@ -146,6 +150,7 @@ guard.afterTxGuard(pool, target, calldata)  ← post-execution check
 AssetHandler is the central oracle registry. It maps asset addresses to Chainlink aggregators and normalizes all prices to 18 decimals.
 
 **Safety features:**
+
 - Per-asset staleness timeouts
 - L2 sequencer uptime check (with 3600-second grace period)
 
@@ -205,6 +210,7 @@ The Timelock contract is the protocol's admin. It wraps OpenZeppelin's `Timelock
 All core contracts use OpenZeppelin's UUPS proxy pattern. Upgrade authority is granted exclusively to the Timelock, ensuring all upgrade proposals must survive the DAO delay before execution.
 
 **Upgrade path:**
+
 ```
 DAO multisig → propose → Timelock (48h delay) → execute upgrade
 ```

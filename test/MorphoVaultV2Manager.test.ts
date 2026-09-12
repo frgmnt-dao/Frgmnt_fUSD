@@ -35,9 +35,9 @@ describe('MorphoVaultV2Manager', () => {
     const { manager } = await deploy();
     const pool = ethers.Wallet.createRandom().address;
     const vault1 = ethers.Wallet.createRandom().address;
-    await expect(
-      manager.setPoolVaults(pool, [vault1, ethers.ZeroAddress]),
-    ).to.be.revertedWith('Invalid vault address');
+    await expect(manager.setPoolVaults(pool, [vault1, ethers.ZeroAddress])).to.be.revertedWith(
+      'Invalid vault address',
+    );
   });
 
   it('setPoolVaults sets vaults and emits event', async () => {

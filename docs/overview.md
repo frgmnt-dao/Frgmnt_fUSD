@@ -8,14 +8,14 @@ Frgmnt fUSD is a collateral-backed stablecoin protocol deployed on Base. Users d
 
 ## Design Goals
 
-| Goal | Approach |
-|------|----------|
-| **Full backing** | Every fUSD is minted against USD-equivalent collateral verified by Chainlink price feeds |
-| **Yield generation** | Pooled collateral is actively managed across lending and liquidity protocols |
-| **Access control** | Guard-gated execution prevents unauthorized transactions within the vault |
-| **Composability** | Modular guard system supports new DeFi protocol integrations without core contract changes |
-| **Governance safety** | DAO-controlled Timelock with 48-hour delay on all privileged operations |
-| **Capital protection** | Cooldown periods and slippage checks defend against MEV and flash-loan attacks |
+| Goal                   | Approach                                                                                   |
+| ---------------------- | ------------------------------------------------------------------------------------------ |
+| **Full backing**       | Every fUSD is minted against USD-equivalent collateral verified by Chainlink price feeds   |
+| **Yield generation**   | Pooled collateral is actively managed across lending and liquidity protocols               |
+| **Access control**     | Guard-gated execution prevents unauthorized transactions within the vault                  |
+| **Composability**      | Modular guard system supports new DeFi protocol integrations without core contract changes |
+| **Governance safety**  | DAO-controlled Timelock with 48-hour delay on all privileged operations                    |
+| **Capital protection** | Cooldown periods and slippage checks defend against MEV and flash-loan attacks             |
 
 ---
 
@@ -43,14 +43,14 @@ sfUSD is the yield-bearing staking receipt issued by the vault when users stake 
 
 ## Protocol Roles
 
-| Role | Responsibilities |
-|------|-----------------|
-| **User** | Deposit collateral to mint fUSD; stake fUSD for yield |
-| **Manager** | Configure vault assets, fees, withdrawal modes |
-| **Trader** | Execute guarded DeFi transactions on behalf of the vault |
-| **Factory Owner** | Set fee caps, register pools, update core contracts |
-| **DAO / Timelock** | Admin of TokenLogic and PoolManagerLogic upgrades |
-| **Emergency** | Pause and unpause the fUSD contract |
+| Role               | Responsibilities                                         |
+| ------------------ | -------------------------------------------------------- |
+| **User**           | Deposit collateral to mint fUSD; stake fUSD for yield    |
+| **Manager**        | Configure vault assets, fees, withdrawal modes           |
+| **Trader**         | Execute guarded DeFi transactions on behalf of the vault |
+| **Factory Owner**  | Set fee caps, register pools, update core contracts      |
+| **DAO / Timelock** | Admin of TokenLogic and PoolManagerLogic upgrades        |
+| **Emergency**      | Pause and unpause the fUSD contract                      |
 
 ---
 
@@ -58,15 +58,15 @@ sfUSD is the yield-bearing staking receipt issued by the vault when users stake 
 
 The protocol ships with guards for the following protocols:
 
-| Protocol | Integration Type |
-|----------|----------------|
-| **Aave V3** | Lending, borrowing, flash loans |
-| **Aave V4 Spoke** | Supply-only (no borrowing), Giver/Taker position managers |
-| **Aave V4 Tokenization** | ERC-4626 vault deposit/withdraw against Aave's Liquidity Hub, no debt |
-| **Morpho Blue** | Lending, borrowing, flash loans |
-| **Morpho Vault V2** | ERC-4626 vault deposit/withdraw across curator-selected adapters, no debt |
-| **Uniswap V3** | Swaps, LP positions |
-| **Merkl** | Reward claims for any Merkl-integrated protocol above |
+| Protocol                 | Integration Type                                                          |
+| ------------------------ | ------------------------------------------------------------------------- |
+| **Aave V3**              | Lending, borrowing, flash loans                                           |
+| **Aave V4 Spoke**        | Supply-only (no borrowing), Giver/Taker position managers                 |
+| **Aave V4 Tokenization** | ERC-4626 vault deposit/withdraw against Aave's Liquidity Hub, no debt     |
+| **Morpho Blue**          | Lending, borrowing, flash loans                                           |
+| **Morpho Vault V2**      | ERC-4626 vault deposit/withdraw across curator-selected adapters, no debt |
+| **Uniswap V3**           | Swaps, LP positions                                                       |
+| **Merkl**                | Reward claims for any Merkl-integrated protocol above                     |
 
 All interactions with these protocols are validated by purpose-built guard contracts before execution — see [docs/contracts/](contracts/) for the per-contract reference.
 

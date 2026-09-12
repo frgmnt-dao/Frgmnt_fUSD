@@ -116,8 +116,9 @@ describe('NftTrackerStorage', function () {
 
     // The exact same call now succeeds — no state was lost, since nothing could
     // ever have been written under the broken address.
-    await expect(broken.connect(guard).addData(guardedContract, nftType, pool.address, toBytes('x')))
-      .to.not.be.reverted;
+    await expect(
+      broken.connect(guard).addData(guardedContract, nftType, pool.address, toBytes('x')),
+    ).to.not.be.reverted;
   });
 
   it('reverts setPoolFactory with zero address', async function () {

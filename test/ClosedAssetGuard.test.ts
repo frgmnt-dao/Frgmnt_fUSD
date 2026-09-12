@@ -56,9 +56,9 @@ describe('ClosedAssetGuard', () => {
   it('removeAssetCheck reverts when balance is non-zero', async () => {
     const { guard, token, pool } = await deploy();
     await token.mint(pool.address, 1n);
-    await expect(
-      guard.removeAssetCheck(pool.address, await token.getAddress()),
-    ).to.be.revertedWith('ClosedAssetGuard: non-empty asset');
+    await expect(guard.removeAssetCheck(pool.address, await token.getAddress())).to.be.revertedWith(
+      'ClosedAssetGuard: non-empty asset',
+    );
   });
 
   it('removeTokenCheck always returns true', async () => {

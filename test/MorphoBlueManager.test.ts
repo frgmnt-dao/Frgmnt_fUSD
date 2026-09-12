@@ -49,9 +49,10 @@ describe('MorphoBlueManager', () => {
   it('setPoolMarkets reverts for non-owner', async () => {
     const { manager, other } = await deploy();
     const pool = ethers.Wallet.createRandom().address;
-    await expect(
-      manager.connect(other).setPoolMarkets(pool, []),
-    ).to.be.revertedWithCustomError(manager, 'OwnableUnauthorizedAccount');
+    await expect(manager.connect(other).setPoolMarkets(pool, [])).to.be.revertedWithCustomError(
+      manager,
+      'OwnableUnauthorizedAccount',
+    );
   });
 
   it('setPoolMarkets sets markets and emits event', async () => {

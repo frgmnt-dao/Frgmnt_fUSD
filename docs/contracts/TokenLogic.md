@@ -29,21 +29,21 @@ TokenLogic also enforces a **cooldown period** on cash withdrawals, preventing s
 
 ## State Variables
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `poolManagerLogic` | `IPoolManagerLogic` | Reference to PoolManagerLogic for asset validation and pricing |
-| `poolLogic` | `address` | Vault address receiving all deposited collateral |
-| `cooldownPeriod` | `uint256` | Global withdrawal cooldown duration in seconds |
-| `minDepositUSD` | `uint256` | Minimum deposit value denominated in fUSD units (18 decimals) |
-| `cooldownTimestamp` | `mapping(address → uint256)` | Time-weighted average mint timestamp per user |
-| `cooldownPrincipal` | `mapping(address → uint256)` | Protocol-minted fUSD subject to cooldown per user |
-| `cooldownExemptSender` | `mapping(address → bool)` | Addresses exempt from cooldown enforcement as senders |
-| `cooldownExemptRecipient` | `mapping(address → bool)` | Addresses exempt from cooldown enforcement as recipients |
-| `depositNonces` | `mapping(address → uint256)` | EIP-712 replay protection nonces per user |
-| `DEPOSIT_AUTH_TYPEHASH` | `bytes32` | EIP-712 type hash for deposit authorization |
-| `assetConfigs` | `mapping(address → AssetConfig)` | Per-collateral configuration (allowed, decimals, cap, totalDeposited) |
-| `maxDepositFusdSupply` | `uint256` | Global cap (18-decimal fUSD units) on `protocolFusdOutstanding` — enforced only for deposits, not for PoolLogic reward/fee mints |
-| `protocolFusdOutstanding` | `uint256` | Running total of fUSD minted via deposit (not reward/fee mints), checked against `maxDepositFusdSupply` |
+| Variable                  | Type                             | Description                                                                                                                      |
+| ------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `poolManagerLogic`        | `IPoolManagerLogic`              | Reference to PoolManagerLogic for asset validation and pricing                                                                   |
+| `poolLogic`               | `address`                        | Vault address receiving all deposited collateral                                                                                 |
+| `cooldownPeriod`          | `uint256`                        | Global withdrawal cooldown duration in seconds                                                                                   |
+| `minDepositUSD`           | `uint256`                        | Minimum deposit value denominated in fUSD units (18 decimals)                                                                    |
+| `cooldownTimestamp`       | `mapping(address → uint256)`     | Time-weighted average mint timestamp per user                                                                                    |
+| `cooldownPrincipal`       | `mapping(address → uint256)`     | Protocol-minted fUSD subject to cooldown per user                                                                                |
+| `cooldownExemptSender`    | `mapping(address → bool)`        | Addresses exempt from cooldown enforcement as senders                                                                            |
+| `cooldownExemptRecipient` | `mapping(address → bool)`        | Addresses exempt from cooldown enforcement as recipients                                                                         |
+| `depositNonces`           | `mapping(address → uint256)`     | EIP-712 replay protection nonces per user                                                                                        |
+| `DEPOSIT_AUTH_TYPEHASH`   | `bytes32`                        | EIP-712 type hash for deposit authorization                                                                                      |
+| `assetConfigs`            | `mapping(address → AssetConfig)` | Per-collateral configuration (allowed, decimals, cap, totalDeposited)                                                            |
+| `maxDepositFusdSupply`    | `uint256`                        | Global cap (18-decimal fUSD units) on `protocolFusdOutstanding` — enforced only for deposits, not for PoolLogic reward/fee mints |
+| `protocolFusdOutstanding` | `uint256`                        | Running total of fUSD minted via deposit (not reward/fee mints), checked against `maxDepositFusdSupply`                          |
 
 ---
 
@@ -74,24 +74,25 @@ function deposit(address asset, uint256 amount, address to, uint256 minFusdAmoun
 
 **Parameters:**
 
-| Name | Type | Description |
-|------|------|-------------|
-| `asset` | `address` | Collateral ERC20 token address |
-| `amount` | `uint256` | Amount of collateral to deposit |
-| `to` | `address` | Recipient of minted fUSD (must equal `msg.sender`) |
+| Name            | Type      | Description                                          |
+| --------------- | --------- | ---------------------------------------------------- |
+| `asset`         | `address` | Collateral ERC20 token address                       |
+| `amount`        | `uint256` | Amount of collateral to deposit                      |
+| `to`            | `address` | Recipient of minted fUSD (must equal `msg.sender`)   |
 | `minFusdAmount` | `uint256` | Minimum acceptable fUSD output (slippage protection) |
 
 **Returns:** None
 
 **Side effects, in order (`_deposit`):**
-1. **CertiK FNA-22 / FNA-04 follow-up**: calls `PoolLogic.checkpointFeesForDeposit()` **first**, before any other effect — settles pending fee accrual using the fUSD supply and fund value as they stand *right now*, before this deposit's collateral arrives or its fUSD is minted. Must run first: checkpointing after the collateral transfer (but before the mint) would misread the just-arrived collateral as unrecognized yield and wrongly charge performance fee on it; checkpointing later would let this deposit's new fUSD supply be retroactively taxed for the whole elapsed period since the last checkpoint. Uses a raw low-level call (not typed try/catch — Solidity's generated wrapper for a typed call reverts *before* the catch clause on a target with no code, which would turn every deposit into an unconditional revert during cross-proxy upgrade ordering) and bubbles up any revert reason verbatim rather than special-casing one — so an unexpected checkpoint failure is never silently swallowed.
+
+1. **CertiK FNA-22 / FNA-04 follow-up**: calls `PoolLogic.checkpointFeesForDeposit()` **first**, before any other effect — settles pending fee accrual using the fUSD supply and fund value as they stand _right now_, before this deposit's collateral arrives or its fUSD is minted. Must run first: checkpointing after the collateral transfer (but before the mint) would misread the just-arrived collateral as unrecognized yield and wrongly charge performance fee on it; checkpointing later would let this deposit's new fUSD supply be retroactively taxed for the whole elapsed period since the last checkpoint. Uses a raw low-level call (not typed try/catch — Solidity's generated wrapper for a typed call reverts _before_ the catch clause on a target with no code, which would turn every deposit into an unconditional revert during cross-proxy upgrade ordering) and bubbles up any revert reason verbatim rather than special-casing one — so an unexpected checkpoint failure is never silently swallowed.
 2. **CertiK FNA-23**: transfers `amount` of `asset` from the payer to `poolLogic`, then mints fUSD against the **balance delta actually received**, not the nominal `amount` requested — so a fee-on-transfer (or otherwise nonstandard) collateral token can't mint fUSD backed by collateral the pool never got. No behavior change for a standard ERC-20, where the delta always equals `amount` exactly.
 3. Requires `fusdAmount >= minDepositUSD` and `fusdAmount >= minFusdAmount` (slippage), and `protocolFusdOutstanding + fusdAmount <= maxDepositFusdSupply` (deposit cap, below).
 4. Updates `assetConfigs[asset].totalDeposited_`, mints fUSD to `to`, calls `PoolLogic.incrementAccountedAssets(fusdAmount)`, emits `Deposited`.
 
 ### Deposit fUSD Supply Cap
 
-`maxDepositFusdSupply` bounds `protocolFusdOutstanding` (fUSD minted via deposit only — PoolLogic reward/fee mints are not capped, though they do increase `totalSupply()` and thus cap *utilization* is measured against the deposit-only counter, not raw `totalSupply()`). `initializeDepositFusdCap(uint256)` is a `reinitializer(2)` migration step for a pool upgraded from a version without this tracker — seeds `protocolFusdOutstanding = totalSupply()` so existing supply counts against the new cap immediately, and must be run once, atomically bundled with the upgrade that introduces this cap (see the standing mainnet-upgrade rule: storage layout + cross-proxy ordering must be checked on every fix touching this contract).
+`maxDepositFusdSupply` bounds `protocolFusdOutstanding` (fUSD minted via deposit only — PoolLogic reward/fee mints are not capped, though they do increase `totalSupply()` and thus cap _utilization_ is measured against the deposit-only counter, not raw `totalSupply()`). `initializeDepositFusdCap(uint256)` is a `reinitializer(2)` migration step for a pool upgraded from a version without this tracker — seeds `protocolFusdOutstanding = totalSupply()` so existing supply counts against the new cap immediately, and must be run once, atomically bundled with the upgrade that introduces this cap (see the standing mainnet-upgrade rule: storage layout + cross-proxy ordering must be checked on every fix touching this contract).
 
 ---
 
@@ -114,14 +115,14 @@ Deposits on behalf of `to` using an EIP-712 signature. Verifies the signature wa
 
 **Parameters:**
 
-| Name | Type | Description |
-|------|------|-------------|
-| `asset` | `address` | Collateral asset |
-| `amount` | `uint256` | Collateral amount |
-| `to` | `address` | Authorized recipient |
-| `minFusdAmount` | `uint256` | Minimum fUSD output |
-| `deadline` | `uint256` | Signature expiry timestamp |
-| `v, r, s` | `uint8, bytes32, bytes32` | ECDSA signature components |
+| Name            | Type                      | Description                |
+| --------------- | ------------------------- | -------------------------- |
+| `asset`         | `address`                 | Collateral asset           |
+| `amount`        | `uint256`                 | Collateral amount          |
+| `to`            | `address`                 | Authorized recipient       |
+| `minFusdAmount` | `uint256`                 | Minimum fUSD output        |
+| `deadline`      | `uint256`                 | Signature expiry timestamp |
+| `v, r, s`       | `uint8, bytes32, bytes32` | ECDSA signature components |
 
 **Side effects:** Same as `deposit` plus increments `depositNonces[to]`.
 
@@ -151,54 +152,54 @@ Returns the number of seconds remaining before `user` can perform a cash withdra
 
 ### Admin Functions (`DEFAULT_ADMIN_ROLE`)
 
-| Function | Description |
-|----------|-------------|
-| `setPoolLogic(address)` | Updates the vault address; transfers cooldown exemptions |
-| `setPoolManagerLogic(address)` | Updates the PoolManagerLogic reference |
-| `setCooldown(uint256)` | Updates global cooldown period |
-| `setMinDepositUSD(uint256)` | Updates minimum deposit threshold |
-| `configureAsset(address, bool, uint256)` | Adds/updates a collateral asset's allowed status and cap |
-| `setAssetCap(address, uint256)` | Updates deposit cap for an existing asset |
-| `setMaxDepositFusdSupply(uint256)` | Updates the global `protocolFusdOutstanding` cap |
-| `initializeDepositFusdCap(uint256)` | `reinitializer(2)` migration step — seeds `protocolFusdOutstanding` and sets the initial cap on an upgraded proxy |
-| `setCooldownExemptSender(address, bool)` | Adds/removes sender cooldown exemption |
-| `setCooldownExemptRecipient(address, bool)` | Adds/removes recipient cooldown exemption |
+| Function                                    | Description                                                                                                       |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `setPoolLogic(address)`                     | Updates the vault address; transfers cooldown exemptions                                                          |
+| `setPoolManagerLogic(address)`              | Updates the PoolManagerLogic reference                                                                            |
+| `setCooldown(uint256)`                      | Updates global cooldown period                                                                                    |
+| `setMinDepositUSD(uint256)`                 | Updates minimum deposit threshold                                                                                 |
+| `configureAsset(address, bool, uint256)`    | Adds/updates a collateral asset's allowed status and cap                                                          |
+| `setAssetCap(address, uint256)`             | Updates deposit cap for an existing asset                                                                         |
+| `setMaxDepositFusdSupply(uint256)`          | Updates the global `protocolFusdOutstanding` cap                                                                  |
+| `initializeDepositFusdCap(uint256)`         | `reinitializer(2)` migration step — seeds `protocolFusdOutstanding` and sets the initial cap on an upgraded proxy |
+| `setCooldownExemptSender(address, bool)`    | Adds/removes sender cooldown exemption                                                                            |
+| `setCooldownExemptRecipient(address, bool)` | Adds/removes recipient cooldown exemption                                                                         |
 
 ### Emergency Functions (`EMERGENCY_ROLE`)
 
-| Function | Description |
-|----------|-------------|
-| `pause()` | Pauses deposits and minting |
-| `unpause()` | Resumes operations |
+| Function    | Description                 |
+| ----------- | --------------------------- |
+| `pause()`   | Pauses deposits and minting |
+| `unpause()` | Resumes operations          |
 
 ---
 
 ## Events
 
-| Event | Parameters | Emitted When |
-|-------|-----------|-------------|
-| `Deposited` | `user, asset, assetAmount, fusdMinted` | Collateral deposited and fUSD minted |
-| `MintedFromPool` | `to, amount` | PoolLogic calls `mintFromPool()` |
-| `PoolLogicUpdated` | `poolLogic` | PoolLogic address updated |
-| `PoolManagerLogicUpdated` | `poolManagerLogic` | PoolManagerLogic updated |
-| `CooldownUpdated` | `cooldown` | Cooldown period changed |
-| `MinDepositUpdated` | `minDepositUSD` | Minimum deposit changed |
-| `AssetConfigured` | `asset, allowed, decimals, cap` | Collateral asset configured |
-| `AssetCapUpdated` | `asset, oldCap, newCap` | Asset cap changed |
-| `MaxDepositFusdSupplyUpdated` | `oldCap, newCap` | Global deposit fUSD cap changed |
-| `ProtocolFusdOutstandingInitialized` | `protocolFusdOutstanding` | `initializeDepositFusdCap()` migration run |
-| `CooldownExemptSenderUpdated` | `account, isExempt` | Sender exemption toggled |
-| `CooldownExemptRecipientUpdated` | `account, isExempt` | Recipient exemption toggled |
+| Event                                | Parameters                             | Emitted When                               |
+| ------------------------------------ | -------------------------------------- | ------------------------------------------ |
+| `Deposited`                          | `user, asset, assetAmount, fusdMinted` | Collateral deposited and fUSD minted       |
+| `MintedFromPool`                     | `to, amount`                           | PoolLogic calls `mintFromPool()`           |
+| `PoolLogicUpdated`                   | `poolLogic`                            | PoolLogic address updated                  |
+| `PoolManagerLogicUpdated`            | `poolManagerLogic`                     | PoolManagerLogic updated                   |
+| `CooldownUpdated`                    | `cooldown`                             | Cooldown period changed                    |
+| `MinDepositUpdated`                  | `minDepositUSD`                        | Minimum deposit changed                    |
+| `AssetConfigured`                    | `asset, allowed, decimals, cap`        | Collateral asset configured                |
+| `AssetCapUpdated`                    | `asset, oldCap, newCap`                | Asset cap changed                          |
+| `MaxDepositFusdSupplyUpdated`        | `oldCap, newCap`                       | Global deposit fUSD cap changed            |
+| `ProtocolFusdOutstandingInitialized` | `protocolFusdOutstanding`              | `initializeDepositFusdCap()` migration run |
+| `CooldownExemptSenderUpdated`        | `account, isExempt`                    | Sender exemption toggled                   |
+| `CooldownExemptRecipientUpdated`     | `account, isExempt`                    | Recipient exemption toggled                |
 
 ---
 
 ## Access Control
 
-| Role | Holder | Permissions |
-|------|--------|------------|
-| `DEFAULT_ADMIN_ROLE` | DAO / Timelock | All governance functions, UUPS upgrade |
-| `EMERGENCY_ROLE` | Emergency multisig | Pause / unpause |
-| PoolLogic (implicit) | PoolLogic contract | `mintFromPool()` |
+| Role                 | Holder             | Permissions                            |
+| -------------------- | ------------------ | -------------------------------------- |
+| `DEFAULT_ADMIN_ROLE` | DAO / Timelock     | All governance functions, UUPS upgrade |
+| `EMERGENCY_ROLE`     | Emergency multisig | Pause / unpause                        |
+| PoolLogic (implicit) | PoolLogic contract | `mintFromPool()`                       |
 
 ---
 

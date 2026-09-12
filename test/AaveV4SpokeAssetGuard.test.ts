@@ -397,7 +397,7 @@ describe('AaveV4SpokeAssetGuard', () => {
     expect(await guard.getDecimals(spokeAddr)).to.equal(18n);
   });
 
-  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+  it("isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard's balance)", async () => {
     const { guard } = await deploy();
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
@@ -549,7 +549,7 @@ describe('AaveV4SpokeAssetGuard', () => {
       expect(await guard.getWithdrawableBalance(poolAddr, spokeAddr)).to.equal(full);
     });
 
-    it('is capped below getBalance() when a reserve\'s available liquidity is below its supplied amount', async () => {
+    it("is capped below getBalance() when a reserve's available liquidity is below its supplied amount", async () => {
       const { guard, aaveV4SpokeManager, poolManager, poolAddr, spoke, spokeAddr, usdcAddr } =
         await deploy();
 
@@ -966,7 +966,7 @@ describe('AaveV4SpokeAssetGuard', () => {
     // CertiK FNA-07 follow-up: the actual withdraw amounts built for two reserves sharing one
     // Hub-level liquidity pool must together stay within that pool's real size, not each
     // independently claim up to the full reported liquidity.
-    it('does not double-count shared Hub liquidity across two reserves\' withdraw amounts', async () => {
+    it("does not double-count shared Hub liquidity across two reserves' withdraw amounts", async () => {
       const {
         guard,
         aaveV4SpokeManager,
@@ -1041,9 +1041,7 @@ describe('AaveV4SpokeAssetGuard', () => {
       // needs no prior approval for a self-withdrawal, so the only thing that can fail here is
       // the Spoke's own USDC balance being insufficient to transfer back, demonstrating the
       // vulnerability this guard now avoids triggering.
-      await expect(
-        spoke.connect(poolSigner).withdraw(1n, supplied, poolAddr),
-      ).to.be.reverted;
+      await expect(spoke.connect(poolSigner).withdraw(1n, supplied, poolAddr)).to.be.reverted;
 
       // The guard's own withdrawProcessing(), even at portion = 100%, must not attempt that.
       const portion = ethers.parseUnits('1', 18);
@@ -1129,7 +1127,7 @@ describe('AaveV4SpokeAssetGuard', () => {
       );
     });
 
-    it('reverts (rather than silently treating the reserve as empty) when a reserve\'s raw supplied-assets query itself fails', async () => {
+    it("reverts (rather than silently treating the reserve as empty) when a reserve's raw supplied-assets query itself fails", async () => {
       const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr } = await deploy();
       await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
       await spoke.setBrokenReserve(1n, true);
@@ -1150,7 +1148,7 @@ describe('AaveV4SpokeAssetGuard', () => {
       expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(true);
     });
 
-    it('returns true for a token that is not any tracked reserve\'s underlying, even with a non-dust position held', async () => {
+    it("returns true for a token that is not any tracked reserve's underlying, even with a non-dust position held", async () => {
       const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr, wethAddr } =
         await deploy();
       await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
@@ -1159,7 +1157,7 @@ describe('AaveV4SpokeAssetGuard', () => {
       expect(await guard.removeTokenCheck(poolAddr, spokeAddr, wethAddr)).to.equal(true);
     });
 
-    it('returns false for a reserve\'s underlying while the pool still holds a non-dust position there', async () => {
+    it("returns false for a reserve's underlying while the pool still holds a non-dust position there", async () => {
       const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();
       await aaveV4SpokeManager.setPoolReserves(poolAddr, spokeAddr, [1n]);
       await spoke.setReserveUnderlying(1n, usdcAddr);
@@ -1219,7 +1217,7 @@ describe('AaveV4SpokeAssetGuard', () => {
       expect(await guard.removeTokenCheck(poolAddr, spokeAddr, usdcAddr)).to.equal(true);
     });
 
-    it('fails safe (returns true) rather than blocking every other token when a reserve\'s supplied-assets query reverts', async () => {
+    it("fails safe (returns true) rather than blocking every other token when a reserve's supplied-assets query reverts", async () => {
       // Deliberately the opposite of removeAssetCheck's fail-closed behavior on the same failure
       // mode — see this function's own documentation for why the blast radius differs.
       const { guard, aaveV4SpokeManager, poolAddr, spoke, spokeAddr, usdcAddr } = await deploy();

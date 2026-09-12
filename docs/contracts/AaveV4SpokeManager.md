@@ -15,7 +15,7 @@ Keyed by `(pool, spoke, reserveId)` rather than `(pool, vault)` — unlike a Mor
 
 ## The Active/Tracked Split (CertiK FNA-10)
 
-`poolReserves`/`isValidPoolReserve` (**the active allowlist**) only ever gates *new* manager-directed exposure — see [AaveV4SpokeContractGuard](AaveV4SpokeContractGuard.md)'s supply handler and `AaveV4SpokeAssetGuard.addAssetCheck`. It must never be consulted on the withdrawal/valuation path. That path — [AaveV4SpokeAssetGuard](AaveV4SpokeAssetGuard.md)'s `getBalance`/`getWithdrawableBalance`/`withdrawProcessing`/`removeAssetCheck`, and `AaveV4SpokeContractGuard`'s withdraw-side handlers — instead reads `trackedPoolReserves`, a **superset** of the active allowlist that also retains any reserve the protocol owner has since delisted, for as long as it may still hold pool supply. This is what actually keeps the promise that revoking a reserve can never trap a pool's existing position: `trackedPoolReserves` is untouched by `setPoolReserves()` and only ever shrinks via `pruneTrackedReserve()` once the position is provably empty.
+`poolReserves`/`isValidPoolReserve` (**the active allowlist**) only ever gates _new_ manager-directed exposure — see [AaveV4SpokeContractGuard](AaveV4SpokeContractGuard.md)'s supply handler and `AaveV4SpokeAssetGuard.addAssetCheck`. It must never be consulted on the withdrawal/valuation path. That path — [AaveV4SpokeAssetGuard](AaveV4SpokeAssetGuard.md)'s `getBalance`/`getWithdrawableBalance`/`withdrawProcessing`/`removeAssetCheck`, and `AaveV4SpokeContractGuard`'s withdraw-side handlers — instead reads `trackedPoolReserves`, a **superset** of the active allowlist that also retains any reserve the protocol owner has since delisted, for as long as it may still hold pool supply. This is what actually keeps the promise that revoking a reserve can never trap a pool's existing position: `trackedPoolReserves` is untouched by `setPoolReserves()` and only ever shrinks via `pruneTrackedReserve()` once the position is provably empty.
 
 ---
 
@@ -27,7 +27,7 @@ Keyed by `(pool, spoke, reserveId)` rather than `(pool, vault)` — unlike a Mor
 function setPoolReserves(address pool, address spoke, uint256[] calldata reserveIds) external onlyOwner
 ```
 
-Replaces the full previous active list for `(pool, spoke)` — omitting a previously-allowed `reserveId` revokes it from *new* exposure immediately, but leaves it in `trackedPoolReserves` untouched. Reverts on a duplicate `reserveId` within the call: `AaveV4SpokeAssetGuard.getBalance()` iterates and *sums* the tracked list, so a duplicate would double-count that reserve's value. Every newly-authorized reserve is automatically added to the tracked set too, so it's valued/withdrawable from the moment supply becomes possible.
+Replaces the full previous active list for `(pool, spoke)` — omitting a previously-allowed `reserveId` revokes it from _new_ exposure immediately, but leaves it in `trackedPoolReserves` untouched. Reverts on a duplicate `reserveId` within the call: `AaveV4SpokeAssetGuard.getBalance()` iterates and _sums_ the tracked list, so a duplicate would double-count that reserve's value. Every newly-authorized reserve is automatically added to the tracked set too, so it's valued/withdrawable from the moment supply becomes possible.
 
 ### `pruneTrackedReserve`
 

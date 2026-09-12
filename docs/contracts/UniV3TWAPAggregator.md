@@ -46,13 +46,13 @@ function latestRoundData() external view returns (uint80 roundId, int256 answer,
 
 ## Configuration Parameters
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
-| `pool` | constructor (immutable) | The Uniswap V3 pool consulted for the TWAP |
-| `mainToken` / `pairToken` | constructor (immutable) | The priced token and its TWAP counterpart (auto-derived from the pool) |
-| `pairTokenUsdAggregator` | constructor (immutable) | Chainlink-style USD feed for `pairToken` |
-| `updateInterval` | constructor (immutable) | TWAP lookback window in seconds |
-| `minimumLiquidity` | constructor (immutable) | CertiK FNA-16 harmonic-mean liquidity floor — see above |
+| Parameter                             | Set at                  | Description                                                               |
+| ------------------------------------- | ----------------------- | ------------------------------------------------------------------------- |
+| `pool`                                | constructor (immutable) | The Uniswap V3 pool consulted for the TWAP                                |
+| `mainToken` / `pairToken`             | constructor (immutable) | The priced token and its TWAP counterpart (auto-derived from the pool)    |
+| `pairTokenUsdAggregator`              | constructor (immutable) | Chainlink-style USD feed for `pairToken`                                  |
+| `updateInterval`                      | constructor (immutable) | TWAP lookback window in seconds                                           |
+| `minimumLiquidity`                    | constructor (immutable) | CertiK FNA-16 harmonic-mean liquidity floor — see above                   |
 | `priceLowerLimit` / `priceUpperLimit` | constructor (immutable) | Optional sanity bounds on the final 8-decimal answer, `0` to disable both |
 
 No owner-settable parameters — every configuration value is fixed at deploy time; changing any of them requires deploying a new aggregator instance and re-registering it in `AssetHandler`.

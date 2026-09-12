@@ -17,7 +17,10 @@ describe('CallResultChecker', () => {
 
   it('reverts when low-level call failed', async () => {
     const checker = await deployChecker();
-    const data = erc20Iface.encodeFunctionData('transfer', [ethers.Wallet.createRandom().address, 1n]);
+    const data = erc20Iface.encodeFunctionData('transfer', [
+      ethers.Wallet.createRandom().address,
+      1n,
+    ]);
 
     await expect(checker._checkCallResult(data, false, '0x')).to.be.revertedWithCustomError(
       checker,
@@ -35,7 +38,10 @@ describe('CallResultChecker', () => {
 
   it('decodes ERC20 boolean return values and rejects false', async () => {
     const checker = await deployChecker();
-    const data = erc20Iface.encodeFunctionData('approve', [ethers.Wallet.createRandom().address, 1n]);
+    const data = erc20Iface.encodeFunctionData('approve', [
+      ethers.Wallet.createRandom().address,
+      1n,
+    ]);
     const falseReturn = ethers.AbiCoder.defaultAbiCoder().encode(['bool'], [false]);
     const trueReturn = ethers.AbiCoder.defaultAbiCoder().encode(['bool'], [true]);
 

@@ -130,7 +130,10 @@ async function deployFixture() {
   await fusd.connect(admin).configureAsset(await usdc.getAddress(), true, ethers.MaxUint256);
 
   const FrgmntUserActions = await ethers.getContractFactory('FrgmntUserActions');
-  const userActions = await FrgmntUserActions.deploy(await fusd.getAddress(), await pool.getAddress());
+  const userActions = await FrgmntUserActions.deploy(
+    await fusd.getAddress(),
+    await pool.getAddress(),
+  );
   await userActions.waitForDeployment();
   await poolManager.setAllowedCallbackSender(await userActions.getAddress(), true);
 
@@ -148,10 +151,23 @@ describe('FrgmntUserActions', () => {
     await expect(
       userActions
         .connect(user)
-        .depositAndStake(await usdc.getAddress(), amount, 1_000n * WAD, 1_000n * WAD, EMPTY_PERMIT, EMPTY_PERMIT),
+        .depositAndStake(
+          await usdc.getAddress(),
+          amount,
+          1_000n * WAD,
+          1_000n * WAD,
+          EMPTY_PERMIT,
+          EMPTY_PERMIT,
+        ),
     )
       .to.emit(userActions, 'DepositAndStake')
-      .withArgs(await user.getAddress(), await usdc.getAddress(), amount, 1_000n * WAD, 1_000n * WAD);
+      .withArgs(
+        await user.getAddress(),
+        await usdc.getAddress(),
+        amount,
+        1_000n * WAD,
+        1_000n * WAD,
+      );
 
     expect(await fusd.balanceOf(await user.getAddress())).to.equal(0n);
     expect(await pool.balanceOf(await user.getAddress())).to.equal(1_000n * WAD);
@@ -166,12 +182,9 @@ describe('FrgmntUserActions', () => {
     await usdc.connect(user).approve(await fusd.getAddress(), amount);
     await fusd
       .connect(user)
-      ['deposit(address,uint256,address,uint256)'](
-        await usdc.getAddress(),
-        amount,
-        await user.getAddress(),
-        fusdAmount,
-      );
+      [
+        'deposit(address,uint256,address,uint256)'
+      ](await usdc.getAddress(), amount, await user.getAddress(), fusdAmount);
 
     const deadline = BigInt((await ethers.provider.getBlock('latest'))!.timestamp + 3600);
     const permit = await signFusdPermit(fusd, user, await pool.getAddress(), fusdAmount, deadline);
@@ -195,12 +208,9 @@ describe('FrgmntUserActions', () => {
     await usdc.connect(user).approve(await fusd.getAddress(), amount);
     await fusd
       .connect(user)
-      ['deposit(address,uint256,address,uint256)'](
-        await usdc.getAddress(),
-        amount,
-        await user.getAddress(),
-        fusdAmount,
-      );
+      [
+        'deposit(address,uint256,address,uint256)'
+      ](await usdc.getAddress(), amount, await user.getAddress(), fusdAmount);
 
     const deadline = BigInt((await ethers.provider.getBlock('latest'))!.timestamp + 3600);
     const permit = await signFusdPermit(fusd, user, await pool.getAddress(), fusdAmount, deadline);
@@ -239,12 +249,9 @@ describe('FrgmntUserActions', () => {
     await usdc.connect(user).approve(await fusd.getAddress(), amount);
     await fusd
       .connect(user)
-      ['deposit(address,uint256,address,uint256)'](
-        await usdc.getAddress(),
-        amount,
-        await user.getAddress(),
-        fusdAmount,
-      );
+      [
+        'deposit(address,uint256,address,uint256)'
+      ](await usdc.getAddress(), amount, await user.getAddress(), fusdAmount);
 
     const deadline = BigInt((await ethers.provider.getBlock('latest'))!.timestamp + 3600);
     const permit = await signFusdPermit(fusd, user, await pool.getAddress(), fusdAmount, deadline);
@@ -263,9 +270,7 @@ describe('FrgmntUserActions', () => {
       );
 
     const usdcBefore = await usdc.balanceOf(await user.getAddress());
-    await expect(
-      userActions.connect(user).withdrawImmediateWithPermit(fusdAmount, permit),
-    )
+    await expect(userActions.connect(user).withdrawImmediateWithPermit(fusdAmount, permit))
       .to.emit(userActions, 'WithdrawImmediateWithPermit')
       .withArgs(await user.getAddress(), fusdAmount);
 
@@ -284,12 +289,9 @@ describe('FrgmntUserActions', () => {
     await usdc.connect(user).approve(await fusd.getAddress(), amount);
     await fusd
       .connect(user)
-      ['deposit(address,uint256,address,uint256)'](
-        await usdc.getAddress(),
-        amount,
-        await user.getAddress(),
-        fusdAmount,
-      );
+      [
+        'deposit(address,uint256,address,uint256)'
+      ](await usdc.getAddress(), amount, await user.getAddress(), fusdAmount);
 
     // Pre-approve directly (as if a previous permit or a plain approve() already ran).
     await fusd.connect(user).approve(await pool.getAddress(), fusdAmount);
@@ -319,7 +321,14 @@ describe('FrgmntUserActions', () => {
     await fusd.connect(user).approve(await pool.getAddress(), ethers.MaxUint256);
     await userActions
       .connect(user)
-      .depositAndStake(await usdc.getAddress(), amount, 1_000n * WAD, 1_000n * WAD, EMPTY_PERMIT, EMPTY_PERMIT);
+      .depositAndStake(
+        await usdc.getAddress(),
+        amount,
+        1_000n * WAD,
+        1_000n * WAD,
+        EMPTY_PERMIT,
+        EMPTY_PERMIT,
+      );
 
     const usdcBefore = await usdc.balanceOf(await user.getAddress());
 
@@ -340,7 +349,14 @@ describe('FrgmntUserActions', () => {
     await expect(
       userActions
         .connect(user)
-        .depositAndStake(await usdc.getAddress(), amount, 1_000n * WAD, 1_000n * WAD, EMPTY_PERMIT, EMPTY_PERMIT),
+        .depositAndStake(
+          await usdc.getAddress(),
+          amount,
+          1_000n * WAD,
+          1_000n * WAD,
+          EMPTY_PERMIT,
+          EMPTY_PERMIT,
+        ),
     ).to.be.revertedWith('TokenLogic: use depositWithAuthorization');
   });
 });

@@ -67,6 +67,7 @@ The cooldown system prevents flash-deposit → immediate-withdrawal attacks.
 ### Mechanism
 
 When fUSD is minted to a recipient:
+
 - `cooldownTimestamp[recipient]` is updated using a **time-weighted average, rounded up** (CertiK FNA-55):
 
 ```
@@ -310,16 +311,17 @@ User
 
 ### Fee Types
 
-| Fee | Applied at | Direction |
-|-----|-----------|-----------|
-| Entry fee | Stake | Minted as sfUSD shares to manager |
-| Exit fee | Unstake / Cash withdraw | fUSD deducted from user output |
-| Management fee | Ongoing (AUM-based, time-weighted) | Minted as sfUSD shares to manager |
-| Performance fee | On yield events | Minted as sfUSD shares to manager |
+| Fee             | Applied at                         | Direction                         |
+| --------------- | ---------------------------------- | --------------------------------- |
+| Entry fee       | Stake                              | Minted as sfUSD shares to manager |
+| Exit fee        | Unstake / Cash withdraw            | fUSD deducted from user output    |
+| Management fee  | Ongoing (AUM-based, time-weighted) | Minted as sfUSD shares to manager |
+| Performance fee | On yield events                    | Minted as sfUSD shares to manager |
 
 ### Fee Increase Governance
 
 Fee increases require:
+
 1. Manager calls `announceFeeIncrease()` — emits announcement with future timestamp
 2. Delay period elapses (configurable per pool, capped by factory)
 3. Manager calls `commitFeeIncrease()` — activates new fees and mints any pending manager fees at old rate

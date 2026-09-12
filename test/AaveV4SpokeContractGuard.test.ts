@@ -150,8 +150,15 @@ describe('AaveV4SpokeContractGuard', () => {
   // -----------------------------------------------------------------------
 
   it('supply reverts when the reserve underlying is not a supported pool asset', async () => {
-    const { guard, poolManager, poolLogicSigner, poolManagerAddr, spoke, underlying, poolLogicAddr } =
-      await deploy();
+    const {
+      guard,
+      poolManager,
+      poolLogicSigner,
+      poolManagerAddr,
+      spoke,
+      underlying,
+      poolLogicAddr,
+    } = await deploy();
     await poolManager.setSupportedAsset(underlying, false);
     const data = positionManagerIface.encodeFunctionData('supplyOnBehalfOf', [
       spoke,
@@ -165,8 +172,15 @@ describe('AaveV4SpokeContractGuard', () => {
   });
 
   it('approveWithdraw reverts when the reserve underlying is not a supported pool asset', async () => {
-    const { guard, poolManager, poolLogicSigner, poolManagerAddr, spoke, underlying, poolLogicAddr } =
-      await deploy();
+    const {
+      guard,
+      poolManager,
+      poolLogicSigner,
+      poolManagerAddr,
+      spoke,
+      underlying,
+      poolLogicAddr,
+    } = await deploy();
     await poolManager.setSupportedAsset(underlying, false);
     const data = positionManagerIface.encodeFunctionData('approveWithdraw', [
       spoke,
@@ -180,8 +194,15 @@ describe('AaveV4SpokeContractGuard', () => {
   });
 
   it('withdraw reverts when the reserve underlying is not a supported pool asset (closes the idle-token gap)', async () => {
-    const { guard, poolManager, poolLogicSigner, poolManagerAddr, spoke, underlying, poolLogicAddr } =
-      await deploy();
+    const {
+      guard,
+      poolManager,
+      poolLogicSigner,
+      poolManagerAddr,
+      spoke,
+      underlying,
+      poolLogicAddr,
+    } = await deploy();
     await poolManager.setSupportedAsset(underlying, false);
     const data = positionManagerIface.encodeFunctionData('withdrawOnBehalfOf', [
       spoke,
@@ -228,7 +249,10 @@ describe('AaveV4SpokeContractGuard', () => {
     // Whitelisted/tracked, but setReserveUnderlying() was never called for it, so the mock
     // Spoke's getReserve() returns address(0) for `underlying` — a reserveId Aave itself has
     // never actually initialized.
-    await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, [RESERVE_ID, UNCONFIGURED_RESERVE_ID]);
+    await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, [
+      RESERVE_ID,
+      UNCONFIGURED_RESERVE_ID,
+    ]);
 
     const data = positionManagerIface.encodeFunctionData('supplyOnBehalfOf', [
       spoke,
@@ -251,9 +275,9 @@ describe('AaveV4SpokeContractGuard', () => {
     const { guard, aaveV4SpokeManager, poolLogicSigner, poolManagerAddr, spoke, poolLogicAddr } =
       await deploy();
     await aaveV4SpokeManager.setPoolReserves(poolLogicAddr, spoke, []); // delist RESERVE_ID
-    expect(await aaveV4SpokeManager.isTrackedPoolReserve(poolLogicAddr, spoke, RESERVE_ID)).to.equal(
-      true,
-    );
+    expect(
+      await aaveV4SpokeManager.isTrackedPoolReserve(poolLogicAddr, spoke, RESERVE_ID),
+    ).to.equal(true);
 
     const data = positionManagerIface.encodeFunctionData('supplyOnBehalfOf', [
       spoke,

@@ -276,7 +276,7 @@ describe('MorphoVaultV2AssetGuard', () => {
   // CertiK FNA-45 follow-up: getDecimals() previously hardcoded 18 (matching the placeholder
   // $1.00 identity aggregator this asset is registered against for PoolManagerLogic.assetValue(),
   // which never actually consults it) — it now returns the share token's own real decimals.
-  it('getDecimals returns the vault share token\'s own real decimals, not a hardcoded 18', async () => {
+  it("getDecimals returns the vault share token's own real decimals, not a hardcoded 18", async () => {
     const { guard, vaultAddr, usdcAddr } = await deploy();
     // The mock vault is a plain OZ ERC20 (18 decimals) — still correct, but no longer because it
     // was hardcoded.
@@ -291,7 +291,7 @@ describe('MorphoVaultV2AssetGuard', () => {
     await expect(guard.getDecimals(ethers.ZeroAddress)).to.be.reverted;
   });
 
-  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+  it("isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard's balance)", async () => {
     const { guard } = await deploy();
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
@@ -303,7 +303,7 @@ describe('MorphoVaultV2AssetGuard', () => {
   // for the concrete consumer this closes).
   // -----------------------------------------------------------------------
   describe('getUnitPrice (CertiK FNA-45 follow-up)', () => {
-    it('values one whole share at a non-1:1 ratio and non-$1 underlying price, matching getBalance()\'s own arithmetic', async () => {
+    it("values one whole share at a non-1:1 ratio and non-$1 underlying price, matching getBalance()'s own arithmetic", async () => {
       const { guard, poolManager, vault, vaultAddr, usdcAddr } = await deploy();
 
       // 1 share (1e18) -> 1.1 USDC (1,100,000 raw 6dp units), USDC priced at $2 — same
@@ -315,7 +315,12 @@ describe('MorphoVaultV2AssetGuard', () => {
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('2', 18));
 
       const oneShare = 10n ** 18n; // vault is an 18-decimal ERC20
-      const expected = expectedBalanceUsd18(oneShare, assetsPerShare, ethers.parseUnits('2', 18), 6n);
+      const expected = expectedBalanceUsd18(
+        oneShare,
+        assetsPerShare,
+        ethers.parseUnits('2', 18),
+        6n,
+      );
       // $2.20 — sanity-check the hand math independently of the shared helper.
       expect(expected).to.equal(ethers.parseUnits('2.2', 18));
 
@@ -348,7 +353,7 @@ describe('MorphoVaultV2AssetGuard', () => {
       ).to.equal(expected);
     });
 
-    it('propagates the vault\'s own revert reason when asset() reverts, rather than returning a misleading price', async () => {
+    it("propagates the vault's own revert reason when asset() reverts, rather than returning a misleading price", async () => {
       const { guard, poolManager, vault, vaultAddr } = await deploy();
       await vault.setBrokenAsset(true);
 
@@ -366,13 +371,12 @@ describe('MorphoVaultV2AssetGuard', () => {
       ).to.be.revertedWithCustomError(guard, 'InvalidUnderlying');
     });
 
-    it('reverts (propagates convertToAssets()\'s own revert) when the vault\'s conversion fails', async () => {
+    it("reverts (propagates convertToAssets()'s own revert) when the vault's conversion fails", async () => {
       const { guard, poolManager, vault, vaultAddr } = await deploy();
       await vault.setBrokenConvert(true);
 
-      await expect(
-        poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr),
-      ).to.be.reverted;
+      await expect(poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr)).to
+        .be.reverted;
     });
 
     it('reverts UnderlyingNotPriced when the underlying has no price, rather than degrading to 0', async () => {
@@ -401,8 +405,8 @@ describe('MorphoVaultV2AssetGuard', () => {
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
       await poolManager.setBrokenPrice(usdcAddr, true);
 
-      await expect(poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr))
-        .to.be.reverted;
+      await expect(poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr)).to
+        .be.reverted;
     });
   });
 
@@ -450,7 +454,7 @@ describe('MorphoVaultV2AssetGuard', () => {
       expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(0n);
     });
 
-    it('matches getBalance() when the vault\'s idle balance fully covers the position', async () => {
+    it("matches getBalance() when the vault's idle balance fully covers the position", async () => {
       const { guard, poolManager, poolAddr, vault, vaultAddr, usdc, usdcAddr } = await deploy();
 
       const shares = ethers.parseUnits('1000', 18);
@@ -729,8 +733,7 @@ describe('MorphoVaultV2AssetGuard', () => {
       // Simulate the vault itself breaking between sizing and execution (e.g. paused) — a risk
       // this fix was never meant to address; it only closes the idle-liquidity-specific case.
       await vault.setBrokenConvert(true);
-      await expect(deployer.sendTransaction({ to: txs[0].to, data: txs[0].txData })).to.be
-        .reverted;
+      await expect(deployer.sendTransaction({ to: txs[0].to, data: txs[0].txData })).to.be.reverted;
     });
   });
 

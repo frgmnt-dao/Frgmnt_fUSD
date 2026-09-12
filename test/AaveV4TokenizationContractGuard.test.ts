@@ -169,12 +169,12 @@ describe('AaveV4TokenizationContractGuard', () => {
         poolLogicAddr,
       } = await deploy();
       await aaveV4TokenizationManager.setPoolVaults(poolLogicAddr, []); // delist
-      expect(
-        await aaveV4TokenizationManager.isValidPoolVault(poolLogicAddr, vaultAddr),
-      ).to.equal(false);
-      expect(
-        await aaveV4TokenizationManager.isTrackedPoolVault(poolLogicAddr, vaultAddr),
-      ).to.equal(true);
+      expect(await aaveV4TokenizationManager.isValidPoolVault(poolLogicAddr, vaultAddr)).to.equal(
+        false,
+      );
+      expect(await aaveV4TokenizationManager.isTrackedPoolVault(poolLogicAddr, vaultAddr)).to.equal(
+        true,
+      );
 
       const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, poolLogicAddr]);
       await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
@@ -200,7 +200,8 @@ describe('AaveV4TokenizationContractGuard', () => {
     });
 
     it('withdraw reverts "vault not tracked" for a vault that was never whitelisted at all (never tracked)', async () => {
-      const { guard, poolLogicSigner, poolManager, poolManagerAddr, poolLogicAddr } = await deploy();
+      const { guard, poolLogicSigner, poolManager, poolManagerAddr, poolLogicAddr } =
+        await deploy();
       const VaultFactory = await ethers.getContractFactory('MockAaveV4TokenizationSpoke');
       const Token = await ethers.getContractFactory('MockERC20Custom');
       const otherUnderlying = await Token.deploy('DAI', 'DAI', 18);
@@ -211,11 +212,7 @@ describe('AaveV4TokenizationContractGuard', () => {
       await poolManager.setSupportedAsset(neverListedVaultAddr, true);
       // Deliberately never added to aaveV4TokenizationManager.setPoolVaults for this pool.
 
-      const data = vaultIface.encodeFunctionData('withdraw', [
-        200n,
-        poolLogicAddr,
-        poolLogicAddr,
-      ]);
+      const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, poolLogicAddr]);
       await expect(
         callGuard(guard, poolLogicSigner, poolManagerAddr, neverListedVaultAddr, data),
       ).to.be.revertedWith('AaveV4TokenizationGuard: vault not tracked');

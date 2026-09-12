@@ -19,14 +19,14 @@ Validates and tracks Uniswap V3 LP NFT operations (`mint`/`increaseLiquidity`/`d
 function txGuard(address poolManagerLogic, address to, bytes memory data) public override returns (uint16 txType, bool)
 ```
 
-| Selector | Checks |
-|----------|--------|
-| `mint` | `token0`/`token1`/`to` (the position manager itself) all supported assets; `recipient == pool`; Uniswap TWAP "fair price" check (`UniswapV3PriceLibrary.assertFairPrice`) against the target tick range |
-| `increaseLiquidity` | `tokenId` must already be tracked; position manager and the position's own `token0`/`token1` (read live via `positions()`) must be supported; same fair-price check |
-| `decreaseLiquidity` | `tokenId` must already be tracked |
-| `burn` | `tokenId` must already be tracked |
-| `collect` | `tokenId` must already be tracked; the position's `token0`/`token1` must be supported; `recipient == pool` |
-| `multicall` | recurses into `txGuard()` for each inner call (see below) |
+| Selector            | Checks                                                                                                                                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mint`              | `token0`/`token1`/`to` (the position manager itself) all supported assets; `recipient == pool`; Uniswap TWAP "fair price" check (`UniswapV3PriceLibrary.assertFairPrice`) against the target tick range |
+| `increaseLiquidity` | `tokenId` must already be tracked; position manager and the position's own `token0`/`token1` (read live via `positions()`) must be supported; same fair-price check                                     |
+| `decreaseLiquidity` | `tokenId` must already be tracked                                                                                                                                                                       |
+| `burn`              | `tokenId` must already be tracked                                                                                                                                                                       |
+| `collect`           | `tokenId` must already be tracked; the position's `token0`/`token1` must be supported; `recipient == pool`                                                                                              |
+| `multicall`         | recurses into `txGuard()` for each inner call (see below)                                                                                                                                               |
 
 Every non-mint operation requires the target `tokenId` to already be in this pool's own tracked set (`_isValidOwnedTokenId`) — an NFT the pool never minted, or one it already burned, can never be operated on through this guard regardless of who currently custodies it.
 
@@ -50,10 +50,10 @@ For `mint`: reads the newly-minted `tokenId` via `nonfungiblePositionManager.tok
 
 ## Configuration Parameters
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
-| `nftTracker` | constructor (immutable) | The `NftTrackerStorage` instance this guard reads/writes owned `tokenId`s through |
-| `uniV3PositionsLimit` | constructor | Maximum concurrent Uniswap V3 positions allowed per pool |
+| Parameter             | Set at                  | Description                                                                       |
+| --------------------- | ----------------------- | --------------------------------------------------------------------------------- |
+| `nftTracker`          | constructor (immutable) | The `NftTrackerStorage` instance this guard reads/writes owned `tokenId`s through |
+| `uniV3PositionsLimit` | constructor             | Maximum concurrent Uniswap V3 positions allowed per pool                          |
 
 ---
 

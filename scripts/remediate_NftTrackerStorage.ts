@@ -103,7 +103,9 @@ async function main() {
     const poolFactoryAfter = await nftTracker.poolFactory();
     console.log('NftTrackerStorage.poolFactory() after:', poolFactoryAfter);
     if (poolFactoryAfter.toLowerCase() !== POOL_MANAGER_LOGIC.toLowerCase()) {
-      throw new Error('poolFactory did not update as expected — investigate before relying on this fix.');
+      throw new Error(
+        'poolFactory did not update as expected — investigate before relying on this fix.',
+      );
     }
     console.log('\nDone.');
     return;

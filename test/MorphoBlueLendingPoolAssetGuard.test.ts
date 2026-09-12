@@ -36,7 +36,7 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       morphoAddr,
       await morphoManager.getAddress(),
       swapRouter,
-      await usdc.getAddress(),  // preferredSettlementAsset
+      await usdc.getAddress(), // preferredSettlementAsset
     );
     await guard.waitForDeployment();
 
@@ -57,9 +57,10 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const usdc = ethers.Wallet.createRandom().address;
     const mgr = ethers.Wallet.createRandom().address;
     const router = ethers.Wallet.createRandom().address;
-    await expect(
-      Guard.deploy(ethers.ZeroAddress, mgr, router, usdc),
-    ).to.be.revertedWithCustomError(Guard, 'MorphoZero');
+    await expect(Guard.deploy(ethers.ZeroAddress, mgr, router, usdc)).to.be.revertedWithCustomError(
+      Guard,
+      'MorphoZero',
+    );
   });
 
   it('constructor reverts on zero morphoManager', async () => {
@@ -87,9 +88,10 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const usdc = ethers.Wallet.createRandom().address;
     const morpho = ethers.Wallet.createRandom().address;
     const mgr = ethers.Wallet.createRandom().address;
-    await expect(
-      Guard.deploy(morpho, mgr, ethers.ZeroAddress, usdc),
-    ).to.be.revertedWithCustomError(Guard, 'RouterZero');
+    await expect(Guard.deploy(morpho, mgr, ethers.ZeroAddress, usdc)).to.be.revertedWithCustomError(
+      Guard,
+      'RouterZero',
+    );
   });
 
   it('constructor reverts on zero settlement asset', async () => {
@@ -166,15 +168,17 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
   it('setDefaultSlippageBps reverts if too high', async () => {
     const { guard } = await deploy();
     await expect(guard.setDefaultSlippageBps(10001)).to.be.revertedWithCustomError(
-      guard, 'SlippageTooHigh',
+      guard,
+      'SlippageTooHigh',
     );
   });
 
   it('setDefaultSlippageBps reverts for non-owner', async () => {
     const { guard, other } = await deploy();
-    await expect(
-      guard.connect(other).setDefaultSlippageBps(100),
-    ).to.be.revertedWithCustomError(guard, 'OwnableUnauthorizedAccount');
+    await expect(guard.connect(other).setDefaultSlippageBps(100)).to.be.revertedWithCustomError(
+      guard,
+      'OwnableUnauthorizedAccount',
+    );
   });
 
   it('setFlashAmountBufferBps updates and emits event', async () => {
@@ -188,15 +192,17 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
   it('setFlashAmountBufferBps reverts if too high', async () => {
     const { guard } = await deploy();
     await expect(guard.setFlashAmountBufferBps(10001)).to.be.revertedWithCustomError(
-      guard, 'FlashBufferTooHigh',
+      guard,
+      'FlashBufferTooHigh',
     );
   });
 
   it('setFlashAmountBufferBps reverts for non-owner', async () => {
     const { guard, other } = await deploy();
-    await expect(
-      guard.connect(other).setFlashAmountBufferBps(100),
-    ).to.be.revertedWithCustomError(guard, 'OwnableUnauthorizedAccount');
+    await expect(guard.connect(other).setFlashAmountBufferBps(100)).to.be.revertedWithCustomError(
+      guard,
+      'OwnableUnauthorizedAccount',
+    );
   });
 
   it('setRepayDebtBufferBps updates and emits event', async () => {
@@ -210,15 +216,17 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
   it('setRepayDebtBufferBps reverts if too high', async () => {
     const { guard } = await deploy();
     await expect(guard.setRepayDebtBufferBps(10001)).to.be.revertedWithCustomError(
-      guard, 'RepayBufferTooHigh',
+      guard,
+      'RepayBufferTooHigh',
     );
   });
 
   it('setRepayDebtBufferBps reverts for non-owner', async () => {
     const { guard, other } = await deploy();
-    await expect(
-      guard.connect(other).setRepayDebtBufferBps(100),
-    ).to.be.revertedWithCustomError(guard, 'OwnableUnauthorizedAccount');
+    await expect(guard.connect(other).setRepayDebtBufferBps(100)).to.be.revertedWithCustomError(
+      guard,
+      'OwnableUnauthorizedAccount',
+    );
   });
 
   it('setRequiresApproveReset stores flag and emits event', async () => {
@@ -231,9 +239,9 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
 
   it('setRequiresApproveReset reverts on zero token', async () => {
     const { guard } = await deploy();
-    await expect(guard.setRequiresApproveReset(ethers.ZeroAddress, true)).to.be.revertedWithCustomError(
-      guard, 'TokenZero',
-    );
+    await expect(
+      guard.setRequiresApproveReset(ethers.ZeroAddress, true),
+    ).to.be.revertedWithCustomError(guard, 'TokenZero');
   });
 
   it('setRequiresApproveReset reverts for non-owner', async () => {
@@ -252,7 +260,7 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     expect(await guard.getDecimals(ethers.ZeroAddress)).to.equal(18n);
   });
 
-  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+  it("isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard's balance)", async () => {
     const { guard } = await deploy();
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
@@ -424,7 +432,12 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const { guard } = await deploy();
     const pool = await deployPool();
     await expect(
-      guard.withdrawProcessing(pool, ethers.ZeroAddress, ethers.parseUnits('1', 18), ethers.ZeroAddress),
+      guard.withdrawProcessing(
+        pool,
+        ethers.ZeroAddress,
+        ethers.parseUnits('1', 18),
+        ethers.ZeroAddress,
+      ),
     ).to.be.revertedWithCustomError(guard, 'ToZero');
   });
 
@@ -433,7 +446,10 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const pool = await deployPool();
     const to = ethers.Wallet.createRandom().address;
     const [withdrawAsset, withdrawBalance, txs] = await guard.withdrawProcessing.staticCall(
-      pool, ethers.ZeroAddress, ethers.parseUnits('0.5', 18), to,
+      pool,
+      ethers.ZeroAddress,
+      ethers.parseUnits('0.5', 18),
+      to,
     );
     expect(withdrawAsset).to.equal(ethers.ZeroAddress);
     expect(withdrawBalance).to.equal(0n);
@@ -456,8 +472,12 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
 
     expect(await guard.getBalance(poolAddress, ethers.ZeroAddress)).to.be.gt(0n);
     await expect(guard.removeAssetCheck(poolAddress, ethers.ZeroAddress)).to.be.reverted;
-    expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await usdc.getAddress())).to.equal(false);
-    expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await weth.getAddress())).to.equal(false);
+    expect(
+      await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await usdc.getAddress()),
+    ).to.equal(false);
+    expect(
+      await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await weth.getAddress()),
+    ).to.equal(false);
   });
 
   // FNA-52: MorphoCollectLib's getBalance/getDeficit/collectDebts/collectSupplies/
@@ -485,8 +505,12 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     // being) on the active allowlist.
     expect(await guard.getBalance(poolAddress, ethers.ZeroAddress)).to.be.gt(0n);
     await expect(guard.removeAssetCheck(poolAddress, ethers.ZeroAddress)).to.be.reverted;
-    expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await usdc.getAddress())).to.equal(false);
-    expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await weth.getAddress())).to.equal(false);
+    expect(
+      await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await usdc.getAddress()),
+    ).to.equal(false);
+    expect(
+      await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await weth.getAddress()),
+    ).to.equal(false);
   });
 
   // FNA-54: getBalance() must clamp an underwater position to 0 (every NAV consumer sums
@@ -543,7 +567,9 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       await morpho.setPosition(id, poolAddress, 0n, 2_000_000_000n, ethers.parseEther('1'));
 
       expect(await guard.getBalance(poolAddress, ethers.ZeroAddress)).to.equal(0n);
-      expect(await guard.getDeficit(poolAddress, ethers.ZeroAddress)).to.equal(999_998_001_000_000_000_000n);
+      expect(await guard.getDeficit(poolAddress, ethers.ZeroAddress)).to.equal(
+        999_998_001_000_000_000_000n,
+      );
     });
   });
 
@@ -564,7 +590,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       const { guard, morpho, morphoManager, usdc, weth } = await deploy();
       const pool = await deployAssetPool([usdc, weth]);
       const poolAddress = await pool.getAddress();
-      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await weth.getAddress());
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+      );
       await morpho.setPosition(id, poolAddress, 500_000n, 0n, ethers.parseEther('2'));
 
       const gross = await guard.getBalance(poolAddress, ethers.ZeroAddress);
@@ -598,13 +630,39 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       };
       // loanToken = usdc, collateralToken = usdc too (a single-token market is fine here — only
       // the debt leg's token matters for this test, and USDC collateral keeps its cost at zero).
-      const usdcMarket = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress(), usdcTotals);
-      const wethMarket = await setupMarket(morpho, morphoManager, poolAddress, await weth.getAddress(), await usdc.getAddress(), wethTotals);
+      const usdcMarket = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await usdc.getAddress(),
+        usdcTotals,
+      );
+      const wethMarket = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await weth.getAddress(),
+        await usdc.getAddress(),
+        wethTotals,
+      );
 
       const usdcBorrowShares = 5_000n * 10n ** 6n;
       const wethBorrowShares = ethers.parseEther('1');
-      await morpho.setPosition(usdcMarket.id, poolAddress, 0n, usdcBorrowShares, 20_000n * 10n ** 6n);
-      await morpho.setPosition(wethMarket.id, poolAddress, 0n, wethBorrowShares, 20_000n * 10n ** 6n);
+      await morpho.setPosition(
+        usdcMarket.id,
+        poolAddress,
+        0n,
+        usdcBorrowShares,
+        20_000n * 10n ** 6n,
+      );
+      await morpho.setPosition(
+        wethMarket.id,
+        poolAddress,
+        0n,
+        wethBorrowShares,
+        20_000n * 10n ** 6n,
+      );
 
       await guard.setUniV3Fee(await usdc.getAddress(), await weth.getAddress(), 3000); // 0.3%
       await guard.setDefaultSlippageBps(50); // 0.5%
@@ -613,8 +671,16 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
 
       const gross = await guard.getBalance(poolAddress, ethers.ZeroAddress);
 
-      const repayAssetsEstUsdc = toAssetsUp(usdcBorrowShares, usdcTotals.totalBorrowAssets, usdcTotals.totalBorrowShares);
-      const repayAssetsEstWeth = toAssetsUp(wethBorrowShares, wethTotals.totalBorrowAssets, wethTotals.totalBorrowShares);
+      const repayAssetsEstUsdc = toAssetsUp(
+        usdcBorrowShares,
+        usdcTotals.totalBorrowAssets,
+        usdcTotals.totalBorrowShares,
+      );
+      const repayAssetsEstWeth = toAssetsUp(
+        wethBorrowShares,
+        wethTotals.totalBorrowAssets,
+        wethTotals.totalBorrowShares,
+      );
 
       // WETH leg (oracleMaxIn, exact-output gross-up — same formula as MorphoMathLib.oracleMaxIn).
       const wethFairUsdc = (repayAssetsEstWeth * 2000n * 10n ** 6n) / 10n ** 18n;
@@ -651,7 +717,14 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
         totalBorrowAssets: 1_000_000n * 10n ** 6n,
         totalBorrowShares: 1_000_000n * 10n ** 6n,
       };
-      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await weth.getAddress(), totals);
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+        totals,
+      );
 
       const borrowShares = 5_000n * 10n ** 6n;
       const collateralWeth = ethers.parseEther('10');
@@ -694,7 +767,14 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
         totalBorrowAssets: 80_000n * 10n ** 6n, // only 20% of supply is available liquidity
         totalBorrowShares: 80_000n * 10n ** 6n,
       };
-      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await weth.getAddress(), totals);
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+        totals,
+      );
 
       const supplyShares = totals.totalSupplyShares; // the pool holds the market's entire supply
       const borrowShares = 5_000n * 10n ** 6n;
@@ -710,7 +790,11 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       const net = await guard.getNetRealizableBalance(poolAddress, ethers.ZeroAddress);
       expect(net).to.be.lt(gross); // sanity: the WETH collateral leg's cost really is deducted
 
-      const fullSupplyAssets = toAssetsDown(supplyShares, totals.totalSupplyAssets, totals.totalSupplyShares);
+      const fullSupplyAssets = toAssetsDown(
+        supplyShares,
+        totals.totalSupplyAssets,
+        totals.totalSupplyShares,
+      );
       const availableLiquidity = totals.totalSupplyAssets - totals.totalBorrowAssets;
       const expectedPortion = maxPortionForMarket(availableLiquidity, fullSupplyAssets);
       expect(expectedPortion).to.be.lt(PORTION_DENOMINATOR); // sanity: the market really constrains
@@ -767,7 +851,7 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       expect(await guard.getWithdrawableBalance(poolAddress, ethers.ZeroAddress)).to.equal(full);
     });
 
-    it('is capped below getBalance() when the market\'s available supply liquidity is insufficient', async () => {
+    it("is capped below getBalance() when the market's available supply liquidity is insufficient", async () => {
       const { guard, morpho, morphoManager, usdc, weth } = await deploy();
       const pool = await deployAssetPool([usdc, weth]);
       const poolAddress = await pool.getAddress();
@@ -1005,7 +1089,8 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       // scaled down to match, not left uncapped while only supply on Market B shrank.
       expect(fp.withdrawPortion).to.equal(expectedPortion);
       // Debt repayment: 400,000 borrowShares * expectedPortion, rounded UP (mulPortionRoundUp).
-      const expectedRepay = (400_000n * expectedPortion + (PORTION_DENOMINATOR - 1n)) / PORTION_DENOMINATOR;
+      const expectedRepay =
+        (400_000n * expectedPortion + (PORTION_DENOMINATOR - 1n)) / PORTION_DENOMINATOR;
       expect(fp.debts[0].repayBorrowShares).to.equal(expectedRepay);
     });
   });
@@ -1027,7 +1112,9 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
 
     await morpho.setPosition(id, poolAddress, 1n, 1n, 1n);
 
-    expect(await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await dai.getAddress())).to.equal(true);
+    expect(
+      await guard.removeTokenCheck(poolAddress, ethers.ZeroAddress, await dai.getAddress()),
+    ).to.equal(true);
   });
 
   it('withdrawProcessing with supply and collateral but no debt builds direct withdraw transactions', async () => {
@@ -1183,7 +1270,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     // _estimateFlashAmount()'s own fee lookup for the WETH debt leg, the thing actually under test.
     // A genuinely distinct market pair (usdc/usdc) so this doesn't collide with an existing
     // (loanToken, collateralToken) market id above and silently overwrite its position.
-    const collateralMarket = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress());
+    const collateralMarket = await setupMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      await usdc.getAddress(),
+      await usdc.getAddress(),
+    );
     await morpho.setPosition(collateralMarket.id, poolAddress, 0n, 0n, 1_000_000n);
 
     await expect(
@@ -1221,7 +1314,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     // case above) so gross equity is positive and this test still reaches a built flashloan tx.
     // A genuinely distinct market pair (usdc/usdc) so this doesn't collide with an existing
     // (loanToken, collateralToken) market id above and silently overwrite its position.
-    const collateralMarket = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress());
+    const collateralMarket = await setupMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      await usdc.getAddress(),
+      await usdc.getAddress(),
+    );
     await morpho.setPosition(collateralMarket.id, poolAddress, 0n, 0n, 1_000_000n);
 
     const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
@@ -1263,7 +1362,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     // Both debts already share the same loan token (usdc), so no swap fee is needed anywhere here.
     // A genuinely distinct market pair (usdc/usdc) so this doesn't collide with an existing
     // (loanToken, collateralToken) market id above and silently overwrite its position.
-    const collateralMarket = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress());
+    const collateralMarket = await setupMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      await usdc.getAddress(),
+      await usdc.getAddress(),
+    );
     await morpho.setPosition(collateralMarket.id, poolAddress, 0n, 0n, 1_000_000n);
 
     const [withdrawAsset, , txs] = await guard.withdrawProcessing.staticCall(
@@ -1281,14 +1386,7 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const { guard, usdc, weth } = await deploy();
     const pool = await deployAssetPool([usdc, weth]);
     const usdcAddress = await usdc.getAddress();
-    const params = encodeFlashloanParams(
-      ethers.parseUnits('1', 18),
-      usdcAddress,
-      70n,
-      [],
-      [],
-      [],
-    );
+    const params = encodeFlashloanParams(ethers.parseUnits('1', 18), usdcAddress, 70n, [], [], []);
 
     await expect(
       guard.flashloanProcessing.staticCall(
@@ -1304,14 +1402,7 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const { guard, usdc } = await deploy();
     const pool = await deployAssetPool([usdc]);
     const usdcAddress = await usdc.getAddress();
-    const params = encodeFlashloanParams(
-      ethers.parseUnits('1', 18),
-      usdcAddress,
-      70n,
-      [],
-      [],
-      [],
-    );
+    const params = encodeFlashloanParams(ethers.parseUnits('1', 18), usdcAddress, 70n, [], [], []);
 
     const txs = await guard.flashloanProcessing.staticCall(
       await pool.getAddress(),
@@ -1330,7 +1421,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const poolAddress = await pool.getAddress();
     const usdcAddress = await usdc.getAddress();
     const wethAddress = await weth.getAddress();
-    const wethMarket = await setupMarket(morpho, morphoManager, poolAddress, wethAddress, usdcAddress);
+    const wethMarket = await setupMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      wethAddress,
+      usdcAddress,
+    );
     const params = encodeFlashloanParams(
       ethers.parseUnits('1', 18),
       usdcAddress,
@@ -1351,7 +1448,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const poolAddress = await pool.getAddress();
     const usdcAddress = await usdc.getAddress();
     const wethAddress = await weth.getAddress();
-    const usdcMarket = await setupMarket(morpho, morphoManager, poolAddress, usdcAddress, wethAddress);
+    const usdcMarket = await setupMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      usdcAddress,
+      wethAddress,
+    );
     const params = encodeFlashloanParams(
       ethers.parseUnits('1', 18),
       usdcAddress,
@@ -1382,9 +1485,27 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     const usdcAddress = await usdc.getAddress();
     const wethAddress = await weth.getAddress();
     const daiAddress = await dai.getAddress();
-    const firstWethDebt = await setupMarket(morpho, morphoManager, poolAddress, wethAddress, usdcAddress);
-    const secondWethDebt = await setupMarket(morpho, morphoManager, poolAddress, wethAddress, daiAddress);
-    const usdcMarket = await setupMarket(morpho, morphoManager, poolAddress, usdcAddress, wethAddress);
+    const firstWethDebt = await setupMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      wethAddress,
+      usdcAddress,
+    );
+    const secondWethDebt = await setupMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      wethAddress,
+      daiAddress,
+    );
+    const usdcMarket = await setupMarket(
+      morpho,
+      morphoManager,
+      poolAddress,
+      usdcAddress,
+      wethAddress,
+    );
     await guard.setUniV3Fee(usdcAddress, wethAddress, 3000);
     await guard.setUniV3Fee(wethAddress, usdcAddress, 3000);
 
@@ -1403,7 +1524,12 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       [[firstWethDebt.id, firstWethDebt.mp, 0n]],
     );
 
-    const txs = await guard.flashloanProcessing.staticCall(poolAddress, usdcAddress, 1_000_000n, params);
+    const txs = await guard.flashloanProcessing.staticCall(
+      poolAddress,
+      usdcAddress,
+      1_000_000n,
+      params,
+    );
 
     expect(txs.some((tx: any) => tx.to === morphoAddr)).to.equal(true);
     expect(txs.some((tx: any) => tx.to === swapRouter)).to.equal(true);
@@ -1456,7 +1582,12 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       collaterals,
     );
 
-    const txs = await guard.flashloanProcessing.staticCall(poolAddress, usdcAddress, 1_000_000n, params);
+    const txs = await guard.flashloanProcessing.staticCall(
+      poolAddress,
+      usdcAddress,
+      1_000_000n,
+      params,
+    );
 
     expect(txs.length).to.be.greaterThan(8);
     expect(txs.some((tx: any) => tx.to === morphoAddr)).to.equal(true);
@@ -1484,7 +1615,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       const wethAddress = await weth.getAddress();
 
       // WETH debt, USDC settlement — a genuine cross-token leg, requiring the exact-output swap.
-      const wethMarket = await setupMarket(morpho, morphoManager, poolAddress, wethAddress, usdcAddress);
+      const wethMarket = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        wethAddress,
+        usdcAddress,
+      );
       await guard.setUniV3Fee(usdcAddress, wethAddress, 3000);
 
       // A distinctive, nonzero buffer — if _swapSettlementToDebts() still buffered its
@@ -1555,7 +1692,13 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       const poolAddress = await pool.getAddress();
       const usdcAddress = await usdc.getAddress();
 
-      const usdcMarket = await setupMarket(morpho, morphoManager, poolAddress, usdcAddress, usdcAddress);
+      const usdcMarket = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        usdcAddress,
+        usdcAddress,
+      );
       await guard.setRepayDebtBufferBps(20);
 
       const repayBorrowShares = 500_000n;
@@ -1623,7 +1766,14 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       };
       // Single-token market (loanToken == collateralToken == USDC): settlementToken == USDC,
       // zero swap cost anywhere, isolating the raw repayment-obligation comparison.
-      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress(), totals);
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await usdc.getAddress(),
+        totals,
+      );
 
       const borrowShares = 1_000n * 10n ** 6n;
       await guard.setFlashAmountBufferBps(100); // 1% -- Morpho charges no premium, so the buffer
@@ -1631,7 +1781,11 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
       // Aave's flashloan premium plays in the equivalent Aave test.
       await guard.setRepayDebtBufferBps(0);
 
-      const repayAssetsEst = toAssetsUp(borrowShares, totals.totalBorrowAssets, totals.totalBorrowShares);
+      const repayAssetsEst = toAssetsUp(
+        borrowShares,
+        totals.totalBorrowAssets,
+        totals.totalBorrowShares,
+      );
       const flashAmount = (repayAssetsEst * 10_100n) / 10_000n; // +1% buffer
       // Collateral is ABOVE the raw debt (positive gross equity — does not hit the zero-equity
       // skip) but still below the buffered flashloan amount actually owed back.
@@ -1660,13 +1814,24 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
         totalBorrowAssets: 1_000_000n * 10n ** 6n,
         totalBorrowShares: 1_000_000n * 10n ** 6n,
       };
-      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress(), totals);
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await usdc.getAddress(),
+        totals,
+      );
 
       const borrowShares = 1_000n * 10n ** 6n;
       await guard.setFlashAmountBufferBps(100); // 1%, same as the insolvent case above
       await guard.setRepayDebtBufferBps(0);
 
-      const repayAssetsEst = toAssetsUp(borrowShares, totals.totalBorrowAssets, totals.totalBorrowShares);
+      const repayAssetsEst = toAssetsUp(
+        borrowShares,
+        totals.totalBorrowAssets,
+        totals.totalBorrowShares,
+      );
       const flashAmount = (repayAssetsEst * 10_100n) / 10_000n;
       const collateral = flashAmount + 10n; // clears the full buffered obligation
       await morpho.setPosition(id, poolAddress, 0n, borrowShares, collateral);
@@ -1687,7 +1852,7 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
     // (MorphoMathLib.oracleMinOut) the real collateral->settlement swap is bound by. A position
     // whose gross collateral value narrowly exceeds the outlay can still fail to produce enough
     // real settlement-token proceeds.
-    it('reverts when a non-settlement collateral leg\'s gross value covers the outlay but its actual swap-bounded proceeds do not', async () => {
+    it("reverts when a non-settlement collateral leg's gross value covers the outlay but its actual swap-bounded proceeds do not", async () => {
       const { guard, morpho, morphoManager, usdc, weth } = await deploy();
       const pool = await deployAssetPool([usdc, weth]);
       const poolAddress = await pool.getAddress();
@@ -1700,7 +1865,14 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
         totalBorrowShares: 1_000_000n * 10n ** 6n,
       };
       // loanToken = usdc (same as settlement -> zero settlement<->debt cost), collateralToken = weth.
-      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await weth.getAddress(), totals);
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await weth.getAddress(),
+        totals,
+      );
 
       const borrowShares = 1_000n * 10n ** 6n;
       await guard.setFlashAmountBufferBps(0);
@@ -1740,7 +1912,14 @@ describe('MorphoBlueLendingPoolAssetGuard', () => {
         totalBorrowAssets: 1_000_000n * 10n ** 6n,
         totalBorrowShares: 1_000_000n * 10n ** 6n,
       };
-      const { id } = await setupMarket(morpho, morphoManager, poolAddress, await usdc.getAddress(), await usdc.getAddress(), totals);
+      const { id } = await setupMarket(
+        morpho,
+        morphoManager,
+        poolAddress,
+        await usdc.getAddress(),
+        await usdc.getAddress(),
+        totals,
+      );
 
       // No collateral, no supply at all — debt exists, but gross equity is exactly 0.
       const borrowShares = 1_000n * 10n ** 6n;

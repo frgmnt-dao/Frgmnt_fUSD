@@ -13,7 +13,7 @@ Tracks cumulative trade slippage per pool manager across a rolling, decaying tim
 
 ## Access Control
 
-`updateSlippageImpact` is restricted by the `onlyContractGuard(router)` modifier: `msg.sender` must equal `IHasGuardInfo(poolFactory).getContractGuard(router)` — i.e. only the contract guard actually registered for that router in `Governance` may report slippage against it. The contract's own docs flag that it's the *calling guard's* responsibility to have already verified its own `msg.sender` (typically `poolLogic`) before invoking this — `SlippageAccumulator` itself only authenticates which guard is calling, not who asked that guard to act.
+`updateSlippageImpact` is restricted by the `onlyContractGuard(router)` modifier: `msg.sender` must equal `IHasGuardInfo(poolFactory).getContractGuard(router)` — i.e. only the contract guard actually registered for that router in `Governance` may report slippage against it. The contract's own docs flag that it's the _calling guard's_ responsibility to have already verified its own `msg.sender` (typically `poolLogic`) before invoking this — `SlippageAccumulator` itself only authenticates which guard is calling, not who asked that guard to act.
 
 ---
 
@@ -33,7 +33,7 @@ Only processes slippage when `swapData.srcAsset` is a supported asset of the poo
 function assetValue(address asset, uint256 amount) public view returns (uint256 value)
 ```
 
-Prices a raw token-amount delta from a swap leg via `IHasAssetInfo(poolFactory).getAssetPrice(asset)` and the asset's real decimals — `value = amount * price / 10**decimals`. Previously mirrored `PoolManagerLogic.assetValue()`'s `IPreValuedAssetGuard` short-circuit (treating the amount as already USD-18-denominated), which was wrong here: that shortcut's input elsewhere is an aggregate, already-fully-priced guard *balance*, not a raw per-unit token amount, so applying it to a swap leg silently assumed 18 decimals and an implicit $1/unit price — mispricing any pre-valued share worth more or less than $1 (Morpho Vault V2 / Aave V4 Tokenization), and introducing an additional 1e12 scaling error for a hypothetical 6-decimal share. Removed now that `getAssetPrice()` correctly returns a genuine per-unit price for such shares (see `IPreValuedAssetGuard.getUnitPrice()`).
+Prices a raw token-amount delta from a swap leg via `IHasAssetInfo(poolFactory).getAssetPrice(asset)` and the asset's real decimals — `value = amount * price / 10**decimals`. Previously mirrored `PoolManagerLogic.assetValue()`'s `IPreValuedAssetGuard` short-circuit (treating the amount as already USD-18-denominated), which was wrong here: that shortcut's input elsewhere is an aggregate, already-fully-priced guard _balance_, not a raw per-unit token amount, so applying it to a swap leg silently assumed 18 decimals and an implicit $1/unit price — mispricing any pre-valued share worth more or less than $1 (Morpho Vault V2 / Aave V4 Tokenization), and introducing an additional 1e12 scaling error for a hypothetical 6-decimal share. Removed now that `getAssetPrice()` correctly returns a genuine per-unit price for such shares (see `IPreValuedAssetGuard.getUnitPrice()`).
 
 ### `getCumulativeSlippageImpact`
 
@@ -47,11 +47,11 @@ Linearly decays the stored `accumulatedSlippage` toward zero over `decayTime` se
 
 ## Configuration Parameters
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
-| `poolFactory` | constructor (immutable) | Used for `getContractGuard()` (access control) and `getAssetPrice()` (pricing) |
-| `decayTime` | constructor, owner (`setDecayTime`) | Seconds over which accumulated slippage linearly decays to zero |
-| `maxCumulativeSlippage` | constructor, owner (`setMaxCumulativeSlippage`) | Cap (1e6-scaled, e.g. `5e4` = 5%) beyond which a swap reverts |
+| Parameter               | Set at                                          | Description                                                                    |
+| ----------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------ |
+| `poolFactory`           | constructor (immutable)                         | Used for `getContractGuard()` (access control) and `getAssetPrice()` (pricing) |
+| `decayTime`             | constructor, owner (`setDecayTime`)             | Seconds over which accumulated slippage linearly decays to zero                |
+| `maxCumulativeSlippage` | constructor, owner (`setMaxCumulativeSlippage`) | Cap (1e6-scaled, e.g. `5e4` = 5%) beyond which a swap reverts                  |
 
 ---
 

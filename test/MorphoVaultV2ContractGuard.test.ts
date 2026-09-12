@@ -181,7 +181,9 @@ describe('MorphoVaultV2ContractGuard', () => {
       } = await deploy();
       await morphoVaultV2Manager.setPoolVaults(poolLogicAddr, []); // delist
       expect(await morphoVaultV2Manager.isValidPoolVault(poolLogicAddr, vaultAddr)).to.equal(false);
-      expect(await morphoVaultV2Manager.isTrackedPoolVault(poolLogicAddr, vaultAddr)).to.equal(true);
+      expect(await morphoVaultV2Manager.isTrackedPoolVault(poolLogicAddr, vaultAddr)).to.equal(
+        true,
+      );
 
       const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, poolLogicAddr]);
       await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
@@ -239,7 +241,8 @@ describe('MorphoVaultV2ContractGuard', () => {
     });
 
     it('withdraw reverts "vault not tracked" for a vault that was never whitelisted at all (never tracked)', async () => {
-      const { guard, poolLogicSigner, poolManager, poolManagerAddr, poolLogicAddr } = await deploy();
+      const { guard, poolLogicSigner, poolManager, poolManagerAddr, poolLogicAddr } =
+        await deploy();
       const VaultFactory = await ethers.getContractFactory('MockMorphoVaultV2');
       const Token = await ethers.getContractFactory('MockERC20Custom');
       const otherUnderlying = await Token.deploy('DAI', 'DAI', 18);
@@ -251,11 +254,7 @@ describe('MorphoVaultV2ContractGuard', () => {
       await poolManager.setSupportedAsset(await otherUnderlying.getAddress(), true);
       // Deliberately never added to morphoVaultV2Manager.setPoolVaults for this pool.
 
-      const data = vaultIface.encodeFunctionData('withdraw', [
-        200n,
-        poolLogicAddr,
-        poolLogicAddr,
-      ]);
+      const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, poolLogicAddr]);
       await expect(
         callGuard(guard, poolLogicSigner, poolManagerAddr, neverListedVaultAddr, data),
       ).to.be.revertedWith('MorphoVaultV2Guard: vault not tracked');
@@ -293,8 +292,15 @@ describe('MorphoVaultV2ContractGuard', () => {
     // Regression coverage: the vault being supported+whitelisted must not be sufficient on its
     // own — otherwise converting between vault shares (counted in TVL) and the raw underlying
     // (uncounted) could be used to manufacture an artificial TVL/share-price swing.
-    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr, underlying } =
-      await deploy();
+    const {
+      guard,
+      poolLogicSigner,
+      poolManager,
+      poolManagerAddr,
+      vaultAddr,
+      poolLogicAddr,
+      underlying,
+    } = await deploy();
     await poolManager.setSupportedAsset(await underlying.getAddress(), false);
     const data = vaultIface.encodeFunctionData('deposit', [1000n, poolLogicAddr]);
     await expect(
@@ -329,8 +335,15 @@ describe('MorphoVaultV2ContractGuard', () => {
   });
 
   it('mint reverts when the vault is registered but its underlying is not a supported asset of this pool', async () => {
-    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr, underlying } =
-      await deploy();
+    const {
+      guard,
+      poolLogicSigner,
+      poolManager,
+      poolManagerAddr,
+      vaultAddr,
+      poolLogicAddr,
+      underlying,
+    } = await deploy();
     await poolManager.setSupportedAsset(await underlying.getAddress(), false);
     const data = vaultIface.encodeFunctionData('mint', [500n, poolLogicAddr]);
     await expect(
@@ -378,8 +391,15 @@ describe('MorphoVaultV2ContractGuard', () => {
     // This is the exact path the TVL-manipulation scenario relies on: withdrawing from a
     // registered, whitelisted vault whose underlying was never separately added would convert
     // counted vault shares into an uncounted raw-token balance.
-    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr, underlying } =
-      await deploy();
+    const {
+      guard,
+      poolLogicSigner,
+      poolManager,
+      poolManagerAddr,
+      vaultAddr,
+      poolLogicAddr,
+      underlying,
+    } = await deploy();
     await poolManager.setSupportedAsset(await underlying.getAddress(), false);
     const data = vaultIface.encodeFunctionData('withdraw', [200n, poolLogicAddr, poolLogicAddr]);
     await expect(
@@ -424,8 +444,15 @@ describe('MorphoVaultV2ContractGuard', () => {
   });
 
   it('redeem reverts when the vault is registered but its underlying is not a supported asset of this pool', async () => {
-    const { guard, poolLogicSigner, poolManager, poolManagerAddr, vaultAddr, poolLogicAddr, underlying } =
-      await deploy();
+    const {
+      guard,
+      poolLogicSigner,
+      poolManager,
+      poolManagerAddr,
+      vaultAddr,
+      poolLogicAddr,
+      underlying,
+    } = await deploy();
     await poolManager.setSupportedAsset(await underlying.getAddress(), false);
     const data = vaultIface.encodeFunctionData('redeem', [300n, poolLogicAddr, poolLogicAddr]);
     await expect(
@@ -514,11 +541,7 @@ describe('MorphoVaultV2ContractGuard', () => {
         777n,
         poolLogicAddr,
       ]);
-      const redeem = vaultIface.encodeFunctionData('redeem', [
-        500n,
-        poolLogicAddr,
-        poolLogicAddr,
-      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [500n, poolLogicAddr, poolLogicAddr]);
       const data = encodeMulticall([dealloc, redeem]);
 
       await expect(callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data))
@@ -535,8 +558,16 @@ describe('MorphoVaultV2ContractGuard', () => {
     });
 
     it('succeeds with multiple forceDeallocate legs (from different adapters) before the final withdraw', async () => {
-      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter, other } =
-        await deploy();
+      const {
+        guard,
+        poolLogicSigner,
+        poolManagerAddr,
+        vaultAddr,
+        poolLogicAddr,
+        vault,
+        adapter,
+        other,
+      } = await deploy();
       await vault.setAdapter(adapter.address, true);
       await vault.setAdapter(other.address, true); // second adapter, reusing `other`'s address
 
@@ -567,11 +598,7 @@ describe('MorphoVaultV2ContractGuard', () => {
 
     it('succeeds with zero forceDeallocate legs — a multicall wrapping just one redeem is equivalent to calling redeem directly', async () => {
       const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
-      const redeem = vaultIface.encodeFunctionData('redeem', [
-        500n,
-        poolLogicAddr,
-        poolLogicAddr,
-      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [500n, poolLogicAddr, poolLogicAddr]);
       const data = encodeMulticall([redeem]);
 
       const result = await guard
@@ -591,11 +618,7 @@ describe('MorphoVaultV2ContractGuard', () => {
     it('reverts when a non-last leg is not forceDeallocate', async () => {
       const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr } = await deploy();
       const deposit = vaultIface.encodeFunctionData('deposit', [1000n, poolLogicAddr]);
-      const redeem = vaultIface.encodeFunctionData('redeem', [
-        500n,
-        poolLogicAddr,
-        poolLogicAddr,
-      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [500n, poolLogicAddr, poolLogicAddr]);
       const data = encodeMulticall([deposit, redeem]);
       await expect(
         callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
@@ -642,8 +665,16 @@ describe('MorphoVaultV2ContractGuard', () => {
     });
 
     it('propagates a forceDeallocate leg validation failure (onBehalf != pool)', async () => {
-      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter, other } =
-        await deploy();
+      const {
+        guard,
+        poolLogicSigner,
+        poolManagerAddr,
+        vaultAddr,
+        poolLogicAddr,
+        vault,
+        adapter,
+        other,
+      } = await deploy();
       await vault.setAdapter(adapter.address, true);
       const dealloc = vaultIface.encodeFunctionData('forceDeallocate', [
         adapter.address,
@@ -651,11 +682,7 @@ describe('MorphoVaultV2ContractGuard', () => {
         100n,
         other.address, // wrong onBehalf
       ]);
-      const redeem = vaultIface.encodeFunctionData('redeem', [
-        500n,
-        poolLogicAddr,
-        poolLogicAddr,
-      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [500n, poolLogicAddr, poolLogicAddr]);
       const data = encodeMulticall([dealloc, redeem]);
       await expect(
         callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
@@ -672,11 +699,7 @@ describe('MorphoVaultV2ContractGuard', () => {
         100n,
         poolLogicAddr,
       ]);
-      const redeem = vaultIface.encodeFunctionData('redeem', [
-        500n,
-        poolLogicAddr,
-        poolLogicAddr,
-      ]);
+      const redeem = vaultIface.encodeFunctionData('redeem', [500n, poolLogicAddr, poolLogicAddr]);
       const data = encodeMulticall([dealloc, redeem]);
       await expect(
         callGuard(guard, poolLogicSigner, poolManagerAddr, vaultAddr, data),
@@ -684,8 +707,16 @@ describe('MorphoVaultV2ContractGuard', () => {
     });
 
     it('propagates the final leg validation failure (redeem receiver != pool)', async () => {
-      const { guard, poolLogicSigner, poolManagerAddr, vaultAddr, poolLogicAddr, vault, adapter, other } =
-        await deploy();
+      const {
+        guard,
+        poolLogicSigner,
+        poolManagerAddr,
+        vaultAddr,
+        poolLogicAddr,
+        vault,
+        adapter,
+        other,
+      } = await deploy();
       await vault.setAdapter(adapter.address, true);
       const dealloc = vaultIface.encodeFunctionData('forceDeallocate', [
         adapter.address,

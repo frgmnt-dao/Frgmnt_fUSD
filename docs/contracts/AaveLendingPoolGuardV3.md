@@ -38,23 +38,23 @@ Main entry point. Routes the transaction to the appropriate handler based on fun
 
 **Supported Aave V3 operations:**
 
-| Operation | Selector | Handler |
-|-----------|---------|---------|
-| `supply` | `0x617ba037` | `_deposit` |
-| `withdraw` | `0x69328dec` | `_withdraw` |
-| `borrow` | `0xa415bcad` | `_borrow` |
-| `repay` | `0x573ade81` | `_repay` |
-| `repayWithATokens` | `0x2dad97d4` | `_repayWithATokens` |
+| Operation                       | Selector     | Handler                          |
+| ------------------------------- | ------------ | -------------------------------- |
+| `supply`                        | `0x617ba037` | `_deposit`                       |
+| `withdraw`                      | `0x69328dec` | `_withdraw`                      |
+| `borrow`                        | `0xa415bcad` | `_borrow`                        |
+| `repay`                         | `0x573ade81` | `_repay`                         |
+| `repayWithATokens`              | `0x2dad97d4` | `_repayWithATokens`              |
 | `setUserUseReserveAsCollateral` | `0x5a3b74b9` | `_setUserUseReserveAsCollateral` |
-| `swapBorrowRateMode` | `0x94ba89a2` | `_swapBorrowRateMode` |
-| `rebalanceStableBorrowRate` | `0xcd112382` | `_rebalanceStableBorrowRate` |
+| `swapBorrowRateMode`            | `0x94ba89a2` | `_swapBorrowRateMode`            |
+| `rebalanceStableBorrowRate`     | `0xcd112382` | `_rebalanceStableBorrowRate`     |
 
 **Returns:**
 
-| Name | Type | Description |
-|------|------|-------------|
-| `txType` | `uint16` | Aave-specific transaction type code |
-| `isPublic` | `bool` | Always `false` — only manager/trader can execute |
+| Name       | Type     | Description                                      |
+| ---------- | -------- | ------------------------------------------------ |
+| `txType`   | `uint16` | Aave-specific transaction type code              |
+| `isPublic` | `bool`   | Always `false` — only manager/trader can execute |
 
 ---
 
@@ -71,6 +71,7 @@ function afterTxGuard(
 Post-execution hook. Called after every Aave transaction to verify that the health factor remains above the minimum threshold.
 
 **Validation:**
+
 ```
 healthFactor = aave.getUserAccountData(pool).healthFactor
 require(healthFactor > 1.01e18)
@@ -78,7 +79,7 @@ require(healthFactor > 1.01e18)
 
 Reverts if the health factor is not strictly above 1.01 after the transaction. Only checked for risk-increasing operations: `borrow` (always), `setUserUseReserveAsCollateral` when disabling collateral, and **every** `withdraw` regardless of size (see CertiK FNA-24 below).
 
-> **CertiK FNA-24**: `withdraw` was previously only treated as risk-increasing when Aave still reported the withdrawn reserve as collateral-enabled *after* the withdrawal executed (`afterTxGuard` runs post-transaction). Aave clears that exact flag when a withdrawal empties the caller's aToken balance for a reserve — so a **full** withdrawal of a collateral asset observed itself as already-disabled and skipped the health-factor check entirely, while an otherwise-identical **partial** withdrawal of the same asset (flag still `true`) was correctly checked. Checking unconditionally on every withdrawal closes that gap regardless of size, and is safe for a non-collateral or debt-free withdrawal too: health factor is unaffected by withdrawing an asset that wasn't backing any debt, and `getUserAccountData` reports `healthFactor = type(uint256).max` for a debt-free pool, so the check trivially passes in both cases.
+> **CertiK FNA-24**: `withdraw` was previously only treated as risk-increasing when Aave still reported the withdrawn reserve as collateral-enabled _after_ the withdrawal executed (`afterTxGuard` runs post-transaction). Aave clears that exact flag when a withdrawal empties the caller's aToken balance for a reserve — so a **full** withdrawal of a collateral asset observed itself as already-disabled and skipped the health-factor check entirely, while an otherwise-identical **partial** withdrawal of the same asset (flag still `true`) was correctly checked. Checking unconditionally on every withdrawal closes that gap regardless of size, and is safe for a non-collateral or debt-free withdrawal too: health factor is unaffected by withdrawing an asset that wasn't backing any debt, and `getUserAccountData` reports `healthFactor = type(uint256).max` for a debt-free pool, so the check trivially passes in both cases.
 
 ---
 
@@ -127,9 +128,9 @@ Reverts if the health factor is not strictly above 1.01 after the transaction. O
 
 ## Access Control
 
-| Caller | Permissions |
-|--------|------------|
-| PoolLogic | Can initiate `txGuard()` and `afterTxGuard()` |
+| Caller           | Permissions                                              |
+| ---------------- | -------------------------------------------------------- |
+| PoolLogic        | Can initiate `txGuard()` and `afterTxGuard()`            |
 | Manager / Trader | Must originate the `execTransaction()` call in PoolLogic |
 
 The guard itself has no owner or privileged roles — it is a stateless validator called via the guard dispatch system.
@@ -144,7 +145,7 @@ The minimum health factor of `1.01e18` (1.01 in Aave's 1e18 scale) provides a 1%
 
 ## Documented Rule: Single Debt-Asset Only
 
-`_borrow()` enforces that a pool may hold debt in only one asset at a time: before authorizing a new `borrow`, it iterates every *other* supported asset and requires zero stable/variable debt-token balance for each. This is a Frgmnt-specific risk-management rule, not an Aave V3 constraint — Aave itself supports multi-asset debt.
+`_borrow()` enforces that a pool may hold debt in only one asset at a time: before authorizing a new `borrow`, it iterates every _other_ supported asset and requires zero stable/variable debt-token balance for each. This is a Frgmnt-specific risk-management rule, not an Aave V3 constraint — Aave itself supports multi-asset debt.
 
 ---
 

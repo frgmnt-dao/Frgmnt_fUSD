@@ -53,12 +53,12 @@ describe('PoolManagerLogic', () => {
 
     // ---------- Initialize ----------
     await contract.initialize(
-      await owner.getAddress(),   // _factoryOwner
+      await owner.getAddress(), // _factoryOwner
       await manager.getAddress(), // _manager
-      'Manager Alpha',            // _managerName
+      'Manager Alpha', // _managerName
       await poolLogic.getAddress(), // _poolLogic
       await mockAssetHandler.getAddress(), // _assetHandler
-      await mockGovernance.getAddress(),   // _governance
+      await mockGovernance.getAddress(), // _governance
       500, // performanceFeeNumerator
       100, // managerFeeNumerator
     );
@@ -134,7 +134,7 @@ describe('PoolManagerLogic', () => {
     ).to.be.revertedWithCustomError(implementation, 'InvalidInitialization');
   });
 
-    it('reverts initialize with invalid inputs', async () => {
+  it('reverts initialize with invalid inputs', async () => {
     const [deployer, manager] = await ethers.getSigners();
     const MockPoolLogic = await ethers.getContractFactory('MockPoolLogic');
     const poolLogic = await MockPoolLogic.deploy();
@@ -153,33 +153,68 @@ describe('PoolManagerLogic', () => {
     // Invalid factory (zero)
     await expect(
       contract.initialize(
-        ethers.ZeroAddress, validManager, 'm', validPoolLogic, validAssetHandler, validGovernance, 0, 0,
+        ethers.ZeroAddress,
+        validManager,
+        'm',
+        validPoolLogic,
+        validAssetHandler,
+        validGovernance,
+        0,
+        0,
       ),
     ).to.be.revertedWithCustomError(contract, 'InvalidFactory');
 
     // Invalid manager (zero)
     await expect(
       contract.initialize(
-        validOwner, ethers.ZeroAddress, 'm', validPoolLogic, validAssetHandler, validGovernance, 0, 0,
+        validOwner,
+        ethers.ZeroAddress,
+        'm',
+        validPoolLogic,
+        validAssetHandler,
+        validGovernance,
+        0,
+        0,
       ),
     ).to.be.revertedWithCustomError(contract, 'InvalidManager');
 
     // Invalid governance (zero)
     await expect(
       contract.initialize(
-        validOwner, validManager, 'm', validPoolLogic, validAssetHandler, ethers.ZeroAddress, 0, 0,
+        validOwner,
+        validManager,
+        'm',
+        validPoolLogic,
+        validAssetHandler,
+        ethers.ZeroAddress,
+        0,
+        0,
       ),
     ).to.be.revertedWithCustomError(contract, 'InvalidGovernance');
 
     await expect(
       contract.initialize(
-        validOwner, validManager, 'm', validPoolLogic, ethers.ZeroAddress, validGovernance, 0, 0,
+        validOwner,
+        validManager,
+        'm',
+        validPoolLogic,
+        ethers.ZeroAddress,
+        validGovernance,
+        0,
+        0,
       ),
     ).to.be.revertedWith('invalid assetHandler');
 
     await expect(
       contract.initialize(
-        validOwner, validManager, 'm', validPoolLogic, validAssetHandler, validGovernance, 6000, 0,
+        validOwner,
+        validManager,
+        'm',
+        validPoolLogic,
+        validAssetHandler,
+        validGovernance,
+        6000,
+        0,
       ),
     ).to.be.revertedWith('invalid manager fee');
   });
@@ -210,7 +245,8 @@ describe('PoolManagerLogic', () => {
   // ========================================================================================
   describe('Asset management', () => {
     it('adds and removes assets with guard & validation', async () => {
-      const { contract, manager, mockAssetHandler, tokenA, tokenB } = await loadFixture(setupFixture);
+      const { contract, manager, mockAssetHandler, tokenA, tokenB } =
+        await loadFixture(setupFixture);
 
       // tokenB is already registered in assetHandler; add it to supported assets
       await expect(
@@ -236,9 +272,9 @@ describe('PoolManagerLogic', () => {
       const { contract, manager, owner, mockAssetHandler } = await loadFixture(setupFixture);
 
       // Lower max count to 16
-      await contract.connect(owner).setFactoryConfig(
-        16, 5000, 300, 100, 100, 10000, 0, 3 * 24 * 60 * 60,
-      );
+      await contract
+        .connect(owner)
+        .setFactoryConfig(16, 5000, 300, 100, 100, 10000, 0, 3 * 24 * 60 * 60);
 
       const adds: Asset[] = [];
       for (let i = 0; i < 15; i++) {
@@ -339,14 +375,19 @@ describe('PoolManagerLogic', () => {
       await contract.connect(manager).changeAssets([{ asset: tokenA, isDeposit: false }], []);
       expect(await contract.isDepositAsset(tokenA)).to.equal(false);
 
-      await expect(contract.connect(manager).changeAssets([], [mid])).to.emit(contract, 'AssetRemoved');
+      await expect(contract.connect(manager).changeAssets([], [mid])).to.emit(
+        contract,
+        'AssetRemoved',
+      );
       supported = await contract.getSupportedAssets();
       expect(supported.map((x: any) => x.asset)).to.deep.equal([high, tokenA]);
     });
 
     it('allows factory owner asset changes and skips max count when maximum is zero', async () => {
       const { contract, owner, mockAssetHandler, mockGovernance } = await loadFixture(setupFixture);
-      await contract.connect(owner).setFactoryConfig(0, 5000, 300, 100, 100, 10000, 0, 3 * 24 * 60 * 60);
+      await contract
+        .connect(owner)
+        .setFactoryConfig(0, 5000, 300, 100, 100, 10000, 0, 3 * 24 * 60 * 60);
 
       const noGuardAsset = ethers.Wallet.createRandom().address;
       await mockAssetHandler.addAsset(noGuardAsset, 2, DUMMY_AGGREGATOR);
@@ -383,7 +424,7 @@ describe('PoolManagerLogic', () => {
         expect(await contract.isSupportedAsset(tokenA)).to.equal(true);
       });
 
-      it('recovers once the asset type/guard registration is restored, matching the finding\'s own recommended sequence', async () => {
+      it("recovers once the asset type/guard registration is restored, matching the finding's own recommended sequence", async () => {
         const { contract, manager, mockAssetHandler, tokenA, tokenB } =
           await loadFixture(setupFixture);
         // tokenA is the fixture's only deposit asset — add a second one so removing tokenA
@@ -413,7 +454,7 @@ describe('PoolManagerLogic', () => {
     // removeAssetCheck() only checks its own pool balance) skipped it entirely. Moved into
     // _removeAsset() itself so it runs for every removal uniformly.
     describe('FNA-53: central cross-asset dependency check on every removal', () => {
-      it('reverts AssetStillReferenced when another supported asset\'s guard reports the candidate is still in use', async () => {
+      it("reverts AssetStillReferenced when another supported asset's guard reports the candidate is still in use", async () => {
         const { contract, manager, guard, tokenB } = await loadFixture(setupFixture);
         // tokenB shares assetType 1 (and therefore the same `guard` instance) with tokenA —
         // simplest way to make some *other* supported asset's guard object to the removal.
@@ -529,9 +570,7 @@ describe('PoolManagerLogic', () => {
 
     describe('FNA-23: fusd cannot be added as a supported asset of its own pool', () => {
       it('reverts CannotAddFusdAsAsset when adding fusd itself', async () => {
-        const { contract, manager, poolLogic, mockAssetHandler } = await loadFixture(
-          setupFixture,
-        );
+        const { contract, manager, poolLogic, mockAssetHandler } = await loadFixture(setupFixture);
         const fusd = ethers.Wallet.createRandom().address;
         await poolLogic.setFusd(fusd);
         await mockAssetHandler.addAsset(fusd, 1, DUMMY_AGGREGATOR);
@@ -593,7 +632,9 @@ describe('PoolManagerLogic', () => {
 
       const inc = await contract.getFeeIncreaseInfo();
 
-      await expect(contract.connect(manager).commitFeeIncrease()).to.be.revertedWith('delay active');
+      await expect(contract.connect(manager).commitFeeIncrease()).to.be.revertedWith(
+        'delay active',
+      );
 
       await time.increaseTo(inc[4] + 1n);
 
@@ -668,14 +709,14 @@ describe('PoolManagerLogic', () => {
     it('rejects fee increases above configured limits or performance-change allowance', async () => {
       const { contract, manager, owner } = await loadFixture(setupFixture);
 
-      await expect(contract.connect(manager).announceFeeIncrease(501, 100, 0, 0)).to.be.revertedWith(
-        'exceeded allowed increase',
-      );
+      await expect(
+        contract.connect(manager).announceFeeIncrease(501, 100, 0, 0),
+      ).to.be.revertedWith('exceeded allowed increase');
 
       await contract.connect(owner).setFactoryConfig(50, 5000, 300, 100, 100, 10000, 100, 1);
-      await expect(contract.connect(manager).announceFeeIncrease(700, 100, 0, 0)).to.be.revertedWith(
-        'exceeded allowed increase',
-      );
+      await expect(
+        contract.connect(manager).announceFeeIncrease(700, 100, 0, 0),
+      ).to.be.revertedWith('exceeded allowed increase');
     });
   });
 
@@ -750,7 +791,8 @@ describe('PoolManagerLogic', () => {
     });
 
     it('owner can update factory config and asset info/price/guards', async () => {
-      const { contract, owner, tokenA, mockAssetHandler, mockGovernance } = await loadFixture(setupFixture);
+      const { contract, owner, tokenA, mockAssetHandler, mockGovernance } =
+        await loadFixture(setupFixture);
 
       await contract.connect(owner).setFactoryConfig(20, 1500, 600, 150, 150, 10000, 200, 172800);
 
@@ -771,15 +813,16 @@ describe('PoolManagerLogic', () => {
     });
 
     it('protects factory-owner admin setters and rejects zero admin dependencies', async () => {
-      const { contract, owner, other, mockAssetHandler, mockGovernance } = await loadFixture(setupFixture);
+      const { contract, owner, other, mockAssetHandler, mockGovernance } =
+        await loadFixture(setupFixture);
 
       await expect(
         contract.connect(other).setFactoryConfig(20, 1500, 600, 150, 150, 10000, 200, 172800),
       ).to.be.revertedWith('only factoryOwner allowed');
 
-      await expect(contract.connect(other).setIsPool(await other.getAddress(), true)).to.be.revertedWith(
-        'only factoryOwner allowed',
-      );
+      await expect(
+        contract.connect(other).setIsPool(await other.getAddress(), true),
+      ).to.be.revertedWith('only factoryOwner allowed');
       await expect(contract.connect(owner).setAssetHandler(ethers.ZeroAddress)).to.be.revertedWith(
         'invalid assetHandler',
       );
@@ -787,14 +830,12 @@ describe('PoolManagerLogic', () => {
         'invalid governance',
       );
 
-      await expect(contract.connect(owner).setAssetHandler(await mockAssetHandler.getAddress())).to.emit(
-        contract,
-        'AssetHandlerUpdated',
-      );
-      await expect(contract.connect(owner).setGovernance(await mockGovernance.getAddress())).to.emit(
-        contract,
-        'GovernanceUpdated',
-      );
+      await expect(
+        contract.connect(owner).setAssetHandler(await mockAssetHandler.getAddress()),
+      ).to.emit(contract, 'AssetHandlerUpdated');
+      await expect(
+        contract.connect(owner).setGovernance(await mockGovernance.getAddress()),
+      ).to.emit(contract, 'GovernanceUpdated');
     });
 
     it('owner can change factory owner and rejects zero owner', async () => {
@@ -816,30 +857,27 @@ describe('PoolManagerLogic', () => {
     it('sets callback sender permissions and rejects zero caller', async () => {
       const { contract, manager, other } = await loadFixture(setupFixture);
 
-      await expect(contract.connect(manager).setAllowedCallbackSender(ethers.ZeroAddress, true)).to.be.revertedWith(
-        'caller=0',
-      );
+      await expect(
+        contract.connect(manager).setAllowedCallbackSender(ethers.ZeroAddress, true),
+      ).to.be.revertedWith('caller=0');
 
-      await expect(contract.connect(manager).setAllowedCallbackSender(await other.getAddress(), true)).to.emit(
-        contract,
-        'AllowedCallbackSenderSet',
-      );
+      await expect(
+        contract.connect(manager).setAllowedCallbackSender(await other.getAddress(), true),
+      ).to.emit(contract, 'AllowedCallbackSenderSet');
       expect(await contract.getAllowedCallbackSenders(await other.getAddress())).to.equal(true);
     });
 
     it('mints manager fee before changing manager and rejects zero manager', async () => {
       const { contract, manager, other, poolLogic } = await loadFixture(setupFixture);
 
-      await expect(contract.connect(manager).changeManager(ethers.ZeroAddress, 'Nobody')).to.be.revertedWithCustomError(
-        contract,
-        'InvalidManager',
-      );
+      await expect(
+        contract.connect(manager).changeManager(ethers.ZeroAddress, 'Nobody'),
+      ).to.be.revertedWithCustomError(contract, 'InvalidManager');
 
       const before = await poolLogic.mintCount_();
-      await expect(contract.connect(manager).changeManager(await other.getAddress(), 'Manager Beta')).to.emit(
-        contract,
-        'ManagerUpdated',
-      );
+      await expect(
+        contract.connect(manager).changeManager(await other.getAddress(), 'Manager Beta'),
+      ).to.emit(contract, 'ManagerUpdated');
       expect(await contract.manager()).to.equal(await other.getAddress());
       expect(await poolLogic.mintCount_()).to.equal(before + 1n);
     });
@@ -873,7 +911,6 @@ describe('PoolManagerLogic', () => {
 
       await expect(contract.assetDecimal(addr)).to.be.revertedWith('no guard');
     });
-
   });
 
   // ========================================================================================
@@ -961,8 +998,8 @@ describe('PoolManagerLogic', () => {
     // revert (rather than silently falling back to the identity price) when pricing isn't
     // available — the concrete consumer this closes is SlippageAccumulator.assetValue()
     // (SlippageAccumulator.test.ts), which prices a swapped asset via getAssetPrice() directly.
-    describe('getAssetPrice() dispatches to a pre-valued guard\'s getUnitPrice() (FNA-45 follow-up)', () => {
-      it('returns the guard\'s real unit price instead of AssetHandler\'s placeholder identity price', async () => {
+    describe("getAssetPrice() dispatches to a pre-valued guard's getUnitPrice() (FNA-45 follow-up)", () => {
+      it("returns the guard's real unit price instead of AssetHandler's placeholder identity price", async () => {
         const { contract, guard, mockAssetHandler, tokenA } = await loadFixture(setupFixture);
 
         await guard.setPreValued(true);
@@ -974,7 +1011,7 @@ describe('PoolManagerLogic', () => {
         expect(await contract.getAssetPrice(tokenA)).to.equal(ethers.parseUnits('2.5', 18));
       });
 
-      it('propagates the guard\'s revert instead of falling back to the placeholder identity price', async () => {
+      it("propagates the guard's revert instead of falling back to the placeholder identity price", async () => {
         const { contract, guard, tokenA } = await loadFixture(setupFixture);
 
         await guard.setPreValued(true);
@@ -985,7 +1022,7 @@ describe('PoolManagerLogic', () => {
         );
       });
 
-      it('a non-pre-valued guard is unaffected: getAssetPrice still returns AssetHandler\'s registered price', async () => {
+      it("a non-pre-valued guard is unaffected: getAssetPrice still returns AssetHandler's registered price", async () => {
         const { contract, guard, mockAssetHandler, tokenA } = await loadFixture(setupFixture);
 
         // Sanity: default MockAssetGuard state is not pre-valued.
@@ -1192,7 +1229,9 @@ describe('PoolManagerLogic', () => {
         const spokeGuard = await MockAssetGuard.deploy(18);
         await mockGovernance.setAssetGuard(2, await spokeGuard.getAddress());
         await mockAssetHandler.addAsset(tokenB, 2, DUMMY_AGGREGATOR);
-        await fixture.contract.connect(fixture.manager).changeAssets([{ asset: tokenB, isDeposit: false }], []);
+        await fixture.contract
+          .connect(fixture.manager)
+          .changeAssets([{ asset: tokenB, isDeposit: false }], []);
         return spokeGuard;
       }
 
@@ -1204,7 +1243,7 @@ describe('PoolManagerLogic', () => {
         expect(await contract.totalFundValue()).to.equal(ethers.parseUnits('1000', 18));
       });
 
-      it('subtracts an opted-in guard\'s reported deficit from the REST of the pool\'s positive balances, not just its own contribution', async () => {
+      it("subtracts an opted-in guard's reported deficit from the REST of the pool's positive balances, not just its own contribution", async () => {
         const fixture = await loadFixture(setupFixture);
         const { contract, guard } = fixture;
         const spokeGuard = await deployDeficitGuard(fixture);

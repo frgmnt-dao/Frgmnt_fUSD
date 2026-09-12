@@ -117,7 +117,9 @@ async function main() {
     const registered = await governance.contractGuards(UNISWAP_ROUTER);
     console.log('Governance.contractGuards(UNISWAP_ROUTER) now:', registered);
     if (registered.toLowerCase() !== newGuardAddress.toLowerCase()) {
-      throw new Error('Registration did not update as expected — investigate before relying on this fix.');
+      throw new Error(
+        'Registration did not update as expected — investigate before relying on this fix.',
+      );
     }
     console.log('\nDone.');
     return;

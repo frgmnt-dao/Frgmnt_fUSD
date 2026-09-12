@@ -294,7 +294,7 @@ describe('AaveV4TokenizationAssetGuard', () => {
       expect(await guard.getWithdrawableBalance(poolAddr, vaultAddr)).to.equal(full);
     });
 
-    it('is capped below getBalance() when the Hub\'s available liquidity is below the pool\'s claim', async () => {
+    it("is capped below getBalance() when the Hub's available liquidity is below the pool's claim", async () => {
       const { guard, poolManager, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
 
       const shares = ethers.parseUnits('1000', 18);
@@ -346,7 +346,7 @@ describe('AaveV4TokenizationAssetGuard', () => {
   // CertiK FNA-45 follow-up: getDecimals() previously hardcoded 18 (matching the placeholder
   // $1.00 identity aggregator this asset is registered against for PoolManagerLogic.assetValue(),
   // which never actually consults it) — it now returns the share token's own real decimals.
-  it('getDecimals returns the vault share token\'s own real decimals, not a hardcoded 18', async () => {
+  it("getDecimals returns the vault share token's own real decimals, not a hardcoded 18", async () => {
     const { guard, vaultAddr, usdcAddr } = await deploy();
     // The mock vault is a plain OZ ERC20 (18 decimals) — still correct, but no longer because it
     // was hardcoded.
@@ -361,7 +361,7 @@ describe('AaveV4TokenizationAssetGuard', () => {
     await expect(guard.getDecimals(ethers.ZeroAddress)).to.be.reverted;
   });
 
-  it('isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard\'s balance)', async () => {
+  it("isPreValuedAssetGuard returns true (FNA-02: PoolManagerLogic.assetValue() must not re-price this guard's balance)", async () => {
     const { guard } = await deploy();
     expect(await guard.isPreValuedAssetGuard()).to.equal(true);
   });
@@ -373,7 +373,7 @@ describe('AaveV4TokenizationAssetGuard', () => {
   // for the concrete consumer this closes).
   // -----------------------------------------------------------------------
   describe('getUnitPrice (CertiK FNA-45 follow-up)', () => {
-    it('values one whole share at a non-1:1 ratio and non-$1 underlying price, matching getBalance()\'s own arithmetic', async () => {
+    it("values one whole share at a non-1:1 ratio and non-$1 underlying price, matching getBalance()'s own arithmetic", async () => {
       const { guard, poolManager, vault, vaultAddr, usdcAddr } = await deploy();
 
       // 1 share (1e18) -> 1.1 USDC (1,100,000 raw 6dp units), USDC priced at $2 — same
@@ -384,7 +384,12 @@ describe('AaveV4TokenizationAssetGuard', () => {
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('2', 18));
 
       const oneShare = 10n ** 18n; // vault is an 18-decimal ERC20
-      const expected = expectedBalanceUsd18(oneShare, assetsPerShare, ethers.parseUnits('2', 18), 6n);
+      const expected = expectedBalanceUsd18(
+        oneShare,
+        assetsPerShare,
+        ethers.parseUnits('2', 18),
+        6n,
+      );
       // $2.20 — sanity-check the hand math independently of the shared helper.
       expect(expected).to.equal(ethers.parseUnits('2.2', 18));
 
@@ -417,13 +422,12 @@ describe('AaveV4TokenizationAssetGuard', () => {
       ).to.equal(expected);
     });
 
-    it('propagates the vault\'s own revert reason when asset() reverts, rather than returning a misleading price', async () => {
+    it("propagates the vault's own revert reason when asset() reverts, rather than returning a misleading price", async () => {
       const { guard, poolManager, vault, vaultAddr } = await deploy();
       await vault.setBrokenAsset(true);
 
-      await expect(
-        poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr),
-      ).to.be.reverted;
+      await expect(poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr)).to
+        .be.reverted;
     });
 
     it('reverts InvalidUnderlying when asset() succeeds but returns the zero address', async () => {
@@ -459,8 +463,8 @@ describe('AaveV4TokenizationAssetGuard', () => {
       await poolManager.setAssetPrice(usdcAddr, ethers.parseUnits('1', 18));
       await poolManager.setBrokenPrice(usdcAddr, true);
 
-      await expect(poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr))
-        .to.be.reverted;
+      await expect(poolManager.callGetUnitPrice.staticCall(await guard.getAddress(), vaultAddr)).to
+        .be.reverted;
     });
   });
 
@@ -664,13 +668,13 @@ describe('AaveV4TokenizationAssetGuard', () => {
       expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(true);
     });
 
-    it('returns true for a token that is not the vault\'s underlying, even with shares held', async () => {
+    it("returns true for a token that is not the vault's underlying, even with shares held", async () => {
       const { guard, poolAddr, vault, vaultAddr, other } = await deploy();
       await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
       expect(await guard.removeTokenCheck(poolAddr, vaultAddr, other.address)).to.equal(true);
     });
 
-    it('returns false for the vault\'s underlying while the pool still holds shares', async () => {
+    it("returns false for the vault's underlying while the pool still holds shares", async () => {
       const { guard, poolAddr, vault, vaultAddr, usdcAddr } = await deploy();
       await vault.mintShares(poolAddr, ethers.parseUnits('1000', 18));
       expect(await guard.removeTokenCheck(poolAddr, vaultAddr, usdcAddr)).to.equal(false);

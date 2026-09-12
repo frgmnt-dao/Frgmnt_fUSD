@@ -25,9 +25,9 @@ describe('MerklRewardClaimGuard', () => {
     // MockPoolManagerLogic that returns poolLogicCaller as its poolLogic
     const PMFactory = await ethers.getContractFactory('MockPoolManagerLogicWithAssets');
     const poolManager = await PMFactory.deploy(
-      deployer.address,       // factory
-      poolLogicCallerAddr,    // poolLogic = the caller contract
-      deployer.address,       // manager
+      deployer.address, // factory
+      poolLogicCallerAddr, // poolLogic = the caller contract
+      deployer.address, // manager
     );
     await poolManager.waitForDeployment();
     const poolManagerAddr = await poolManager.getAddress();
@@ -53,10 +53,10 @@ describe('MerklRewardClaimGuard', () => {
   function encodeValidClaim(poolLogicAddr: string) {
     const token = ethers.Wallet.createRandom().address;
     return claimIface.encodeFunctionData('claim', [
-      [poolLogicAddr],         // users
-      [token],                 // tokens
-      [ethers.parseEther('1')],// amounts
-      [[]],                    // proofs (empty bytes32[][])
+      [poolLogicAddr], // users
+      [token], // tokens
+      [ethers.parseEther('1')], // amounts
+      [[]], // proofs (empty bytes32[][])
     ]);
   }
 
@@ -68,9 +68,9 @@ describe('MerklRewardClaimGuard', () => {
   it('txGuard reverts when not called by poolLogic', async () => {
     const { guard, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } = await deploy();
     const data = encodeValidClaim(poolLogicCallerAddr);
-    await expect(
-      guard.txGuard(poolManagerAddr, merklDistributorAddress, data),
-    ).to.be.revertedWith('MerklRewardGuard: not pool logic');
+    await expect(guard.txGuard(poolManagerAddr, merklDistributorAddress, data)).to.be.revertedWith(
+      'MerklRewardGuard: not pool logic',
+    );
   });
 
   it('txGuard reverts for invalid method selector', async () => {
@@ -87,8 +87,13 @@ describe('MerklRewardClaimGuard', () => {
   });
 
   it('txGuard reverts when multiple users in claim', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } =
-      await deploy();
+    const {
+      guard,
+      poolLogicCaller,
+      poolManagerAddr,
+      merklDistributorAddress,
+      poolLogicCallerAddr,
+    } = await deploy();
     const token = ethers.Wallet.createRandom().address;
     const data = claimIface.encodeFunctionData('claim', [
       [poolLogicCallerAddr, ethers.Wallet.createRandom().address], // 2 users
@@ -127,8 +132,13 @@ describe('MerklRewardClaimGuard', () => {
   });
 
   it('txGuard succeeds for valid claim and emits event', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } =
-      await deploy();
+    const {
+      guard,
+      poolLogicCaller,
+      poolManagerAddr,
+      merklDistributorAddress,
+      poolLogicCallerAddr,
+    } = await deploy();
     const token = ethers.Wallet.createRandom().address;
     const amount = ethers.parseEther('100');
     const data = claimIface.encodeFunctionData('claim', [
@@ -148,15 +158,25 @@ describe('MerklRewardClaimGuard', () => {
     expect(isPublic).to.equal(false);
 
     await expect(
-      poolLogicCaller.callTxGuard(await guard.getAddress(), poolManagerAddr, merklDistributorAddress, data),
+      poolLogicCaller.callTxGuard(
+        await guard.getAddress(),
+        poolManagerAddr,
+        merklDistributorAddress,
+        data,
+      ),
     )
       .to.emit(guard, 'MerklRewardClaimed')
       .withArgs(poolLogicCallerAddr, token, amount);
   });
 
   it('afterTxGuard succeeds when called by poolLogic', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } =
-      await deploy();
+    const {
+      guard,
+      poolLogicCaller,
+      poolManagerAddr,
+      merklDistributorAddress,
+      poolLogicCallerAddr,
+    } = await deploy();
     const data = encodeValidClaim(poolLogicCallerAddr);
     await poolLogicCaller.callAfterTxGuard(
       await guard.getAddress(),
@@ -180,8 +200,13 @@ describe('MerklRewardClaimGuard', () => {
   // mechanism is identical regardless of which integration's activity earned the reward — the
   // same claim() call, same guard, same validation, just against Merkl's one shared Distributor.
   it('FNA-19: the identical claim() call is accepted regardless of which integration earned the reward', async () => {
-    const { guard, poolLogicCaller, poolManagerAddr, merklDistributorAddress, poolLogicCallerAddr } =
-      await deploy();
+    const {
+      guard,
+      poolLogicCaller,
+      poolManagerAddr,
+      merklDistributorAddress,
+      poolLogicCallerAddr,
+    } = await deploy();
     const payoutToken = ethers.Wallet.createRandom().address; // e.g. an Aave V4 Spoke reserve's Merkl payoutToken
     const amount = ethers.parseEther('42');
     const data = claimIface.encodeFunctionData('claim', [

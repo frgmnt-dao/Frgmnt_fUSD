@@ -14,10 +14,10 @@ The cap is enforced only on user deposits. PoolLogic reward and fee mints are no
 
 ### New State
 
-| Variable | Purpose |
-|----------|---------|
-| `maxDepositFusdSupply` | Maximum outstanding fUSD level at which deposits may mint additional fUSD |
-| `protocolFusdOutstanding` | Tracked outstanding fUSD used for deposit-cap utilization |
+| Variable                  | Purpose                                                                   |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `maxDepositFusdSupply`    | Maximum outstanding fUSD level at which deposits may mint additional fUSD |
+| `protocolFusdOutstanding` | Tracked outstanding fUSD used for deposit-cap utilization                 |
 
 `protocolFusdOutstanding` is updated in the ERC20 `_update` hook:
 

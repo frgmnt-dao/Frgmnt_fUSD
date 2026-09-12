@@ -160,34 +160,98 @@ describe('Utility libraries', () => {
       const { fund } = await loadFixture(deployLibrariesFixture);
       const now = await time.latest();
 
-      const [, sameTimestamp] = await fund.calculateManagementFee(1_000n, BigInt(now), 1_000n, 10_000n);
+      const [, sameTimestamp] = await fund.calculateManagementFee(
+        1_000n,
+        BigInt(now),
+        1_000n,
+        10_000n,
+      );
       expect(sameTimestamp).to.equal(BigInt(now));
 
       const oneDayAgo = BigInt(now - 24 * 60 * 60);
       expect((await fund.calculateManagementFee(0n, oneDayAgo, 1_000n, 10_000n))[0]).to.equal(0n);
       expect((await fund.calculateManagementFee(1_000n, oneDayAgo, 0n, 10_000n))[0]).to.equal(0n);
-      expect((await fund.calculateManagementFee(ethers.parseUnits('365', 18), oneDayAgo, 1_000n, 10_000n))[0]).to.equal(
-        ethers.parseUnits('0.1', 18),
-      );
+      expect(
+        (
+          await fund.calculateManagementFee(
+            ethers.parseUnits('365', 18),
+            oneDayAgo,
+            1_000n,
+            10_000n,
+          )
+        )[0],
+      ).to.equal(ethers.parseUnits('0.1', 18));
     });
 
     it('converts FUSD to asset amounts across support, price, and decimal branches', async () => {
-      const { fund, poolManager, token6, token18, token20 } = await loadFixture(deployLibrariesFixture);
+      const { fund, poolManager, token6, token18, token20 } =
+        await loadFixture(deployLibrariesFixture);
       const amount = ethers.parseUnits('1', 18);
 
-      expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), 0n, await token18.getAddress())).to.equal(0n);
-      expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), amount, await token18.getAddress())).to.equal(0n);
+      expect(
+        await fund.fusdToAssetAmount(
+          await poolManager.getAddress(),
+          0n,
+          await token18.getAddress(),
+        ),
+      ).to.equal(0n);
+      expect(
+        await fund.fusdToAssetAmount(
+          await poolManager.getAddress(),
+          amount,
+          await token18.getAddress(),
+        ),
+      ).to.equal(0n);
 
       await poolManager.setSupportedAsset(await token18.getAddress(), true, 0n, 18);
-      expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), amount, await token18.getAddress())).to.equal(0n);
+      expect(
+        await fund.fusdToAssetAmount(
+          await poolManager.getAddress(),
+          amount,
+          await token18.getAddress(),
+        ),
+      ).to.equal(0n);
 
-      await poolManager.setSupportedAsset(await token6.getAddress(), true, ethers.parseUnits('1', 18), 6);
-      await poolManager.setSupportedAsset(await token18.getAddress(), true, ethers.parseUnits('1', 18), 18);
-      await poolManager.setSupportedAsset(await token20.getAddress(), true, ethers.parseUnits('1', 18), 20);
+      await poolManager.setSupportedAsset(
+        await token6.getAddress(),
+        true,
+        ethers.parseUnits('1', 18),
+        6,
+      );
+      await poolManager.setSupportedAsset(
+        await token18.getAddress(),
+        true,
+        ethers.parseUnits('1', 18),
+        18,
+      );
+      await poolManager.setSupportedAsset(
+        await token20.getAddress(),
+        true,
+        ethers.parseUnits('1', 18),
+        20,
+      );
 
-      expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), amount, await token6.getAddress())).to.equal(1_000_000n);
-      expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), amount, await token18.getAddress())).to.equal(amount);
-      expect(await fund.fusdToAssetAmount(await poolManager.getAddress(), amount, await token20.getAddress())).to.equal(10n ** 20n);
+      expect(
+        await fund.fusdToAssetAmount(
+          await poolManager.getAddress(),
+          amount,
+          await token6.getAddress(),
+        ),
+      ).to.equal(1_000_000n);
+      expect(
+        await fund.fusdToAssetAmount(
+          await poolManager.getAddress(),
+          amount,
+          await token18.getAddress(),
+        ),
+      ).to.equal(amount);
+      expect(
+        await fund.fusdToAssetAmount(
+          await poolManager.getAddress(),
+          amount,
+          await token20.getAddress(),
+        ),
+      ).to.equal(10n ** 20n);
     });
 
     // FNA-04 regression coverage.
@@ -196,7 +260,9 @@ describe('Utility libraries', () => {
         const { fund, poolManager } = await loadFixture(deployLibrariesFixture);
         await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
 
-        let [total, complete] = await fund.totalValueWithCompleteness(await poolManager.getAddress());
+        let [total, complete] = await fund.totalValueWithCompleteness(
+          await poolManager.getAddress(),
+        );
         expect(total).to.equal(ethers.parseUnits('1000', 18));
         expect(complete).to.equal(true);
 
@@ -242,7 +308,8 @@ describe('Utility libraries', () => {
       });
 
       it("subtracts the reserved leg's current USD value from the gross total", async () => {
-        const { fund, poolManager, fundCalcPool, token18 } = await loadFixture(deployLibrariesFixture);
+        const { fund, poolManager, fundCalcPool, token18 } =
+          await loadFixture(deployLibrariesFixture);
         const assetAddr = await token18.getAddress();
         await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1', 18), 18);
         await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
@@ -256,7 +323,8 @@ describe('Utility libraries', () => {
       });
 
       it('floors at zero rather than underflowing if the reserved value somehow exceeds the gross total', async () => {
-        const { fund, poolManager, fundCalcPool, token18 } = await loadFixture(deployLibrariesFixture);
+        const { fund, poolManager, fundCalcPool, token18 } =
+          await loadFixture(deployLibrariesFixture);
         const assetAddr = await token18.getAddress();
         await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1', 18), 18);
         await poolManager.setTotalFundValue(ethers.parseUnits('100', 18));
@@ -270,7 +338,8 @@ describe('Utility libraries', () => {
       });
 
       it('FNA-17: a price increase on the reserved leg is excluded, while the same increase on the rest of the pool is still recognized', async () => {
-        const { fund, poolManager, fundCalcPool, token18 } = await loadFixture(deployLibrariesFixture);
+        const { fund, poolManager, fundCalcPool, token18 } =
+          await loadFixture(deployLibrariesFixture);
         const assetAddr = await token18.getAddress();
         await poolManager.setSupportedAsset(assetAddr, true, ethers.parseUnits('1', 18), 18);
         await fundCalcPool.setReservedAssetBalance(assetAddr, ethers.parseUnits('100000', 18));
@@ -431,7 +500,9 @@ describe('Utility libraries', () => {
             denominator,
             false,
           );
-          expect(step1.managementFee).to.equal((preDepositSupply * mgmtNumerator * (30n * day)) / denominator / (365n * day));
+          expect(step1.managementFee).to.equal(
+            (preDepositSupply * mgmtNumerator * (30n * day)) / denominator / (365n * day),
+          );
 
           // Step 2: the deposit lands right after step 1's checkpoint. The next accrual (here,
           // "now") only covers the 1 day since step 1, correctly charged against the new,
@@ -447,7 +518,9 @@ describe('Utility libraries', () => {
             denominator,
             false,
           );
-          expect(step2.managementFee).to.equal((postDepositSupply * mgmtNumerator * (1n * day)) / denominator / (365n * day));
+          expect(step2.managementFee).to.equal(
+            (postDepositSupply * mgmtNumerator * (1n * day)) / denominator / (365n * day),
+          );
 
           const totalWithCheckpoint = step1.managementFee + step2.managementFee;
 
@@ -607,7 +680,8 @@ describe('Utility libraries', () => {
         // 40*1e18/90. Applied to the same gross 90 balance, extraction now matches netFusd up to
         // negligible (sub-wei-of-a-cent) floor-division dust from composing two divisions — never
         // exceeding it, unlike the old formula's real, economically-significant 5-token overshoot.
-        const expectedPortion = (netFusd * ethers.parseUnits('1', 18)) / ethers.parseUnits('90', 18);
+        const expectedPortion =
+          (netFusd * ethers.parseUnits('1', 18)) / ethers.parseUnits('90', 18);
         expect(portion).to.equal(expectedPortion);
         const extracted = (ethers.parseUnits('90', 18) * portion) / ethers.parseUnits('1', 18);
         expect(extracted).to.be.lessThanOrEqual(netFusd);
@@ -711,7 +785,7 @@ describe('Utility libraries', () => {
       // FNA-34: totalClaims previously omitted totalRewardAccrued - totalRewardHarvested — reward
       // fUSD the protocol is already committed to minting via harvest() but hasn't minted yet, a
       // real outstanding claim just like any already-minted balance.
-      it('includes the pool\'s unharvested reward claim in totalClaims, haircutting a withdrawal the old formula would have paid at par', async () => {
+      it("includes the pool's unharvested reward claim in totalClaims, haircutting a withdrawal the old formula would have paid at par", async () => {
         const { fund, fundCalcPool, assetGuard18, token18, manager } = await setupPool();
         await token18.mint(await manager.getAddress(), ethers.parseUnits('50', 18)); // Bob's remaining claim
         await assetGuard18.setBalance(ethers.parseUnits('100', 18)); // fundValue == old totalClaims (100)
@@ -729,10 +803,11 @@ describe('Utility libraries', () => {
         // Old (buggy) formula: totalClaims = 50 + 50 = 100 = fundValue -> no haircut, portion =
         // 0.5e18. Fixed: totalClaims = 50 + 50 + 20 = 120 -> fairFusd = 50*100/120 = 41.666...,
         // portion = fairFusd * 1e18 / 100.
-        const expectedFairFusd = (ethers.parseUnits('50', 18) * ethers.parseUnits('100', 18)) /
+        const expectedFairFusd =
+          (ethers.parseUnits('50', 18) * ethers.parseUnits('100', 18)) /
           ethers.parseUnits('120', 18);
-        const expectedPortion = (expectedFairFusd * ethers.parseUnits('1', 18)) /
-          ethers.parseUnits('100', 18);
+        const expectedPortion =
+          (expectedFairFusd * ethers.parseUnits('1', 18)) / ethers.parseUnits('100', 18);
         expect(portion).to.equal(expectedPortion);
         expect(portion).to.be.lt(ethers.parseUnits('0.5', 18));
       });
@@ -794,7 +869,9 @@ describe('Utility libraries', () => {
         // balance would withdraw 55, not 40 — the exact overextraction CertiK's PoC demonstrated).
         // withdrawableFundValue(80) + totalDeficit(30) reconstructs the gross figure (110) the
         // guard's own balance actually is: portion = 40*1e18/110.
-        expect(portion).to.equal((ethers.parseUnits('40', 18) * 10n ** 18n) / ethers.parseUnits('110', 18));
+        expect(portion).to.equal(
+          (ethers.parseUnits('40', 18) * 10n ** 18n) / ethers.parseUnits('110', 18),
+        );
       });
 
       // FNA-38: a coexisting finalized-but-unclaimed request's FUSD is still counted in
@@ -1016,7 +1093,7 @@ describe('Utility libraries', () => {
 
       // FNA-34: same fix as computeImmediateWithdrawPortion above, applied here too — leaving
       // only the immediate path fixed would just move the exploit to queued withdrawals.
-      it('includes the pool\'s unharvested reward claim in totalClaims, haircutting a finalize the old formula would have paid at par', async () => {
+      it("includes the pool's unharvested reward claim in totalClaims, haircutting a finalize the old formula would have paid at par", async () => {
         const { fund, fundCalcPool, assetGuard18, assetAddr } = await setupPool();
         await assetGuard18.setBalance(ethers.parseUnits('100', 18)); // fundValue == old totalClaims (100)
         await fundCalcPool.setTotalRewardAccrued(ethers.parseUnits('20', 18));
@@ -1030,7 +1107,8 @@ describe('Utility libraries', () => {
         // Old (buggy) formula: totalClaims = 100 (manager's fUSD balance from setupPool) =
         // fundValue -> no haircut, assetAmount = 50. Fixed: totalClaims = 100 + 20 = 120 ->
         // effectiveFusd = 50*100/120 = 41.666...
-        const expected = (ethers.parseUnits('50', 18) * ethers.parseUnits('100', 18)) /
+        const expected =
+          (ethers.parseUnits('50', 18) * ethers.parseUnits('100', 18)) /
           ethers.parseUnits('120', 18);
         expect(assetAmount).to.equal(expected);
         expect(assetAmount).to.be.lt(ethers.parseUnits('50', 18));
@@ -1102,11 +1180,16 @@ describe('Utility libraries', () => {
   describe('TxDataUtils', () => {
     it('exposes sliceUint success and bounds branches', async () => {
       const { txData } = await loadFixture(deployLibrariesFixture);
-      const encoded = ethers.AbiCoder.defaultAbiCoder().encode(['uint256', 'uint256'], [123n, 456n]);
+      const encoded = ethers.AbiCoder.defaultAbiCoder().encode(
+        ['uint256', 'uint256'],
+        [123n, 456n],
+      );
 
       expect(await txData.exposedSliceUint(encoded, 0n)).to.equal(123n);
       expect(await txData.exposedSliceUint(encoded, 32n)).to.equal(456n);
-      await expect(txData.exposedSliceUint(encoded, 33n)).to.be.revertedWith('slicing out of range');
+      await expect(txData.exposedSliceUint(encoded, 33n)).to.be.revertedWith(
+        'slicing out of range',
+      );
     });
 
     it('covers zero-length slices through selector-only calldata and short bytes reads', async () => {
@@ -1114,14 +1197,19 @@ describe('Utility libraries', () => {
       const selectorOnly = '0x12345678';
 
       expect(await txData.getParams(selectorOnly)).to.equal('0x');
-      await expect(txData.getBytes(selectorOnly, 0, 0)).to.be.revertedWith('Reading bytes out of bounds');
+      await expect(txData.getBytes(selectorOnly, 0, 0)).to.be.revertedWith(
+        'Reading bytes out of bounds',
+      );
     });
   });
 
   describe('AddressHelper', () => {
     it('performs low-level calls, delegatecalls, and bubbles reverts', async () => {
       const { addressHelper, addressTarget } = await loadFixture(deployLibrariesFixture);
-      const targetIface = new ethers.Interface(['function setValue(uint256)', 'function failWithReason()']);
+      const targetIface = new ethers.Interface([
+        'function setValue(uint256)',
+        'function failWithReason()',
+      ]);
 
       expect(
         await addressHelper.tryCall.staticCall(
@@ -1129,7 +1217,10 @@ describe('Utility libraries', () => {
           targetIface.encodeFunctionData('setValue', [11n]),
         ),
       ).to.equal(true);
-      await addressHelper.tryCall(await addressTarget.getAddress(), targetIface.encodeFunctionData('setValue', [11n]));
+      await addressHelper.tryCall(
+        await addressTarget.getAddress(),
+        targetIface.encodeFunctionData('setValue', [11n]),
+      );
       expect(await addressTarget.value()).to.equal(11n);
 
       await addressHelper.tryDelegateCall(
@@ -1139,10 +1230,16 @@ describe('Utility libraries', () => {
       expect(await addressHelper.value()).to.equal(22n);
 
       await expect(
-        addressHelper.tryCall(await addressTarget.getAddress(), targetIface.encodeFunctionData('failWithReason')),
+        addressHelper.tryCall(
+          await addressTarget.getAddress(),
+          targetIface.encodeFunctionData('failWithReason'),
+        ),
       ).to.be.revertedWith('target failed');
       await expect(
-        addressHelper.tryDelegateCall(await addressTarget.getAddress(), targetIface.encodeFunctionData('failWithReason')),
+        addressHelper.tryDelegateCall(
+          await addressTarget.getAddress(),
+          targetIface.encodeFunctionData('failWithReason'),
+        ),
       ).to.be.revertedWith('target failed');
     });
   });
@@ -1163,7 +1260,9 @@ describe('Utility libraries', () => {
       await expect(dateTime.validateDayOfWeek(0)).to.be.revertedWith('invalid day of week');
       await expect(dateTime.validateDayOfWeek(8)).to.be.revertedWith('invalid day of week');
       await expect(dateTime.validateHour(24)).to.be.revertedWith('invalid hour');
-      await expect(dateTime.timestampFromDate(1969, 12, 31)).to.be.revertedWith('1970 and later only');
+      await expect(dateTime.timestampFromDate(1969, 12, 31)).to.be.revertedWith(
+        '1970 and later only',
+      );
     });
   });
 
@@ -1214,7 +1313,7 @@ describe('Utility libraries', () => {
     // settlement swap. Composing instead preserves the full 70bps on top of the correct,
     // direction-specific floor.
     describe('FNA-49: exact-input uses the fee-only floor, exact-output the gross-up, both composed with the configured tolerance', () => {
-      it('reproduces the finding\'s own 1% (10000) tier numbers exactly', async () => {
+      it("reproduces the finding's own 1% (10000) tier numbers exactly", async () => {
         const { morphoMath } = await loadFixture(deployLibrariesFixture);
 
         // Fee-only floor: 10000 * 10000 / 1e6 = 100.
@@ -1242,7 +1341,8 @@ describe('Utility libraries', () => {
 
   describe('MorphoChecksLib', () => {
     async function registerMarket(position: [bigint, bigint, bigint]) {
-      const { morphoChecks, morpho, morphoManager, token6, token18, trader } = await loadFixture(deployLibrariesFixture);
+      const { morphoChecks, morpho, morphoManager, token6, token18, trader } =
+        await loadFixture(deployLibrariesFixture);
       const pool = await trader.getAddress();
       const marketParams: [string, string, string, string, bigint] = [
         await token6.getAddress(),
@@ -1252,7 +1352,14 @@ describe('Utility libraries', () => {
         ethers.parseEther('0.8'),
       ];
       const marketId = await morpho.marketId(marketParams);
-      await morpho.setMarket(marketParams, [1_000_000n, 1_000_000n, 1_000_000n, 1_000_000n, 0n, 0n]);
+      await morpho.setMarket(marketParams, [
+        1_000_000n,
+        1_000_000n,
+        1_000_000n,
+        1_000_000n,
+        0n,
+        0n,
+      ]);
       await morphoManager.setPoolMarkets(pool, [marketId]);
       await morpho.setPosition(marketId, pool, position[0], position[1], position[2]);
       return { morphoChecks, morpho, morphoManager, token6, token18, pool, marketId };
@@ -1298,7 +1405,14 @@ describe('Utility libraries', () => {
         ethers.parseEther('0.8'),
       ];
       const marketId = await morpho.marketId(marketParams);
-      await morpho.setMarket(marketParams, [1_000_000n, 1_000_000n, 1_000_000n, 1_000_000n, 0n, 0n]);
+      await morpho.setMarket(marketParams, [
+        1_000_000n,
+        1_000_000n,
+        1_000_000n,
+        1_000_000n,
+        0n,
+        0n,
+      ]);
       await morpho.setPosition(marketId, pool, 1n, 0n, 0n);
 
       // Tracked but never actively allowlisted — the state a real delisting (setPoolMarkets()
@@ -1363,14 +1477,17 @@ describe('Utility libraries', () => {
     it('returns the 18-decimal conversion precision for lower-decimal tokens', async () => {
       const { precision, token6, token18 } = await loadFixture(deployLibrariesFixture);
 
-      expect(await precision.getPrecisionForConversion(await token6.getAddress())).to.equal(10n ** 12n);
+      expect(await precision.getPrecisionForConversion(await token6.getAddress())).to.equal(
+        10n ** 12n,
+      );
       expect(await precision.getPrecisionForConversion(await token18.getAddress())).to.equal(1n);
     });
   });
 
   describe('SafeERC20', () => {
     it('handles standard tokens, no-return tokens, and safety reverts', async () => {
-      const { safeERC20, token18, noReturnToken, falseToken, manager, trader } = await loadFixture(deployLibrariesFixture);
+      const { safeERC20, token18, noReturnToken, falseToken, manager, trader } =
+        await loadFixture(deployLibrariesFixture);
       const safeAddress = await safeERC20.getAddress();
 
       await token18.mint(safeAddress, 100n);
@@ -1379,23 +1496,40 @@ describe('Utility libraries', () => {
 
       await token18.mint(await manager.getAddress(), 20n);
       await token18.connect(manager).approve(safeAddress, 20n);
-      await safeERC20.safeTransferFrom(await token18.getAddress(), await manager.getAddress(), safeAddress, 20n);
+      await safeERC20.safeTransferFrom(
+        await token18.getAddress(),
+        await manager.getAddress(),
+        safeAddress,
+        20n,
+      );
       expect(await token18.balanceOf(safeAddress)).to.equal(110n);
 
       await safeERC20.safeApprove(await token18.getAddress(), await trader.getAddress(), 5n);
       await expect(
         safeERC20.safeApprove(await token18.getAddress(), await trader.getAddress(), 6n),
       ).to.be.revertedWith('SafeERC20: approve from non-zero to non-zero allowance');
-      await safeERC20.safeIncreaseAllowance(await token18.getAddress(), await trader.getAddress(), 2n);
+      await safeERC20.safeIncreaseAllowance(
+        await token18.getAddress(),
+        await trader.getAddress(),
+        2n,
+      );
       expect(await token18.allowance(safeAddress, await trader.getAddress())).to.equal(7n);
-      await safeERC20.safeDecreaseAllowance(await token18.getAddress(), await trader.getAddress(), 3n);
+      await safeERC20.safeDecreaseAllowance(
+        await token18.getAddress(),
+        await trader.getAddress(),
+        3n,
+      );
       expect(await token18.allowance(safeAddress, await trader.getAddress())).to.equal(4n);
       await expect(
         safeERC20.safeDecreaseAllowance(await token18.getAddress(), await trader.getAddress(), 5n),
       ).to.be.revertedWith('SafeERC20: decreased allowance below zero');
 
       await noReturnToken.mint(safeAddress, 50n);
-      await safeERC20.safeTransfer(await noReturnToken.getAddress(), await trader.getAddress(), 10n);
+      await safeERC20.safeTransfer(
+        await noReturnToken.getAddress(),
+        await trader.getAddress(),
+        10n,
+      );
       expect(await noReturnToken.balanceOf(await trader.getAddress())).to.equal(10n);
 
       await falseToken.mint(safeAddress, 1n);

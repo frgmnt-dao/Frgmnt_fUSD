@@ -11,7 +11,7 @@ MorphoVaultV2AssetGuard values and unwinds a pool's position in a Morpho Vault V
 
 The pool's position carries no debt, so balances are simply `convertToAssets(shares)` — no flashloan-based unwind path, no health factor.
 
-`getBalance()`/`withdrawProcessing()` deliberately **do not** consult the [MorphoVaultV2Manager](MorphoVaultV2Manager.md) whitelist — a vault must remain valuable and exitable even after governance revokes it. Only *new* exposure ([MorphoVaultV2ContractGuard](MorphoVaultV2ContractGuard.md), and `addAssetCheck` below) is gated by the whitelist.
+`getBalance()`/`withdrawProcessing()` deliberately **do not** consult the [MorphoVaultV2Manager](MorphoVaultV2Manager.md) whitelist — a vault must remain valuable and exitable even after governance revokes it. Only _new_ exposure ([MorphoVaultV2ContractGuard](MorphoVaultV2ContractGuard.md), and `addAssetCheck` below) is gated by the whitelist.
 
 ---
 
@@ -26,12 +26,12 @@ The pool's position carries no debt, so balances are simply `convertToAssets(sha
 
 ## Guard Markers Implemented
 
-| Interface | Meaning |
-|-----------|---------|
-| `IAddAssetCheckGuard` | `addAssetCheck()` must run before a vault can be registered |
-| `IPreValuedAssetGuard` | `getBalance()` returns a fully priced USD-18 figure; `getUnitPrice()` values one real share via the underlying (CertiK FNA-45/56 — one of only two guards with a genuine, non-reverting `getUnitPrice()`, the other being `AaveV4TokenizationAssetGuard`) |
-| `IIncompleteValuationGuard` | Distinguishes a genuinely-empty position from a temporarily-unpriceable one |
-| `IWithdrawableBalanceGuard` | Liquidity-capped counterpart to `getBalance()` for immediate-withdrawal sizing (CertiK FNA-07 follow-up) |
+| Interface                   | Meaning                                                                                                                                                                                                                                                   |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IAddAssetCheckGuard`       | `addAssetCheck()` must run before a vault can be registered                                                                                                                                                                                               |
+| `IPreValuedAssetGuard`      | `getBalance()` returns a fully priced USD-18 figure; `getUnitPrice()` values one real share via the underlying (CertiK FNA-45/56 — one of only two guards with a genuine, non-reverting `getUnitPrice()`, the other being `AaveV4TokenizationAssetGuard`) |
+| `IIncompleteValuationGuard` | Distinguishes a genuinely-empty position from a temporarily-unpriceable one                                                                                                                                                                               |
+| `IWithdrawableBalanceGuard` | Liquidity-capped counterpart to `getBalance()` for immediate-withdrawal sizing (CertiK FNA-07 follow-up)                                                                                                                                                  |
 
 ---
 
@@ -58,7 +58,7 @@ Both value `convertToAssets(shares)` through the underlying's real price/decimal
 
 ### `_capSharesByIdleLiquidity`
 
-Caps `shares` by the vault's own **idle** balance of its underlying (`IERC20(underlying).balanceOf(vault)`, converted to shares) — deliberately *not* an attempt to estimate adapter liquidity, since Vault V2's adapters are curator-chosen and pluggable with no generic way to inspect them. Idle balance is instead a *provable* floor: confirmed against Morpho's published source that idle balance is drawn down first and unconditionally before any adapter is touched, so redeeming at most this many shares can never need an adapter at all.
+Caps `shares` by the vault's own **idle** balance of its underlying (`IERC20(underlying).balanceOf(vault)`, converted to shares) — deliberately _not_ an attempt to estimate adapter liquidity, since Vault V2's adapters are curator-chosen and pluggable with no generic way to inspect them. Idle balance is instead a _provable_ floor: confirmed against Morpho's published source that idle balance is drawn down first and unconditionally before any adapter is touched, so redeeming at most this many shares can never need an adapter at all.
 
 ### `getUnitPrice`
 
@@ -89,8 +89,8 @@ Requires the pool's raw share balance to be exactly zero — checked directly (n
 
 ## Configuration
 
-| Parameter | Set at | Description |
-|-----------|--------|-------------|
+| Parameter              | Set at                  | Description                                                                                            |
+| ---------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------ |
 | `morphoVaultV2Manager` | constructor (immutable) | The [MorphoVaultV2Manager](MorphoVaultV2Manager.md) whitelist consulted only at `addAssetCheck()` time |
 
 No owner-settable parameters — stateless, immutable-configured contract.

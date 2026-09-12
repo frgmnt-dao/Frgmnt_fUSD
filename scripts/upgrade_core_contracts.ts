@@ -160,7 +160,10 @@ async function main() {
   }
 
   const [signer] = await ethers.getSigners();
-  console.log('Signer (gas payer, deploy only — not GOVERNANCE_SAFE or the DAO Safe):', signer.address);
+  console.log(
+    'Signer (gas payer, deploy only — not GOVERNANCE_SAFE or the DAO Safe):',
+    signer.address,
+  );
 
   // -----------------------------------------------------------------------
   // Phase 1a: libraries.
@@ -178,7 +181,10 @@ async function main() {
   const poolTxExecutor = await PoolTxExecutor.deploy();
   await poolTxExecutor.waitForDeployment();
   console.log('New PoolTxExecutor:', poolTxExecutor.target);
-  console.log('(CallResultChecker unchanged, reusing existing:', EXISTING_CALL_RESULT_CHECKER + ')');
+  console.log(
+    '(CallResultChecker unchanged, reusing existing:',
+    EXISTING_CALL_RESULT_CHECKER + ')',
+  );
 
   // -----------------------------------------------------------------------
   // Phase 1b: AssetHandler (Transparent) — storage-validated deploy.
@@ -198,7 +204,9 @@ async function main() {
   // -----------------------------------------------------------------------
   console.log('\n=== PoolManagerLogic ===');
   const PoolManagerLogicFactory = await ethers.getContractFactory('PoolManagerLogic', signer);
-  await upgrades.forceImport(POOL_MANAGER_LOGIC_PROXY, PoolManagerLogicFactory, { kind: 'transparent' });
+  await upgrades.forceImport(POOL_MANAGER_LOGIC_PROXY, PoolManagerLogicFactory, {
+    kind: 'transparent',
+  });
   await upgrades.validateUpgrade(POOL_MANAGER_LOGIC_PROXY, PoolManagerLogicFactory);
   console.log('Storage layout confirmed compatible.');
   const newPoolManagerLogicImpl = await PoolManagerLogicFactory.deploy();
@@ -245,7 +253,11 @@ async function main() {
   // upgrade itself (via upgradeAndCall/upgradeToAndCall's data parameter), so there is
   // no window where the proxy is upgraded but the pool is left non-functional.
   // -----------------------------------------------------------------------
-  const assetHandlerAdmin = await ethers.getContractAt('ProxyAdmin', ASSET_HANDLER_PROXY_ADMIN, signer);
+  const assetHandlerAdmin = await ethers.getContractAt(
+    'ProxyAdmin',
+    ASSET_HANDLER_PROXY_ADMIN,
+    signer,
+  );
   const assetHandler = await ethers.getContractAt('AssetHandler', ASSET_HANDLER_PROXY, signer);
   const poolManagerLogicAdmin = await ethers.getContractAt(
     'ProxyAdmin',
@@ -256,11 +268,10 @@ async function main() {
   const poolLogic = await ethers.getContractAt('PoolLogic', POOL_LOGIC_PROXY, signer);
   const poolLogicAdmin = await ethers.getContractAt('ProxyAdmin', POOL_LOGIC_PROXY_ADMIN, signer);
 
-  const assetHandlerUpgradeCalldata = assetHandlerAdmin.interface.encodeFunctionData('upgradeAndCall', [
-    ASSET_HANDLER_PROXY,
-    newAssetHandlerImplAddress,
-    '0x',
-  ]);
+  const assetHandlerUpgradeCalldata = assetHandlerAdmin.interface.encodeFunctionData(
+    'upgradeAndCall',
+    [ASSET_HANDLER_PROXY, newAssetHandlerImplAddress, '0x'],
+  );
   const poolManagerLogicUpgradeCalldata = poolManagerLogicAdmin.interface.encodeFunctionData(
     'upgradeAndCall',
     [POOL_MANAGER_LOGIC_PROXY, newPoolManagerLogicImplAddress, '0x'],
@@ -293,7 +304,9 @@ async function main() {
   );
 
   if (process.env.SEND === '1') {
-    console.log('\nSEND=1 set — signing and broadcasting all four upgrades directly with the local signer.');
+    console.log(
+      '\nSEND=1 set — signing and broadcasting all four upgrades directly with the local signer.',
+    );
     await (
       await assetHandlerAdmin.upgradeAndCall(ASSET_HANDLER_PROXY, newAssetHandlerImplAddress, '0x')
     ).wait();
@@ -308,7 +321,11 @@ async function main() {
       await tokenLogic.upgradeToAndCall(newTokenLogicImplAddress, initializeDepositFusdCapCalldata)
     ).wait();
     await (
-      await poolLogicAdmin.upgradeAndCall(POOL_LOGIC_PROXY, newPoolLogicImplAddress, initializeAutoCompoundingCalldata)
+      await poolLogicAdmin.upgradeAndCall(
+        POOL_LOGIC_PROXY,
+        newPoolLogicImplAddress,
+        initializeAutoCompoundingCalldata,
+      )
     ).wait();
     await (await assetHandler.setSequencerUptimeFeed(SEQUENCER_UPTIME_FEED)).wait();
     console.log('Done.');
@@ -378,7 +395,7 @@ async function main() {
         'deposits stay broken (0 cap) until this transaction lands. Propose via the DAO ' +
         'Safe multisig, do not execute with a single key. STRONGLY RECOMMENDED: dry-run ' +
         'both transactions against a fork of live mainnet state first — see this ' +
-        'script\'s header comment for what is and is not independently verified about ' +
+        "script's header comment for what is and is not independently verified about " +
         'the reward migration math.',
       txBuilderVersion: '1.16.5',
     },
@@ -394,10 +411,10 @@ async function main() {
   console.log('  GOVERNANCE_SAFE (EOA) transaction list          :', eoaFile);
   console.log('  DAO Safe (3-of-4 multisig) batch (PoolLogic + TokenLogic):', safeFile);
   console.log('\nImport the DAO Safe batch at https://app.safe.global under', DAO_SAFE);
-  console.log('The GOVERNANCE_SAFE list must be signed and sent directly by that key\'s holder.');
+  console.log("The GOVERNANCE_SAFE list must be signed and sent directly by that key's holder.");
   console.log('Both TokenLogic and PoolLogic transactions bundle their mandatory migration');
   console.log('call atomically — see the script header for why, and for the PoolLogic reward');
-  console.log('migration\'s verification status before executing against real staked funds.');
+  console.log("migration's verification status before executing against real staked funds.");
   console.log('Set SEND=1 to instead broadcast all four upgrades directly with the local signer');
   console.log('(fork/testnet use only).');
 }

@@ -65,7 +65,9 @@ describe('AssetHandler', () => {
       const handler = await deployAssetHandler();
       await handler.initialize([]);
       const randomAsset = ethers.Wallet.createRandom().address;
-      await expect(handler.getUSDPrice(randomAsset)).to.be.revertedWith('Frgmnt: aggregator not found');
+      await expect(handler.getUSDPrice(randomAsset)).to.be.revertedWith(
+        'Frgmnt: aggregator not found',
+      );
     });
 
     it('reverts when timeout not set for asset', async () => {
@@ -200,7 +202,9 @@ describe('AssetHandler', () => {
       await assetFeed.setData(1n * 10n ** 8n, now, false); // asset/USD = 1.00
       await eurUsdFeed.setData(125_000_000n, now, false); // EUR/USD = 1.25
 
-      await handler.initialize([{ asset, assetType: 2n, aggregator: await assetFeed.getAddress() }]);
+      await handler.initialize([
+        { asset, assetType: 2n, aggregator: await assetFeed.getAddress() },
+      ]);
       await handler.setChainlinkTimeout(asset, ASSET_TIMEOUT);
       await handler.setEurUsdAggregator(await eurUsdFeed.getAddress(), ASSET_TIMEOUT);
 
@@ -221,7 +225,9 @@ describe('AssetHandler', () => {
 
       await assetFeed.setData(1n * 10n ** 8n, now, false);
 
-      await handler.initialize([{ asset, assetType: 2n, aggregator: await assetFeed.getAddress() }]);
+      await handler.initialize([
+        { asset, assetType: 2n, aggregator: await assetFeed.getAddress() },
+      ]);
       await handler.setChainlinkTimeout(asset, ASSET_TIMEOUT);
       expect(await handler.getUSDPrice(asset)).to.equal(1n * 10n ** 18n);
 
@@ -244,7 +250,9 @@ describe('AssetHandler', () => {
       await assetFeed.setData(1n * 10n ** 8n, now, false);
       await eurUsdFeed.setData(125_000_000n, 1n, false);
 
-      await handler.initialize([{ asset, assetType: 2n, aggregator: await assetFeed.getAddress() }]);
+      await handler.initialize([
+        { asset, assetType: 2n, aggregator: await assetFeed.getAddress() },
+      ]);
       await handler.setChainlinkTimeout(asset, ASSET_TIMEOUT);
       await handler.setEurUsdAggregator(await eurUsdFeed.getAddress(), ASSET_TIMEOUT);
 
@@ -277,13 +285,15 @@ describe('AssetHandler', () => {
       const feed = await deployMockAggregator();
       await handler.initialize([]);
 
-      await expect(handler.setEurUsdAggregator(ethers.ZeroAddress, ASSET_TIMEOUT)).to.be.revertedWith(
-        'Frgmnt: eur/usd feed=0',
-      );
+      await expect(
+        handler.setEurUsdAggregator(ethers.ZeroAddress, ASSET_TIMEOUT),
+      ).to.be.revertedWith('Frgmnt: eur/usd feed=0');
       await expect(handler.setEurUsdAggregator(await feed.getAddress(), 0n)).to.be.revertedWith(
         'Frgmnt: eur/usd timeout=0',
       );
-      await expect(handler.connect(other).setEurUsdAggregator(await feed.getAddress(), ASSET_TIMEOUT))
+      await expect(
+        handler.connect(other).setEurUsdAggregator(await feed.getAddress(), ASSET_TIMEOUT),
+      )
         .to.be.revertedWithCustomError(handler, 'OwnableUnauthorizedAccount')
         .withArgs(other.address);
       await expect(handler.connect(other).clearEurUsdAggregator())
@@ -353,7 +363,9 @@ describe('AssetHandler', () => {
     it('reverts when asset is zero address', async () => {
       const handler = await deployAssetHandler();
       await handler.initialize([]);
-      await expect(handler.setChainlinkTimeout(ethers.ZeroAddress, 1n)).to.be.revertedWith('Frgmnt: asset=0');
+      await expect(handler.setChainlinkTimeout(ethers.ZeroAddress, 1n)).to.be.revertedWith(
+        'Frgmnt: asset=0',
+      );
     });
 
     it('reverts when called by non-owner', async () => {
@@ -387,7 +399,9 @@ describe('AssetHandler', () => {
       const feed = await deployMockAggregator();
       await handler.initialize([]);
 
-      await expect(handler.setSequencerUptimeFeed(ethers.ZeroAddress)).to.be.revertedWith('Frgmnt: feed=0');
+      await expect(handler.setSequencerUptimeFeed(ethers.ZeroAddress)).to.be.revertedWith(
+        'Frgmnt: feed=0',
+      );
       await expect(handler.connect(other).setSequencerUptimeFeed(await feed.getAddress()))
         .to.be.revertedWithCustomError(handler, 'OwnableUnauthorizedAccount')
         .withArgs(other.address);
@@ -459,14 +473,18 @@ describe('AssetHandler', () => {
       const handler = await deployAssetHandler();
       await handler.initialize([]);
       const mock = await deployMockAggregator();
-      await expect(handler.addAsset(ethers.ZeroAddress, 1, await mock.getAddress())).to.be.revertedWith('Frgmnt: asset=0');
+      await expect(
+        handler.addAsset(ethers.ZeroAddress, 1, await mock.getAddress()),
+      ).to.be.revertedWith('Frgmnt: asset=0');
     });
 
     it('reverts if aggregator is zero address', async () => {
       const handler = await deployAssetHandler();
       await handler.initialize([]);
       const asset = ethers.Wallet.createRandom().address;
-      await expect(handler.addAsset(asset, 1, ethers.ZeroAddress)).to.be.revertedWith('Frgmnt: aggregator=0');
+      await expect(handler.addAsset(asset, 1, ethers.ZeroAddress)).to.be.revertedWith(
+        'Frgmnt: aggregator=0',
+      );
     });
 
     it('reverts when non-owner calls addAsset', async () => {
@@ -516,7 +534,9 @@ describe('AssetHandler', () => {
       const asset = ethers.Wallet.createRandom().address;
 
       await expect(
-        handler.connect(other).addAssets([{ asset, assetType: 1, aggregator: await mock.getAddress() }]),
+        handler
+          .connect(other)
+          .addAssets([{ asset, assetType: 1, aggregator: await mock.getAddress() }]),
       )
         .to.be.revertedWithCustomError(handler, 'OwnableUnauthorizedAccount')
         .withArgs(other.address);

@@ -18,20 +18,20 @@ The vault supports two withdrawal modes — **immediate** (pro-rata across all a
 
 ## User-Facing Functions (Quick Reference)
 
-| Function | Purpose |
-|----------|---------|
-| [`stake(uint256)`](#stake--stake-with-min-shares) | Deposit fUSD, receive sfUSD staking shares |
-| [`stake(uint256, uint256)`](#stake--stake-with-min-shares) | Stake with minimum share slippage protection |
-| [`unstake(uint256)`](#unstake) | Burn sfUSD shares, receive fUSD back |
-| [`harvest()`](#harvest) | Claim accumulated fUSD yield rewards |
-| [`withdrawCashImmediate(uint256)`](#immediate-cash-withdrawal) | Redeem fUSD for pro-rata underlying assets (immediate mode) |
-| [`withdrawCashImmediateTo(address, uint256)`](#immediate-cash-withdrawal) | Same, with custom recipient |
-| [`withdrawCashImmediateSafe(uint256, ComplexAsset[])`](#immediate-cash-withdrawal) | Immediate withdrawal with Aave/Morpho unwind data |
-| [`withdrawCashImmediateToSafe(address, uint256, ComplexAsset[])`](#immediate-cash-withdrawal) | Immediate withdrawal to recipient with unwind data |
-| [`requestCashWithdraw(uint256, address)`](#requestcashwithdraw) | Request a queued withdrawal (queued mode) |
-| [`finalizeCashWithdraw(uint256)`](#finalizecashwithdraw) | Manager finalizes a queued request into the escrow |
-| [`claimCashWithdraw(uint256)`](#claimcashwithdraw) | Claim a finalized queued withdrawal |
-| [`pendingReward(address)`](#view-functions) | View unclaimed fUSD rewards |
+| Function                                                                                      | Purpose                                                     |
+| --------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| [`stake(uint256)`](#stake--stake-with-min-shares)                                             | Deposit fUSD, receive sfUSD staking shares                  |
+| [`stake(uint256, uint256)`](#stake--stake-with-min-shares)                                    | Stake with minimum share slippage protection                |
+| [`unstake(uint256)`](#unstake)                                                                | Burn sfUSD shares, receive fUSD back                        |
+| [`harvest()`](#harvest)                                                                       | Claim accumulated fUSD yield rewards                        |
+| [`withdrawCashImmediate(uint256)`](#immediate-cash-withdrawal)                                | Redeem fUSD for pro-rata underlying assets (immediate mode) |
+| [`withdrawCashImmediateTo(address, uint256)`](#immediate-cash-withdrawal)                     | Same, with custom recipient                                 |
+| [`withdrawCashImmediateSafe(uint256, ComplexAsset[])`](#immediate-cash-withdrawal)            | Immediate withdrawal with Aave/Morpho unwind data           |
+| [`withdrawCashImmediateToSafe(address, uint256, ComplexAsset[])`](#immediate-cash-withdrawal) | Immediate withdrawal to recipient with unwind data          |
+| [`requestCashWithdraw(uint256, address)`](#requestcashwithdraw)                               | Request a queued withdrawal (queued mode)                   |
+| [`finalizeCashWithdraw(uint256)`](#finalizecashwithdraw)                                      | Manager finalizes a queued request into the escrow          |
+| [`claimCashWithdraw(uint256)`](#claimcashwithdraw)                                            | Claim a finalized queued withdrawal                         |
+| [`pendingReward(address)`](#view-functions)                                                   | View unclaimed fUSD rewards                                 |
 
 > **Immediate vs. Queued Mode:** The manager toggles withdrawal mode. In **immediate mode**, cash withdrawals happen in a single transaction, pro-rata across every supported asset. In **queued mode**, users request a withdrawal, the manager finalizes it (moving the payout into [WithdrawalEscrow](WithdrawalEscrow.md)), then users claim.
 
@@ -52,20 +52,20 @@ The vault supports two withdrawal modes — **immediate** (pro-rata across all a
 
 ## Key State Variables
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `fusd` | `address` | TokenLogic (fUSD) contract address |
-| `poolManagerLogic` | `address` | PoolManagerLogic contract address |
-| `withdrawalEscrow` | `address` | This pool's dedicated `WithdrawalEscrow` instance, wired once via `initializeWithdrawalEscrow()` (CertiK FNA-03) |
-| `rewardPerShare` | `uint256` | Accumulated yield per sfUSD token, scaled by 1e18 |
-| `accountedAssets` | `uint256` | High-water-mark NAV baseline for yield calculation — only ever raised by new NAV highs, never lowered by a NAV drop (see [FundCalculationLibrary](FundCalculationLibrary.md)'s overhang-tracking docs) |
-| `compoundedRewardIndex` | `uint256` | Autocompounding index; `0` means autocompounding was never initialized on this proxy (a cross-proxy-upgrade-ordering state, not a normal runtime value) |
-| `totalRewardAccrued` / `totalRewardHarvested` | `uint256` | Lifetime cumulative yield distributed / claimed |
-| `finalizedUnclaimedFusd` | `uint256` | fUSD backing requests already `Finalized`/`FinalizedEscrowed` but not yet `Claimed` — excluded from the active claims denominator (CertiK FNA-38) |
-| `lastFeeMintTime` | `uint256` | Timestamp of last fee accrual |
-| `isImmediateWithdrawEnabled` | `bool` | Withdrawal mode flag |
-| `cashWithdrawRequests` | `mapping(uint256 → CashWithdrawRequest)` | Queued withdrawal request details, including `status` (`Pending` / `Finalized` / `FinalizedEscrowed` / `Claimed`) |
-| `reservedAssetBalance` | `mapping(address → uint256)` | Legacy (pre-FNA-03) reservation bookkeeping — only still populated for a request finalized before `withdrawalEscrow` was wired in |
+| Variable                                      | Type                                     | Description                                                                                                                                                                                            |
+| --------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `fusd`                                        | `address`                                | TokenLogic (fUSD) contract address                                                                                                                                                                     |
+| `poolManagerLogic`                            | `address`                                | PoolManagerLogic contract address                                                                                                                                                                      |
+| `withdrawalEscrow`                            | `address`                                | This pool's dedicated `WithdrawalEscrow` instance, wired once via `initializeWithdrawalEscrow()` (CertiK FNA-03)                                                                                       |
+| `rewardPerShare`                              | `uint256`                                | Accumulated yield per sfUSD token, scaled by 1e18                                                                                                                                                      |
+| `accountedAssets`                             | `uint256`                                | High-water-mark NAV baseline for yield calculation — only ever raised by new NAV highs, never lowered by a NAV drop (see [FundCalculationLibrary](FundCalculationLibrary.md)'s overhang-tracking docs) |
+| `compoundedRewardIndex`                       | `uint256`                                | Autocompounding index; `0` means autocompounding was never initialized on this proxy (a cross-proxy-upgrade-ordering state, not a normal runtime value)                                                |
+| `totalRewardAccrued` / `totalRewardHarvested` | `uint256`                                | Lifetime cumulative yield distributed / claimed                                                                                                                                                        |
+| `finalizedUnclaimedFusd`                      | `uint256`                                | fUSD backing requests already `Finalized`/`FinalizedEscrowed` but not yet `Claimed` — excluded from the active claims denominator (CertiK FNA-38)                                                      |
+| `lastFeeMintTime`                             | `uint256`                                | Timestamp of last fee accrual                                                                                                                                                                          |
+| `isImmediateWithdrawEnabled`                  | `bool`                                   | Withdrawal mode flag                                                                                                                                                                                   |
+| `cashWithdrawRequests`                        | `mapping(uint256 → CashWithdrawRequest)` | Queued withdrawal request details, including `status` (`Pending` / `Finalized` / `FinalizedEscrowed` / `Claimed`)                                                                                      |
+| `reservedAssetBalance`                        | `mapping(address → uint256)`             | Legacy (pre-FNA-03) reservation bookkeeping — only still populated for a request finalized before `withdrawalEscrow` was wired in                                                                      |
 
 ---
 
@@ -134,7 +134,7 @@ function incrementAccountedAssets(uint256 amount) external
 function checkpointFeesForDeposit() external
 ```
 
-**TokenLogic only.** Settles pending fee accrual using the fUSD supply and fund value *as they stand right now*, before TokenLogic applies an incoming deposit's effects (new fUSD minted, new collateral credited) — closing the gap where `stake()` already checkpoints before minting new shares but a plain `deposit()` previously did not, letting freshly-deposited fUSD be staked into a share supply that later captures yield that economically accrued *before* the deposit, at existing stakers' expense. **Fails closed** (`IncompleteNAV()`) when active NAV is incomplete — unlike `_accrueYield()`'s other callers (stake/unstake/harvest), which stay fail-open, since blocking *new* value from entering during a guard's transient failure has none of the downsides of blocking a withdrawal of *existing* value. One narrow fail-open exception remains: if `compoundedRewardIndex == 0` (autocompounding never initialized on this proxy — a cross-proxy-upgrade-ordering state, not a normal one), this returns without accruing or reverting, so a deposit doesn't hard-block on an unrelated not-yet-migrated-pool condition; provably not a re-opening of the FNA-22 bug, since no fee of any kind can accrue while `compoundedRewardIndex == 0` regardless of caller.
+**TokenLogic only.** Settles pending fee accrual using the fUSD supply and fund value _as they stand right now_, before TokenLogic applies an incoming deposit's effects (new fUSD minted, new collateral credited) — closing the gap where `stake()` already checkpoints before minting new shares but a plain `deposit()` previously did not, letting freshly-deposited fUSD be staked into a share supply that later captures yield that economically accrued _before_ the deposit, at existing stakers' expense. **Fails closed** (`IncompleteNAV()`) when active NAV is incomplete — unlike `_accrueYield()`'s other callers (stake/unstake/harvest), which stay fail-open, since blocking _new_ value from entering during a guard's transient failure has none of the downsides of blocking a withdrawal of _existing_ value. One narrow fail-open exception remains: if `compoundedRewardIndex == 0` (autocompounding never initialized on this proxy — a cross-proxy-upgrade-ordering state, not a normal one), this returns without accruing or reverting, so a deposit doesn't hard-block on an unrelated not-yet-migrated-pool condition; provably not a re-opening of the FNA-22 bug, since no fee of any kind can accrue while `compoundedRewardIndex == 0` regardless of caller.
 
 ### `execTransaction`
 
@@ -146,21 +146,21 @@ function execTransaction(address to, bytes calldata data) external returns (bool
 
 ### Flash Loan Callbacks
 
-| Function | Protocol | Description |
-|----------|----------|-------------|
-| `executeOperation(assets, amounts, premiums, initiator, params)` | Aave V3 | Aave flashloan callback |
-| `onMorphoFlashLoan(assets, params)` | Morpho Blue | Morpho flashloan callback |
+| Function                                                         | Protocol    | Description               |
+| ---------------------------------------------------------------- | ----------- | ------------------------- |
+| `executeOperation(assets, amounts, premiums, initiator, params)` | Aave V3     | Aave flashloan callback   |
+| `onMorphoFlashLoan(assets, params)`                              | Morpho Blue | Morpho flashloan callback |
 
 Both validate the caller against `_isAllowedCallbackSender()` before executing any pre-encoded unwind operations.
 
 ### View Functions
 
-| Function | Returns |
-|----------|---------|
-| `pendingReward(address)` | User's claimable fUSD rewards |
-| `getFundSummary()` | Full fund metadata (name, value, fees, supply) |
+| Function                         | Returns                                                                                                   |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `pendingReward(address)`         | User's claimable fUSD rewards                                                                             |
+| `getFundSummary()`               | Full fund metadata (name, value, fees, supply)                                                            |
 | `calculateAvailableManagerFee()` | Unminted accumulated fee shares — mirrors `_accrueYield()`'s reserved-value-excluding NAV (CertiK FNA-17) |
-| `getUserRequests(address)` | A user's queued withdrawal request IDs |
+| `getUserRequests(address)`       | A user's queued withdrawal request IDs                                                                    |
 
 ---
 
