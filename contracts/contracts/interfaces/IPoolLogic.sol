@@ -46,4 +46,16 @@ interface IPoolLogic {
     error IncompleteNAV();
 
     function checkpointFeesForDeposit() external;
+
+    // ------------------------------------------------------------------
+    // Errors declared here (not directly in PoolLogic.sol) specifically because each is thrown
+    // from both PoolLogic's own code and WithdrawalPlanLib.sol (an externally-linked library —
+    // see its own docs). A library cannot reference an error declared directly inside a contract
+    // it doesn't implement, so these live on the shared interface instead; PoolLogic's own call
+    // sites keep working unqualified since PoolLogic implements this interface.
+    // ------------------------------------------------------------------
+
+    error SlippageExceeded();
+    error InvalidReservedBalance();
+    error InvalidAssetData();
 }

@@ -33,11 +33,18 @@ async function deployAutoCompoundingFixture() {
   const poolTxExecutor = await PoolTxExecutorFactory.deploy();
   await poolTxExecutor.waitForDeployment();
 
+  const WithdrawalPlanLibFactory = await ethers.getContractFactory('WithdrawalPlanLib', {
+    libraries: { FundCalculationLibrary: await fundCalculationLibrary.getAddress() },
+  });
+  const withdrawalPlanLib = await WithdrawalPlanLibFactory.deploy();
+  await withdrawalPlanLib.waitForDeployment();
+
   const PoolLogic = await ethers.getContractFactory('PoolLogic', {
     libraries: {
       CallResultChecker: await callResultChecker.getAddress(),
       FundCalculationLibrary: await fundCalculationLibrary.getAddress(),
       PoolTxExecutor: await poolTxExecutor.getAddress(),
+      WithdrawalPlanLib: await withdrawalPlanLib.getAddress(),
     },
   });
   const poolImpl = await PoolLogic.deploy();

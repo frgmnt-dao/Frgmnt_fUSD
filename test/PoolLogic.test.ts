@@ -64,12 +64,19 @@ async function deployPoolFixture() {
   const poolTxExecutor = await PoolTxExecutorFactory.deploy();
   await poolTxExecutor.waitForDeployment();
 
+  const WithdrawalPlanLibFactory = await ethers.getContractFactory('WithdrawalPlanLib', {
+    libraries: { FundCalculationLibrary: await fundCalculationLibrary.getAddress() },
+  });
+  const withdrawalPlanLib = await WithdrawalPlanLibFactory.deploy();
+  await withdrawalPlanLib.waitForDeployment();
+
   // ----------------- PoolLogic implementation -----------------
   const PoolLogic = await ethers.getContractFactory('PoolLogic', {
     libraries: {
       CallResultChecker: await callResultChecker.getAddress(),
       FundCalculationLibrary: await fundCalculationLibrary.getAddress(),
       PoolTxExecutor: await poolTxExecutor.getAddress(),
+      WithdrawalPlanLib: await withdrawalPlanLib.getAddress(),
     },
   });
   const poolImpl = await PoolLogic.deploy();
@@ -1008,11 +1015,16 @@ describe('PoolLogic', () => {
       libraries: { CallResultChecker: await callResultChecker.getAddress() },
     });
     const poolTxExecutor = await PoolTxExecutorFactory.deploy();
+    const WithdrawalPlanLibFactory = await ethers.getContractFactory('WithdrawalPlanLib', {
+      libraries: { FundCalculationLibrary: await fundCalculationLibrary.getAddress() },
+    });
+    const withdrawalPlanLib = await WithdrawalPlanLibFactory.deploy();
     const PoolLogic = await ethers.getContractFactory('PoolLogic', {
       libraries: {
         CallResultChecker: await callResultChecker.getAddress(),
         FundCalculationLibrary: await fundCalculationLibrary.getAddress(),
         PoolTxExecutor: await poolTxExecutor.getAddress(),
+        WithdrawalPlanLib: await withdrawalPlanLib.getAddress(),
       },
     });
     const poolImpl = await PoolLogic.deploy();
@@ -1263,10 +1275,7 @@ describe('PoolLogic', () => {
 
     await fundPool();
     await assetGuard.setTransaction(await target.getAddress(), '0x12');
-    await expect(pool.connect(user).withdrawCashImmediate(amount)).to.be.revertedWithCustomError(
-      pool,
-      'InvalidCallData',
-    );
+    await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'InvalidCallData');
 
     await fundPool();
     await assetGuard.setTransaction(

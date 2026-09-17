@@ -1215,11 +1215,18 @@ describe('TokenLogic (FUSD)', () => {
       const poolTxExecutor = await PoolTxExecutor.deploy();
       await poolTxExecutor.waitForDeployment();
 
+      const WithdrawalPlanLib = await ethers.getContractFactory('WithdrawalPlanLib', {
+        libraries: { FundCalculationLibrary: await fundCalculationLibrary.getAddress() },
+      });
+      const withdrawalPlanLib = await WithdrawalPlanLib.deploy();
+      await withdrawalPlanLib.waitForDeployment();
+
       const PoolLogicFactory = await ethers.getContractFactory('PoolLogic', {
         libraries: {
           CallResultChecker: await callResultChecker.getAddress(),
           FundCalculationLibrary: await fundCalculationLibrary.getAddress(),
           PoolTxExecutor: await poolTxExecutor.getAddress(),
+          WithdrawalPlanLib: await withdrawalPlanLib.getAddress(),
         },
       });
       const poolImpl = await PoolLogicFactory.deploy();

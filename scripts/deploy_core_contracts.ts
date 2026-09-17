@@ -143,6 +143,18 @@ async function main() {
   console.log('PoolTxExecutor deployed at:', poolTxExecutor.target);
   nonce++;
 
+  // Calls FundCalculationLibrary.guardNetRealizableBalance/guardWithdrawableBalance, so it must
+  // be linked against the already-deployed FundCalculationLibrary, same as PoolTxExecutor above
+  // links CallResultChecker.
+  const WithdrawalPlanLib = await ethers.getContractFactory('WithdrawalPlanLib', {
+    signer,
+    libraries: { FundCalculationLibrary: fundLib.target },
+  });
+  const withdrawalPlanLib = await WithdrawalPlanLib.deploy(txOpts());
+  await withdrawalPlanLib.waitForDeployment();
+  console.log('WithdrawalPlanLib deployed at:', withdrawalPlanLib.target);
+  nonce++;
+
   await wait(2000);
 
   // ============================================================
@@ -299,6 +311,7 @@ async function main() {
       FundCalculationLibrary: fundLib.target,
       PoolTxExecutor: poolTxExecutor.target,
       CallResultChecker: callChecker.target,
+      WithdrawalPlanLib: withdrawalPlanLib.target,
     },
   });
 

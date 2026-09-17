@@ -19,8 +19,6 @@ import { IManaged } from "./interfaces/IManaged.sol";
 import { IPoolManagerLogic } from "./interfaces/IPoolManagerLogic.sol";
 import { IPoolLogic } from "./interfaces/IPoolLogic.sol";
 import { IHasSupportedAsset } from "./interfaces/IHasSupportedAsset.sol";
-import { IAssetGuard } from "./interfaces/guards/IAssetGuard.sol";
-import { IComplexAssetGuard } from "./interfaces/guards/IComplexAssetGuard.sol";
 
 import { IFlashLoanReceiver } from "./interfaces/aave/IFlashLoanReceiver.sol";
 import { IMorphoFlashLoanCallback } from "./interfaces/IMorphoFlashLoanCallback.sol";
@@ -28,6 +26,7 @@ import { PoolLogicFlashloanAave } from "./utils/PoolLogicFlashloanAave.sol";
 import { PoolLogicFlashloanMorpho } from "./utils/PoolLogicFlashloanMorpho.sol";
 import { PoolTxExecutor } from "./utils/PoolTxExecutor.sol";
 import { FundCalculationLibrary } from "./utils/FundCalculationLibrary.sol";
+import { WithdrawalPlanLib } from "./utils/WithdrawalPlanLib.sol";
 
 interface ITokenLogic is IERC20 {
     function burnFrom(address account, uint256 amount) external;
@@ -102,19 +101,6 @@ contract PoolLogic is
         uint256 requestedAt;
         uint256 assetAmount; // amount of asset claimable
         RequestStatus status;
-    }
-
-    struct WithdrawProcessingLocalVars {
-        address guard;
-        uint256 balance;
-        uint256 portionBalance;
-        uint256 expectedValue;
-        IAssetGuard.MultiTransaction[] transactions;
-        bool regularProcessing;
-        uint256 txCount;
-        uint256 assetBalanceBefore;
-        uint256 assetBalanceAfter;
-        uint256 actualValue;
     }
 
     /// @dev Compact outputs for pro-rata withdrawal to avoid stack-too-deep.
@@ -228,15 +214,10 @@ contract PoolLogic is
     error NothingToHarvest();
     error InsufficientShares();
     error NoStakers();
-    error SlippageExceeded();
     error EmptyFund();
-    error InvalidReservedBalance();
     error InsufficientAssetBalance();
     error InvalidTransaction();
-    error TxFailed();
-    error InvalidGuard();
     error AssetDisabled();
-    error InvalidAssetData();
     error CallbackSenderNotAllowed();
     error InvalidFundValue();
     error InvalidWithdrawRequest();
@@ -248,10 +229,12 @@ contract PoolLogic is
     error AutoCompoundingAlreadyInitialized();
     error AutoCompoundingNotInitialized();
     error EscrowAlreadySet();
-    /// @dev Thrown when a complex withdraw attempt fails (unsupported guard or guard-level revert).
-    error ComplexWithdrawFailed(address asset, address guard);
     error OnlyTokenLogic();
-    error InvalidCallData();
+    // SlippageExceeded, InvalidReservedBalance, InvalidAssetData, InvalidGuard,
+    // ComplexWithdrawFailed, TxFailed, and InvalidCallData moved out of this block: the first
+    // three are declared on IPoolLogic (shared with WithdrawalPlanLib.sol, which also throws
+    // them), the rest are declared directly on WithdrawalPlanLib.sol (only ever thrown there
+    // now that _withdrawProcessing/_checkCallResult moved into that library).
 
     // ============================================================
     // =                         EVENTS                           =
@@ -1017,7 +1000,14 @@ contract PoolLogic is
         address asset,
         ComplexAsset memory cd
     ) internal returns (address withdrawAsset, uint256 withdrawAmount) {
-        (address wa, uint256 wamt, ) = _withdrawProcessing(asset, recipient, portion, cd);
+        (address wa, uint256 wamt, ) = WithdrawalPlanLib.withdrawProcessing(
+            poolManagerLogic,
+            asset,
+            recipient,
+            portion,
+            reservedAssetBalance[asset],
+            cd
+        );
         withdrawAsset = wa;
         withdrawAmount = wamt;
 
@@ -1238,117 +1228,11 @@ contract PoolLogic is
     // When `withdrawData` is provided, the asset guard MUST implement `IComplexAssetGuard`.
     // Standard ERC20 guards and Uniswap V3 asset guards do NOT support this interface.
     // Passing non-empty `withdrawData` for such assets will intentionally revert.
-    function _withdrawProcessing(
-        address asset,
-        address to,
-        uint256 portion,
-        ComplexAsset memory complexData
-    ) internal returns (address withdrawAsset, uint256 withdrawAmount, bool externalProcessed) {
-        WithdrawProcessingLocalVars memory v;
-
-        v.guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-        if (v.guard == address(0)) revert InvalidGuard();
-
-        // FNA-36: sized against net-realizable value (see IUnwindCostAwareGuard/FNA-35), not raw
-        // getBalance(), so a leveraged position whose gross equity looks positive but whose real
-        // proceeds are fully consumed by unwind costs is skipped below the same way a genuinely
-        // zero-equity one already is.
-        v.balance = FundCalculationLibrary.guardNetRealizableBalance(address(this), asset, v.guard);
-        uint256 reserved = reservedAssetBalance[asset];
-        if (reserved > 0) {
-            if (v.balance < reserved) revert InvalidReservedBalance();
-            v.balance -= reserved;
-        }
-
-        v.portionBalance = (v.balance * portion) / 1e18;
-        // FNA-36: this asset's own share of the withdrawal NAV is already zero — calling the
-        // guard's own withdrawProcessing() here would, for a leveraged position, still plan and
-        // attempt a real unwind (e.g. an Aave flashloan) purely because debt exists, with nothing
-        // to actually deliver; if that unwind fails, it reverts the *entire* pro-rata withdrawal,
-        // including every other, healthy asset's share. Skipping here is equivalent to the guard
-        // itself reporting a zero-value, zero-transaction withdrawal for this asset.
-        if (v.portionBalance == 0) {
-            return (address(0), 0, false);
-        }
-        // CertiK FNA-07 (09/03 follow-up): the slippage baseline must reflect what the guard can
-        // actually deliver, not the uncapped net-realizable v.portionBalance above — a guard
-        // implementing IWithdrawableBalanceGuard (e.g. Aave V4 Tokenization, Morpho Vault V2)
-        // clamps its own withdrawProcessing() output to real external liquidity, so comparing the
-        // clamped delivery against an unclamped expectation produced a false-positive
-        // SlippageExceeded() whenever the cap actually bound.
-        uint256 cappedBalance = FundCalculationLibrary.guardWithdrawableBalance(
-            address(this),
-            asset,
-            v.guard
-        );
-        if (reserved > 0) {
-            cappedBalance = cappedBalance > reserved ? cappedBalance - reserved : 0;
-        }
-        v.expectedValue = IPoolManagerLogic(poolManagerLogic).assetValue(
-            asset,
-            (cappedBalance * portion) / 1e18
-        );
-        v.regularProcessing = true;
-
-        if (complexData.withdrawData.length > 0) {
-            if (asset != complexData.supportedAsset) revert InvalidAssetData();
-            try
-                IComplexAssetGuard(v.guard).withdrawProcessing(
-                    address(this),
-                    asset,
-                    portion,
-                    to,
-                    complexData.withdrawData
-                )
-            returns (address wa, uint256 wamt, IAssetGuard.MultiTransaction[] memory txs) {
-                (withdrawAsset, withdrawAmount, v.transactions) = (wa, wamt, txs);
-            } catch {
-                revert ComplexWithdrawFailed(asset, v.guard);
-            }
-            v.regularProcessing = false;
-        } else {
-            (withdrawAsset, withdrawAmount, v.transactions) = IAssetGuard(v.guard)
-                .withdrawProcessing(address(this), asset, portion, to);
-        }
-
-        v.txCount = v.transactions.length;
-        if (v.txCount > 0) {
-            if (withdrawAsset != address(0)) {
-                v.assetBalanceBefore = IERC20(withdrawAsset).balanceOf(address(this));
-            }
-
-            for (uint256 i = 0; i < v.txCount; ++i) {
-                (bool success, bytes memory returndata) = v.transactions[i].to.call(
-                    v.transactions[i].txData
-                );
-                _checkCallResult(v.transactions[i].txData, success, returndata);
-                externalProcessed = true;
-            }
-
-            if (withdrawAsset != address(0)) {
-                v.assetBalanceAfter = IERC20(withdrawAsset).balanceOf(address(this));
-                if (v.assetBalanceAfter > v.assetBalanceBefore) {
-                    withdrawAmount += (v.assetBalanceAfter - v.assetBalanceBefore);
-                }
-            }
-        }
-
-        if (
-            v.regularProcessing && complexData.slippageTolerance != 0 && withdrawAsset != address(0)
-        ) {
-            v.actualValue = IPoolManagerLogic(poolManagerLogic).assetValue(
-                withdrawAsset,
-                withdrawAmount
-            );
-
-            if (
-                v.actualValue <
-                (v.expectedValue * (10_000 - complexData.slippageTolerance)) / 10_000
-            ) revert SlippageExceeded();
-        }
-
-        return (withdrawAsset, withdrawAmount, externalProcessed);
-    }
+    //
+    // The per-asset guard-dispatch logic formerly here (_withdrawProcessing) now lives in
+    // WithdrawalPlanLib.withdrawProcessing() — an externally-linked library, reached via
+    // delegatecall from _withdrawOne() above — moved out purely to recover EIP-170 bytecode
+    // headroom (see that library's own docs). Behavior is unchanged; only where the code lives.
 
     /**
      * @notice Increase the accounted assets of the vault.
@@ -1643,27 +1527,6 @@ contract PoolLogic is
         return FundCalculationLibrary.computeWithdrawableFundValue(address(this), poolManagerLogic);
     }
 
-    function _checkCallResult(
-        bytes memory data,
-        bool success,
-        bytes memory returndata
-    ) internal pure {
-        if (!success) revert TxFailed();
-
-        // Only verify return value for ERC20 transfer/approve
-        if (data.length < 4) revert InvalidCallData();
-        bytes4 sig;
-        assembly {
-            sig := mload(add(data, 32))
-        }
-
-        bool isERC20 = (sig == IERC20.transfer.selector || sig == IERC20.approve.selector);
-
-        if (isERC20 && returndata.length > 0) {
-            // SafeERC20-style: decode as bool
-            bool ok = abi.decode(returndata, (bool));
-            if (!ok) revert TxFailed();
-        }
-        // For other calls (e.g., Aave withdraw/repay uint256), ignore returndata
-    }
+    // _checkCallResult moved into WithdrawalPlanLib.sol alongside _withdrawProcessing (its only
+    // caller) — see that library's own docs.
 }
