@@ -69,9 +69,7 @@ function main() {
     const floor = THRESHOLDS[key];
     const ok = pct >= floor;
     if (!ok) failed = true;
-    console.log(
-      `  ${ok ? 'OK  ' : 'FAIL'} ${key.padEnd(10)} ${pct.toFixed(2)}% (floor ${floor}%)`,
-    );
+    console.log(`  ${ok ? 'OK  ' : 'FAIL'} ${key.padEnd(10)} ${pct.toFixed(2)}% (floor ${floor}%)`);
   }
 
   if (failed) {
