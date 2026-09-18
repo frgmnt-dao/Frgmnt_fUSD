@@ -303,13 +303,33 @@ library FundCalculationLibrary {
     ///      asset-loop pass. Reconstructing this way (rather than a third `_withdrawableFundValue`
     ///      call with `capByLiquidity=true`) is only valid because `withdrawableFundValue != 0`
     ///      was already checked above — see the inline note where it's used.
+    /// @dev The 4th return value, `fairFusd`, is the solvency-haircut-adjusted USD entitlement
+    ///      for `netFusd` (`_applyClaimsHaircut(netFusd, completeFundValue, totalClaims)`),
+    ///      exposed separately from `portion` so callers other than the pro-rata withdrawal
+    ///      path can bound their own payout against the *fair* share directly. Added for
+    ///      WithdrawalPlanLib.executeWithdrawalPlan()'s attested-selective-withdrawal path: its
+    ///      allocations come from an attester-signed plan, not from `portion` (which that path
+    ///      never even applies), so without this the haircut this function already computes was
+    ///      silently discarded there — an underwater pool's attested withdrawals could pay out
+    ///      at par while the pro-rata path haircut everyone else, extracting more than a fair
+    ///      share from remaining stakers. `fairFusd` is 0 in the same early-return case `portion`
+    ///      is 0 for lack of any computed value yet (the `withdrawableFundValue == 0` branch,
+    ///      before completeFundValue is derived); it is the real computed value in the
+    ///      "temporary liquidity gap" branch below even though `portion` itself returns 0 there
+    ///      — that branch's zero-portion is specific to how the pro-rata path chooses to handle
+    ///      a currently-illiquid (but not insolvent) fair share, not a statement that no fair
+    ///      share was computed.
     function computeImmediateWithdrawPortion(
         address pool,
         uint256 netFusd,
         uint256 withdrawableFundValue
-    ) external view returns (uint256 portion, uint256 totalClaims, uint256 completeFundValue) {
+    )
+        external
+        view
+        returns (uint256 portion, uint256 totalClaims, uint256 completeFundValue, uint256 fairFusd)
+    {
         totalClaims = _activeTotalClaims(pool) + netFusd;
-        if (withdrawableFundValue == 0) return (0, totalClaims, 0);
+        if (withdrawableFundValue == 0) return (0, totalClaims, 0, 0);
         address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
         (, bool navComplete) = totalValueWithCompleteness(poolManagerLogic);
         if (!navComplete) revert IPoolLogic.IncompleteNAV();
@@ -325,7 +345,7 @@ library FundCalculationLibrary {
                 ? grossCompleteValue - totalDeficit
                 : 0;
         }
-        uint256 fairFusd = _applyClaimsHaircut(netFusd, completeFundValue, totalClaims);
+        fairFusd = _applyClaimsHaircut(netFusd, completeFundValue, totalClaims);
         // The fair share can still exceed what's actually liquid right now (a temporary
         // liquidity gap, distinct from insolvency). netFusd has already been burned by the
         // caller before this runs, so under-delivering here instead of reverting would be an
@@ -335,7 +355,7 @@ library FundCalculationLibrary {
         // share. Compares against the deficit-adjusted (not gross) figure deliberately — this is
         // a true liquidity/solvency comparison, apples-to-apples against `fairFusd`'s own
         // deficit-aware basis, unlike the portion formula below which sizes against gross assets.
-        if (fairFusd > withdrawableFundValue) return (0, totalClaims, completeFundValue);
+        if (fairFusd > withdrawableFundValue) return (0, totalClaims, completeFundValue, fairFusd);
         // withdrawableFundValue + totalDeficit == gross, liquidity-capped withdrawable assets —
         // see this function's own doc comment above. Exact (no double-counting): withdrawableFundValue
         // is confirmed nonzero above, so it was not itself floored to 0 by a deficit exceeding

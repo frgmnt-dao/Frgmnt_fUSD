@@ -15,7 +15,15 @@ interface IPoolLogic {
         address asset;
         bool useFixedAmount;
         uint256 portion; // 1e18-scale, meaningful iff !useFixedAmount
-        uint256 fixedAmount; // raw asset units, meaningful iff useFixedAmount
+        // raw asset units, meaningful iff useFixedAmount. Converted on-chain to a portion via
+        // fixedAmount * 1e18 / guard.getBalance(pool, asset) — only meaningful for assets
+        // whose getBalance() reports a divisible, fungible-style raw balance (e.g. a plain
+        // ERC20 held directly or an interest-bearing wrapper). For indivisible or
+        // NFT-backed positions (e.g. a Uniswap V3 LP position, where guard.getBalance()
+        // typically reports a USD-denominated value rather than a raw redeemable unit
+        // count), useFixedAmount produces a portion the attester did not intend — use direct
+        // portion (0 to 1e18) for those asset types instead.
+        uint256 fixedAmount;
     }
 
     /// @notice Attester-signed withdrawal composition for one specific redemption.

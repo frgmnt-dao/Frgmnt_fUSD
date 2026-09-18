@@ -444,6 +444,200 @@ describe('PoolLogic — attested selective withdrawal', () => {
     );
   });
 
+  it('reverts on over-delivery beyond the fixed upper-bound dust tolerance', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, assetGuard, asset, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+
+    // Guard delivers 200% of the requested portion — engineered over-delivery. The upper
+    // bound is fixed (DUST_TOLERANCE) and never attester-adjustable, unlike the lower bound.
+    await assetGuard.setWithdrawMode(false, false, 20_000);
+
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const plan = buildPlan({ ...fixture, userAddress, assetAddress });
+    const signature = await signPlan(fixture, plan, attester);
+
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+      'ValueConservationViolated',
+    );
+  });
+
+  describe('underwater pool (FNA-05 haircut applies to attested withdrawals too)', () => {
+    // Mirrors test/PoolLogic.test.ts's FNA-05 fixture exactly: two 50 FUSD claims (Alice via
+    // `user`, Bob via `other`), pool only holds 80 in backing assets — 80% collateralized.
+    // Alice's fair, haircut-adjusted share of her 50 claim is 40, not 50 at par.
+    async function setUpUnderwaterPool(fixture: any) {
+      const { fusd, pool, asset, user, other } = fixture;
+      await mintAndApproveFUSD(fusd, pool, user, ethers.parseUnits('50', 18));
+      await fusd.mint(await other.getAddress(), ethers.parseUnits('50', 18));
+      await asset.mint(await pool.getAddress(), ethers.parseUnits('80', 18));
+      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), ethers.parseUnits('80', 18));
+    }
+
+    it('reverts a plan engineered to pay out at par (ignoring the haircut) in an underwater pool', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, asset, user, attester } = fixture;
+      await setUpUnderwaterPool(fixture);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      // Naive plan: attempts to deliver the full nominal 50, ignoring the 80%-collateralization
+      // haircut a correctly-sized fair share (40) would respect.
+      const plan = buildPlan({
+        ...fixture,
+        userAddress,
+        fusdAmount: ethers.parseUnits('50', 18),
+        allocations: [
+          {
+            asset: assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: ethers.parseUnits('50', 18),
+          },
+        ],
+      });
+      const signature = await signPlan(fixture, plan, attester);
+
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it('delivers exactly the haircut-adjusted fair share, matching the pro-rata path, when the plan is correctly sized', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, asset, user, attester } = fixture;
+      await setUpUnderwaterPool(fixture);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      // Correctly-sized plan: 40 out of the pool's 80 assets, matching Alice's 80%-collateralized
+      // fair share of her 50 claim — identical to what withdrawCashImmediate() pays her in
+      // test/PoolLogic.test.ts's equivalent FNA-05 test.
+      const plan = buildPlan({
+        ...fixture,
+        userAddress,
+        fusdAmount: ethers.parseUnits('50', 18),
+        allocations: [
+          {
+            asset: assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: ethers.parseUnits('40', 18),
+          },
+        ],
+      });
+      const signature = await signPlan(fixture, plan, attester);
+
+      const before = await asset.balanceOf(userAddress);
+      await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+      const after = await asset.balanceOf(userAddress);
+
+      expect(after - before).to.equal(ethers.parseUnits('40', 18));
+    });
+  });
+
+  it('cannot draw down more value than a guard actually has available, matching how reservedAssetBalance-backed liquidity is protected', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, fusd, asset, assetGuard, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+
+    // WithdrawalPlanLib.withdrawProcessing() subtracts reservedAssetBalance[asset] from the
+    // guard's reported balance before computing a withdrawable amount, identically to the
+    // existing pro-rata path. On a fresh pool with its FNA-03 escrow wired in (as this fixture
+    // is), a finalized queued-withdrawal claim physically leaves the pool's own balance rather
+    // than incrementing reservedAssetBalance (see PoolLogic.finalizeCashWithdraw's own docs —
+    // reservedAssetBalance now only applies to legacy, pre-escrow requests, not reachable on a
+    // fresh pool), so the guard-reported balance already reflects any such claim directly.
+    // forceZeroBalance exercises the same net effect either mechanism produces: nothing
+    // available for the attested plan to draw down. Since this fixture's only supported asset
+    // is forced to report zero, the pool's whole fair value (completeFundValue) is also zero —
+    // this now hits the FNA-05-style WithdrawAmountTooSmall check (added alongside
+    // computeImmediateWithdrawPortion's fairFusd fix) before ever reaching the per-asset loop.
+    await assetGuard.setForceZeroBalance(true);
+
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const plan = buildPlan({ ...fixture, userAddress, assetAddress, minValueOutBps: 10n });
+    const signature = await signPlan(fixture, plan, attester);
+
+    // Nothing is withdrawable, so unavailable liquidity is never bypassed to still deliver
+    // value — the withdrawal reverts rather than silently paying out.
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+      'WithdrawAmountTooSmall',
+    );
+  });
+
+  it('supports a direct (non-fixed-amount) portion allocation delivering the expected share', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, fusd, asset, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    // netFusd (100) / poolAsset (1000) = 10% portion delivers exactly 100 units at price 1.
+    const plan = buildPlan({
+      ...fixture,
+      userAddress,
+      allocations: [
+        {
+          asset: assetAddress,
+          useFixedAmount: false,
+          portion: ethers.parseUnits('0.1', 18),
+          fixedAmount: 0n,
+        },
+      ],
+    });
+    const signature = await signPlan(fixture, plan, attester);
+
+    const before = await asset.balanceOf(userAddress);
+    await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+    const after = await asset.balanceOf(userAddress);
+
+    expect(after - before).to.equal(amount);
+  });
+
+  it('tracks attested-withdraw volume independently of withdrawCashImmediate() volume', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, fusd, asset, user, attester, manager } = fixture;
+
+    // Cap tight enough that a single ordinary withdrawCashImmediate() of `amount` would have
+    // exceeded it if it shared the same accumulator.
+    await pool.connect(manager).setMaxAttestedWithdrawVolumePerWindow(amount);
+
+    await fundPoolAndUser(fixture);
+    const userAddress = await user.getAddress();
+
+    // Ordinary pro-rata withdrawal — does not touch attestedWithdrawVolume at all.
+    await pool.connect(user).withdrawCashImmediate(amount);
+    const volumeAfterOrdinary = await pool.attestedWithdrawVolume();
+    expect(volumeAfterOrdinary.accumulatedValueUsd).to.equal(0n);
+
+    // A subsequent attested withdrawal of the same size still fits under the same cap,
+    // proving the ordinary withdrawal above was never counted against it. minValueOutBps is
+    // given a small tolerance here (not the default strict 0) — the pool balance is no longer
+    // a round multiple of `amount` after the first withdrawal, so the fixed-amount portion
+    // round-trip loses a rounding-scale fraction of value; see the "decays continuously" test
+    // above for the same reasoning.
+    await fundPoolAndUser(fixture);
+    const assetAddress = await asset.getAddress();
+    const plan = buildPlan({
+      ...fixture,
+      userAddress,
+      assetAddress,
+      nonce: 1n,
+      minValueOutBps: 10n,
+    });
+    const signature = await signPlan(fixture, plan, attester);
+    await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+
+    const volumeAfterAttested = await pool.attestedWithdrawVolume();
+    expect(volumeAfterAttested.accumulatedValueUsd).to.equal(amount);
+  });
+
   it('supports fixed-amount allocations converted to a portion of the guard-reported balance', async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, fusd, asset, user, attester } = fixture;
@@ -622,7 +816,11 @@ describe('PoolLogic — attested selective withdrawal', () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, fusd, poolManager, user, attester, owner } = fixture;
 
-    // A second, never-funded supported asset.
+    // A second, never-funded supported asset. The main `asset` IS funded below (fully
+    // collateralizing the plan's own fusdAmount) so the pool has a nonzero fair share overall
+    // and this test reaches the fixed-amount ZeroAssetBalance check specifically for
+    // `zeroAsset` — not the unrelated FNA-05 zero-fair-share guard this session's audit added
+    // for a pool with no collateral at all (see the "underwater pool" describe block above).
     const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
     const zeroAsset = await TestTokenLogic.deploy('Zero Asset', 'ZA', 18);
     await zeroAsset.waitForDeployment();
@@ -637,7 +835,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
       18,
     );
 
-    await mintAndApproveFUSD(fusd, pool, user, amount);
+    await fundPoolAndUser(fixture);
 
     const userAddress = await user.getAddress();
     const plan = buildPlan({
@@ -768,6 +966,35 @@ describe('PoolLogic — attested selective withdrawal', () => {
       );
     });
 
+    it('initializeAttestedWithdrawal itself enforces both floors, even on a fresh migration', async () => {
+      const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      const { pool, owner, attester } = fixture;
+      const attesterAddress = await attester.getAddress();
+
+      await expectRevert(
+        pool
+          .connect(owner)
+          .initializeAttestedWithdrawal(
+            attesterAddress,
+            ONE_DAY - 1,
+            ONE_HOUR,
+            ethers.parseUnits('1000000', 18),
+          ),
+        'RotationDelayTooShort',
+      );
+      await expectRevert(
+        pool
+          .connect(owner)
+          .initializeAttestedWithdrawal(
+            attesterAddress,
+            ONE_DAY,
+            ONE_HOUR - 1,
+            ethers.parseUnits('1000000', 18),
+          ),
+        'DecayWindowTooShort',
+      );
+    });
+
     it('requires the rotation delay to elapse before activation, and lets anyone activate once due', async () => {
       const fixture = await loadFixture(deployAttestedWithdrawalFixture);
       const { pool, manager, other } = fixture;
@@ -819,6 +1046,71 @@ describe('PoolLogic — attested selective withdrawal', () => {
       await time.increase(ONE_DAY + 1);
       await pool.connect(other).activateWithdrawalAttester();
       expect(await pool.withdrawalAttester()).to.equal(candidate);
+    });
+
+    it('fails closed (does not silently disable circuit-breaker memory) when the feature is bootstrapped via individual setters without ever calling setAttestedWithdrawDecayWindow', async () => {
+      const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      const { pool, poolManager, fusd, manager, owner, attester, user } = fixture;
+
+      // Full bootstrap via individual setters (legitimate, per the prior test) — attester,
+      // enabled flag, and a real volume cap are all configured, but
+      // setAttestedWithdrawDecayWindow is deliberately never called, leaving
+      // attestedWithdrawDecayWindow at its unsafe storage-default 0.
+      await pool.connect(owner).setAttesterRotationDelay(ONE_DAY);
+      await pool.connect(manager).proposeWithdrawalAttester(await attester.getAddress());
+      await time.increase(ONE_DAY + 1);
+      await pool.connect(user).activateWithdrawalAttester();
+      await pool.connect(manager).setAttestedWithdrawEnabled(true);
+      await pool.connect(manager).setMaxAttestedWithdrawVolumePerWindow(ethers.parseUnits('1000000', 18));
+      expect(await pool.attestedWithdrawDecayWindow()).to.equal(0n);
+
+      const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
+      const asset = await TestTokenLogic.deploy('Mock Asset', 'MA', 18);
+      await asset.waitForDeployment();
+      const TestAssetGuard = await ethers.getContractFactory('TestAssetGuard');
+      const assetGuard = await TestAssetGuard.deploy();
+      await assetGuard.waitForDeployment();
+      await poolManager.setAssetGuard(await asset.getAddress(), await assetGuard.getAddress());
+      await poolManager.setSupportedAsset(await asset.getAddress(), true, ethers.parseUnits('1', 18), 18);
+
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await asset.mint(await pool.getAddress(), poolAsset);
+      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const localFixture = {
+        domain: {
+          name: 'Frgmnt PoolLogic',
+          version: '1',
+          chainId,
+          verifyingContract: await pool.getAddress(),
+        },
+        types: {
+          WithdrawalPlan: [
+            { name: 'user', type: 'address' },
+            { name: 'fusdAmount', type: 'uint256' },
+            { name: 'minValueOutBps', type: 'uint256' },
+            { name: 'allocations', type: 'AssetAllocation[]' },
+            { name: 'nonce', type: 'uint256' },
+            { name: 'deadline', type: 'uint256' },
+          ],
+          AssetAllocation: [
+            { name: 'asset', type: 'address' },
+            { name: 'useFixedAmount', type: 'bool' },
+            { name: 'portion', type: 'uint256' },
+            { name: 'fixedAmount', type: 'uint256' },
+          ],
+        },
+      };
+      const plan = buildPlan({ userAddress, assetAddress });
+      const signature = await signPlan(localFixture, plan, attester);
+
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+        'AttestedWithdrawVolumeCapExceeded',
+      );
     });
   });
 });

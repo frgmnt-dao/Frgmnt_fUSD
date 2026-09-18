@@ -332,6 +332,35 @@ library WithdrawalPlanLib {
             input.poolManagerLogic
         );
 
+        // Audit finding (4th round): the two-sided value-conservation check previously bounded
+        // valueDelta against the raw, nominal `netFusd` fUSD amount. computeImmediateWithdrawPortion
+        // already computes a solvency-haircut-adjusted `fairFusd` (identical to what the pro-rata
+        // path pays out via its own `portion`) — but that path derives its actual per-asset
+        // withdrawal amounts FROM that haircut-adjusted portion, while this path's allocations
+        // come directly from the attester-signed plan, never scaled by any haircut at all. Left
+        // unfixed, an underwater pool's attested withdrawals could pay out at par (the full
+        // nominal netFusd) while the pro-rata path haircut every other withdrawal proportionally
+        // to the funding shortfall — extracting more than a fair share from remaining stakers, the
+        // exact loss-socialization invariant FNA-05 exists to protect. Bounding against `fairFusd`
+        // instead closes this: when the pool is solvent, fairFusd == netFusd (no behavior change
+        // in the common case); when underwater, both bounds shrink with it, exactly like the
+        // pro-rata path already does via `portion`.
+        // Moved before the allocations loop (matching executeProRataWithdrawal's own ordering)
+        // rather than after: completeFundValue must reflect PRE-withdrawal state for
+        // computeAccountedAssetsReduction's "valueBefore" input to mean what its own docs say it
+        // means — computing it after the loop (as this function previously did) would have
+        // handed PoolLogic an already-withdrawal-reduced figure instead.
+        (, uint256 totalClaims_, uint256 completeFundValue_, uint256 fairFusd) = FundCalculationLibrary
+            .computeImmediateWithdrawPortion(address(this), result.netFusd, valueBefore);
+        result.totalClaims = totalClaims_;
+        result.completeFundValue = completeFundValue_;
+        // Matches executeProRataWithdrawal's own explicit `if (portion == 0) revert
+        // WithdrawAmountTooSmall();` for the same underlying condition (extreme insolvency or an
+        // empty pool) — without this, a zero fair entitlement would trivially satisfy the lower
+        // value-conservation bound below (valueDelta < 0 is never true), silently letting a
+        // real fUSD burn go through for a fair share of $0 instead of reverting outright.
+        if (fairFusd == 0) revert WithdrawAmountTooSmall();
+
         (result.outAssets, result.outAmounts) = _processAllocations(
             input.poolManagerLogic,
             plan.user,
@@ -345,12 +374,9 @@ library WithdrawalPlanLib {
         );
         if (valueBefore < valueAfter) revert IPoolLogic.InvalidFundValue();
         result.valueDelta = valueBefore - valueAfter;
-        if (result.valueDelta > result.netFusd + DUST_TOLERANCE) revert ValueConservationViolated();
-        uint256 minAllowed = result.netFusd - (result.netFusd * plan.minValueOutBps) / 10_000;
+        if (result.valueDelta > fairFusd + DUST_TOLERANCE) revert ValueConservationViolated();
+        uint256 minAllowed = fairFusd - (fairFusd * plan.minValueOutBps) / 10_000;
         if (result.valueDelta < minAllowed) revert ValueConservationViolated();
-
-        (, result.totalClaims, result.completeFundValue) = FundCalculationLibrary
-            .computeImmediateWithdrawPortion(address(this), result.netFusd, valueBefore);
     }
 
     /// @dev Duplicates PoolLogic._applyWithdrawFeeFusd's exit-fee formula plus the manager-bypass
@@ -443,7 +469,7 @@ library WithdrawalPlanLib {
         if (fundValue == 0) revert EmptyFund();
 
         uint256 portion;
-        (portion, result.totalClaims, result.completeFundValue) = FundCalculationLibrary
+        (portion, result.totalClaims, result.completeFundValue, ) = FundCalculationLibrary
             .computeImmediateWithdrawPortion(address(this), result.netFusd, fundValue);
         if (portion == 0) revert WithdrawAmountTooSmall();
 
@@ -661,6 +687,21 @@ library WithdrawalPlanLib {
         uint256 maxVolumePerWindow,
         uint256 valueUsd
     ) private view returns (VolumeState memory) {
+        // Audit finding (4th round): attestedWithdrawDecayWindow's own setter
+        // (setAttestedWithdrawDecayWindow) enforces MIN_ATTESTED_WITHDRAW_DECAY_WINDOW, but
+        // setAttestedWithdrawEnabled(true) and setMaxAttestedWithdrawVolumePerWindow have no
+        // check that the decay window was ever actually set — a manager could enable the
+        // feature and configure a real volume cap while simply never calling
+        // setAttestedWithdrawDecayWindow, leaving it at its unsafe storage-default 0. With
+        // decayWindow == 0, `elapsed < decayWindow` below is never true, so `decayed` is
+        // always 0 — silently degrading the circuit breaker to a stateless per-transaction
+        // check with zero cross-transaction memory, exactly the failure mode the floor exists
+        // to prevent (see MIN_ATTESTED_WITHDRAW_DECAY_WINDOW's own docs), just reached via a
+        // configuration-omission path that setter's floor alone doesn't cover. Defended here,
+        // at the actual point of use, rather than trying to gate every possible entry point
+        // that could leave the feature "enabled" without every parameter configured.
+        if (decayWindow == 0) revert AttestedWithdrawVolumeCapExceeded();
+
         uint256 decayed;
         if (current.accumulatedValueUsd != 0) {
             uint256 elapsed = block.timestamp - current.lastWithdrawTimestamp;
