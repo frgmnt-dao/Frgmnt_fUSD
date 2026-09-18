@@ -537,6 +537,30 @@ describe('PoolLogic — attested selective withdrawal', () => {
 
       expect(after - before).to.equal(ethers.parseUnits('40', 18));
     });
+
+    it('fails fast with WithdrawAmountTooSmall on a temporary liquidity gap (solvent overall, but not everything liquid right now)', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, fusd, asset, assetGuard, user, attester } = fixture;
+      await fundPoolAndUser(fixture);
+
+      // Pool is fully solvent (1000 in assets vs. 100 in claims — no haircut, fairFusd would
+      // equal netFusd), but the guard's own IWithdrawableBalanceGuard cap limits what's
+      // actually liquid right now to far less than the fair share — the same "temporary
+      // liquidity gap, distinct from insolvency" case computeImmediateWithdrawPortion's own
+      // docs describe, where the pro-rata path already reverts WithdrawAmountTooSmall via its
+      // own portion == 0 check rather than attempting a doomed partial payout.
+      await assetGuard.setWithdrawableBalanceCap(true, ethers.parseUnits('10', 18));
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const plan = buildPlan({ ...fixture, userAddress, assetAddress });
+      const signature = await signPlan(fixture, plan, attester);
+
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+        'WithdrawAmountTooSmall',
+      );
+    });
   });
 
   it('cannot draw down more value than a guard actually has available, matching how reservedAssetBalance-backed liquidity is protected', async () => {

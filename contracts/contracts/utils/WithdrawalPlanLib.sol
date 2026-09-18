@@ -360,6 +360,17 @@ library WithdrawalPlanLib {
         // value-conservation bound below (valueDelta < 0 is never true), silently letting a
         // real fUSD burn go through for a fair share of $0 instead of reverting outright.
         if (fairFusd == 0) revert WithdrawAmountTooSmall();
+        // 5th-round audit: computeImmediateWithdrawPortion returns fairFusd uncapped by
+        // withdrawableFundValue specifically in its "temporary liquidity gap" branch (solvent
+        // overall, but not everything liquid right now — see that function's own docs), the
+        // same branch where it returns portion == 0 so executeProRataWithdrawal above reverts
+        // WithdrawAmountTooSmall rather than attempting a doomed partial payout. Without this
+        // check, this path would instead proceed into the full allocations loop and almost
+        // certainly still revert (ValueConservationViolated, since real deliverable value is
+        // capped below this inflated fairFusd) — not a fund-safety gap either way, but wastes
+        // the caller's gas on a doomed loop and reports a less specific error. Matching the
+        // pro-rata path's exact short-circuit here fails fast with the same error instead.
+        if (fairFusd > valueBefore) revert WithdrawAmountTooSmall();
 
         (result.outAssets, result.outAmounts) = _processAllocations(
             input.poolManagerLogic,
