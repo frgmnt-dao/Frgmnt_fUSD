@@ -686,6 +686,79 @@ describe('PoolLogic — attested selective withdrawal', () => {
     expect(after - before).to.equal(fixedAmount);
   });
 
+  it('threads complexAssetsData through to withdrawProcessing\'s slippage check via _matchComplexAsset', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, asset, assetGuard, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+
+    // Guard delivers only 50% of the requested amount — with a matching, nonzero
+    // slippageTolerance supplied via complexAssetsData (empty withdrawData, so this exercises
+    // the *regular* guard-dispatch path's slippage check, not full complex processing — see
+    // the next test for that), this must revert with SlippageExceeded specifically, proving
+    // _matchComplexAsset actually located this plan's single allocation by address and passed
+    // its complexData through, rather than silently defaulting to slippageTolerance == 0
+    // (which would let any delivery through unchecked).
+    await assetGuard.setWithdrawMode(false, false, 5_000);
+
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const fixedAmount = ethers.parseUnits('50', 18);
+    const plan = buildPlan({
+      ...fixture,
+      userAddress,
+      fusdAmount: fixedAmount,
+      minValueOutBps: 100n, // MAX_MIN_VALUE_OUT_BPS — the slippage check inside the loop fires before this is ever reached
+      allocations: [{ asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount }],
+    });
+    const signature = await signPlan(fixture, plan, attester);
+    const complexAssetsData = [
+      { supportedAsset: assetAddress, withdrawData: '0x', slippageTolerance: 100 },
+    ];
+
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, complexAssetsData),
+      'SlippageExceeded',
+    );
+  });
+
+  it('supports full complex-guard processing (non-empty withdrawData) via complexAssetsData, matched by address', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, asset, assetGuard, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const fixedAmount = ethers.parseUnits('50', 18);
+    const plan = buildPlan({
+      ...fixture,
+      userAddress,
+      fusdAmount: fixedAmount,
+      minValueOutBps: 100n,
+      allocations: [{ asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount }],
+    });
+    const signature = await signPlan(fixture, plan, attester);
+    const complexAssetsData = [
+      { supportedAsset: assetAddress, withdrawData: '0x1234', slippageTolerance: 0 },
+    ];
+
+    // A complex guard that reverts must propagate as ComplexWithdrawFailed, proving this
+    // reaches TestAssetGuard's complex overload (not silently falling back to regular
+    // processing) exactly as withdrawCashImmediateSafe's own equivalent test verifies for the
+    // pro-rata path.
+    await assetGuard.setComplexShouldRevert(true);
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, complexAssetsData),
+      'ComplexWithdrawFailed',
+    );
+
+    await assetGuard.setComplexShouldRevert(false);
+    const before = await asset.balanceOf(userAddress);
+    await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, complexAssetsData);
+    const after = await asset.balanceOf(userAddress);
+
+    expect(after - before).to.equal(fixedAmount);
+  });
+
   it('rejects a direct (non-fixed-amount) portion above 1e18', async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, asset, user, attester } = fixture;
