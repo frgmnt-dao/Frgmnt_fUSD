@@ -170,6 +170,14 @@ const config: HardhatUserConfig = {
         },
       },
 
+      'contracts/contracts/utils/WithdrawalPlanLib.sol': {
+        version: '0.8.24',
+        settings: {
+          optimizer: { enabled: true, runs: 200 },
+          viaIR: true,
+        },
+      },
+
       'contracts/contracts/guards/assetGuards/AaveLendingPoolAssetGuard.sol': {
         version: '0.8.24',
         settings: {

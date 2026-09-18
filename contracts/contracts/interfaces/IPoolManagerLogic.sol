@@ -47,4 +47,10 @@ interface IPoolManagerLogic {
     function privatePool() external view returns (bool);
 
     function getAllowedCallbackSenders(address protocol) external view returns (bool);
+
+    /// @notice The factory-level owner — the same actor that already gates
+    ///         `_performanceFeeNumeratorChangeDelay` via setFactoryConfig(). PoolLogic reads this
+    ///         to gate attesterRotationDelay the same way, so a manager can never shorten the
+    ///         detection window around a withdrawal-attester rotation they themselves proposed.
+    function factoryOwner() external view returns (address);
 }

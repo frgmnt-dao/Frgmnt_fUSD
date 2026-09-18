@@ -103,13 +103,6 @@ contract PoolLogic is
         RequestStatus status;
     }
 
-    /// @dev Compact outputs for pro-rata withdrawal to avoid stack-too-deep.
-    struct WithdrawOutputs {
-        address[] assets;
-        uint256[] amounts;
-        uint256 count;
-    }
-
     // ============================================================
     // =                        STORAGE                           =
     // ============================================================
@@ -198,6 +191,51 @@ contract PoolLogic is
     ///         every request this pool has ever created.
     mapping(address => uint256) public pendingCashWithdrawCount;
 
+    /// @notice Decaying volume-tracking accumulator for withdrawCashImmediateWithPlan(), reusing
+    ///         SlippageAccumulator.sol's continuous-decay shape so there's no fixed-window
+    ///         boundary a compromised attester could straddle to release ~2x the intended cap.
+    ///         See docs/attested-selective-withdrawal-design.md's "Bounding a Compromised
+    ///         Attester Key" section.
+    struct AttestedWithdrawVolume {
+        uint64 lastWithdrawTimestamp;
+        uint128 accumulatedValueUsd;
+    }
+
+    /// @notice Active withdrawal-attester signer, verified via SignatureChecker (EOA or
+    ///         ERC-1271) against every WithdrawalPlan. Only ever changed via the asymmetric
+    ///         propose/activate rotation below.
+    address public withdrawalAttester;
+
+    /// @notice Candidate attester awaiting its rotation delay; committed by
+    ///         activateWithdrawalAttester() once pendingAttesterActivationTime has passed.
+    address public pendingWithdrawalAttester;
+    uint256 public pendingAttesterActivationTime;
+
+    /// @notice factoryOwner-gated (never manager-gated — see setAttesterRotationDelay()) delay
+    ///         enforced between proposeWithdrawalAttester() and activateWithdrawalAttester().
+    uint256 public attesterRotationDelay;
+
+    /// @notice Per-user single-use nonces consumed by withdrawCashImmediateWithPlan(), preventing
+    ///         any signed WithdrawalPlan from being replayed.
+    mapping(address => mapping(uint256 => bool)) public consumedPlanNonce;
+
+    /// @notice Deliberately independent of isImmediateWithdrawEnabled — this feature exists
+    ///         specifically to provide relief in the scenario the manager would otherwise handle
+    ///         by disabling immediate withdrawals pool-wide. See setAttestedWithdrawEnabled().
+    bool public isAttestedWithdrawEnabled;
+
+    /// @notice Rolling decayed USD volume released via withdrawCashImmediateWithPlan(), tracked
+    ///         independently of withdrawCashImmediate()'s ordinary volume.
+    AttestedWithdrawVolume public attestedWithdrawVolume;
+
+    /// @notice manager-settable, with an enforced floor (MIN_ATTESTED_WITHDRAW_DECAY_WINDOW) —
+    ///         see setAttestedWithdrawDecayWindow() for why a floor is required here specifically.
+    uint256 public attestedWithdrawDecayWindow;
+
+    /// @notice manager-settable; zero fails closed (blocks all attested withdrawals), which is
+    ///         safe and needs no enforced floor of its own.
+    uint256 public maxAttestedWithdrawVolumePerWindow;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -208,33 +246,36 @@ contract PoolLogic is
     error OnlyManager();
     error OnlyManagerLogic();
     error CooldownActive();
-    error AssetNotSupported();
     error NotValidWithdrawableAsset();
     error InvalidRecipient();
     error NothingToHarvest();
     error InsufficientShares();
     error NoStakers();
-    error EmptyFund();
     error InsufficientAssetBalance();
     error InvalidTransaction();
     error AssetDisabled();
     error CallbackSenderNotAllowed();
-    error InvalidFundValue();
     error InvalidWithdrawRequest();
     error NonTransferable();
     error ImmediateWithdrawalDisabled();
     error QueuedWithdrawalDisabled();
     error OnlyMemberAllowed();
-    error WithdrawAmountTooSmall();
     error AutoCompoundingAlreadyInitialized();
     error AutoCompoundingNotInitialized();
     error EscrowAlreadySet();
     error OnlyTokenLogic();
-    // SlippageExceeded, InvalidReservedBalance, InvalidAssetData, InvalidGuard,
-    // ComplexWithdrawFailed, TxFailed, and InvalidCallData moved out of this block: the first
-    // three are declared on IPoolLogic (shared with WithdrawalPlanLib.sol, which also throws
-    // them), the rest are declared directly on WithdrawalPlanLib.sol (only ever thrown there
-    // now that _withdrawProcessing/_checkCallResult moved into that library).
+    error OnlyFactoryOwner();
+    error NotPlanUser();
+    error AttestedWithdrawalAlreadyInitialized();
+    error RotationDelayTooShort();
+    error DecayWindowTooShort();
+    error NoRotationPending();
+    error RotationNotYetDue();
+    // SlippageExceeded, InvalidReservedBalance, InvalidAssetData, AssetNotSupported, and
+    // InvalidFundValue moved to IPoolLogic (shared with WithdrawalPlanLib.sol, which also
+    // throws them for the attested-plan path). InvalidGuard, ComplexWithdrawFailed, TxFailed,
+    // and InvalidCallData are declared directly on WithdrawalPlanLib.sol (only ever thrown
+    // there).
 
     // ============================================================
     // =                         EVENTS                           =
@@ -312,6 +353,38 @@ contract PoolLogic is
     /// @param immediateWithdrawEnabled Whether immediate withdrawals are enabled
     event WithdrawModeUpdated(bool immediateWithdrawEnabled);
 
+    /// @notice Emitted alongside the reused CashWithdrawImmediateProRata event (same
+    ///         user/amounts/assets shape as the existing pro-rata path) purely to additionally
+    ///         record which signed plan nonce this attested withdrawal consumed — avoids
+    ///         compiling a second, near-identical event with its own dynamic-array encoding.
+    event AttestedWithdrawPlanExecuted(address indexed user, uint256 indexed nonce);
+
+    event AttestedWithdrawEnabledSet(bool enabled);
+    event WithdrawalAttesterProposed(address indexed candidate, uint256 activationTime);
+    event WithdrawalAttesterActivated(address indexed previousAttester, address indexed newAttester);
+    event AttesterRotationDelaySet(uint256 delay);
+    event AttestedWithdrawDecayWindowSet(uint256 window);
+    event MaxAttestedWithdrawVolumePerWindowSet(uint256 maxVolume);
+
+    // ============================================================
+    // =            ATTESTED SELECTIVE WITHDRAWAL CONSTANTS        =
+    // ============================================================
+
+    /// @dev Protocol-level ceiling on how loose a WithdrawalPlan's minValueOutBps may be,
+    ///      independent of what the attester signs — see WithdrawalPlanLib's value-conservation
+    ///      check.
+    uint256 public constant MAX_MIN_VALUE_OUT_BPS = 100; // 1%
+
+    /// @dev factoryOwner-only floor on attesterRotationDelay — mirrors
+    ///      PoolManagerLogic._performanceFeeNumeratorChangeDelay's existing precedent of keeping
+    ///      the delay outside the manager's own control.
+    uint256 public constant MIN_ATTESTER_ROTATION_DELAY = 24 hours;
+
+    /// @dev Floor on attestedWithdrawDecayWindow — below this, a window of 0 silently disables
+    ///      the circuit breaker's cross-transaction memory rather than reverting, so this is
+    ///      enforced rather than left to manager discretion.
+    uint256 public constant MIN_ATTESTED_WITHDRAW_DECAY_WINDOW = 1 hours;
+
     // ============================================================
     // =                      INITIALIZATION                       =
     // ============================================================
@@ -356,6 +429,32 @@ contract PoolLogic is
         if (compoundedRewardIndex != 0) revert AutoCompoundingAlreadyInitialized();
         compoundedRewardIndex = 1e18;
         autoCompoundStartRewardPerShare = rewardPerShare;
+    }
+
+    /// @custom:oz-upgrades-validate-as-initializer
+    /// @notice One-time wiring of the attested selective withdrawal feature onto an
+    ///         already-deployed, upgraded pool. Both floors are enforced here too, not just in
+    ///         the standalone setters, so the feature can never launch in an already-defeated
+    ///         state — see docs/attested-selective-withdrawal-design.md's "Upgrade & Storage
+    ///         Migration" section.
+    function initializeAttestedWithdrawal(
+        address attester_,
+        uint256 attesterRotationDelay_,
+        uint256 attestedWithdrawDecayWindow_,
+        uint256 maxAttestedWithdrawVolumePerWindow_
+    ) external onlyOwner reinitializer(3) {
+        if (withdrawalAttester != address(0)) revert AttestedWithdrawalAlreadyInitialized();
+        if (attester_ == address(0)) revert ZeroAddress();
+        if (attesterRotationDelay_ < MIN_ATTESTER_ROTATION_DELAY) revert RotationDelayTooShort();
+        if (attestedWithdrawDecayWindow_ < MIN_ATTESTED_WITHDRAW_DECAY_WINDOW) {
+            revert DecayWindowTooShort();
+        }
+
+        withdrawalAttester = attester_;
+        attesterRotationDelay = attesterRotationDelay_;
+        attestedWithdrawDecayWindow = attestedWithdrawDecayWindow_;
+        maxAttestedWithdrawVolumePerWindow = maxAttestedWithdrawVolumePerWindow_;
+        isAttestedWithdrawEnabled = true;
     }
 
     /// @notice FNA-03: one-time wiring of the dedicated WithdrawalEscrow deployed for this
@@ -851,6 +950,12 @@ contract PoolLogic is
         _withdrawCashImmediateToSafe(msg.sender, recipient, amount, complexAssetsData);
     }
 
+    /// @dev The per-asset guard-dispatch loop formerly here (_withdrawProRata/
+    ///      _withdrawProRataInternal/_withdrawOne) now lives in
+    ///      WithdrawalPlanLib.executeProRataWithdrawal() — moved out alongside
+    ///      withdrawCashImmediateWithPlan's own logic purely to recover EIP-170 bytecode
+    ///      headroom (see that library's own docs). Behavior is unchanged; only where the code
+    ///      lives.
     function _withdrawCashImmediateToSafe(
         address user,
         address recipient,
@@ -859,36 +964,15 @@ contract PoolLogic is
     ) internal {
         if (!isImmediateWithdrawEnabled) revert ImmediateWithdrawalDisabled();
         if (amount == 0) revert ZeroAmount();
-        uint256 netFusd;
-        uint256 feeFusd;
-        if (user == _manager()) {
-            netFusd = amount;
-        } else {
-            // cooldown enforced only on CASH withdraw (not unstake)
-            if (ITokenLogic(fusd).getExitRemainingCooldown(user) != 0) revert CooldownActive();
 
-            (netFusd, feeFusd) = _applyWithdrawFeeFusd(amount);
-            if (netFusd == 0) revert ZeroAmount();
+        WithdrawalPlanLib.ProRataResult memory result = WithdrawalPlanLib.executeProRataWithdrawal(
+            WithdrawalPlanLib.ProRataInput({ fusd: fusd, poolManagerLogic: poolManagerLogic, manager: _manager() }),
+            user,
+            recipient,
+            amount,
+            complexAssetsData
+        );
 
-            if (feeFusd > 0) {
-                IERC20(fusd).safeTransferFrom(user, _manager(), feeFusd);
-            }
-        }
-        // burn FUSD
-        ITokenLogic(fusd).burnFrom(user, netFusd);
-
-        (
-            address[] memory outAssets,
-            uint256[] memory outAmounts,
-            uint256 valueBefore,
-            uint256 totalClaims,
-            uint256 completeFundValue
-        ) = _withdrawProRata(recipient, netFusd, complexAssetsData);
-
-        uint256 valueAfter = _withdrawableFundValue();
-        if (valueBefore < valueAfter) revert InvalidFundValue();
-        uint256 valueDelta = valueBefore - valueAfter;
-        if (valueDelta > netFusd + 1e15) revert InvalidFundValue();
         // FNA-42: reduces accountedAssets by more than valueDelta whenever this withdrawal
         // retires claims while an unrecognized loss (accountedAssets > completeFundValue) is
         // outstanding — see computeAccountedAssetsReduction's own docs for why the plain
@@ -896,127 +980,145 @@ contract PoolLogic is
         // and for why completeFundValue (not this function's own liquidity-capped valueBefore)
         // is the correct NAV to measure the overhang against.
         uint256 reduction = FundCalculationLibrary.computeAccountedAssetsReduction(
-            netFusd,
-            totalClaims,
+            result.netFusd,
+            result.totalClaims,
             accountedAssets,
-            completeFundValue,
-            valueDelta
+            result.completeFundValue,
+            result.valueDelta
         );
         if (accountedAssets < reduction) revert InvalidFundValue();
         accountedAssets -= reduction;
 
         // Backward-compatible event (single-asset fields are not meaningful in pro-rata mode)
-        emit CashWithdrawImmediate(user, amount, netFusd, feeFusd);
-        emit CashWithdrawImmediateProRata(user, amount, netFusd, feeFusd, outAssets, outAmounts);
-    }
-
-    /// @dev Helper to reduce stack usage in withdrawCashImmediate (compile fix: avoids "stack too deep")
-    function _withdrawProRata(
-        address recipient,
-        uint256 netFusd,
-        ComplexAsset[] memory complexAssetsData
-    )
-        internal
-        returns (
-            address[] memory outAssets,
-            uint256[] memory outAmounts,
-            uint256 valueBefore,
-            uint256 totalClaims,
-            uint256 completeFundValue
-        )
-    {
-        // compute portion in terms of totalFundValue, floored by outstanding claims so an
-        // underwater pool socializes the shortfall instead of paying early redeemers at par —
-        // see FundCalculationLibrary.computeImmediateWithdrawPortion and FNA-05.
-        uint256 fundValue = _withdrawableFundValue();
-        if (fundValue == 0) revert EmptyFund();
-        // FNA-07 follow-up: computeImmediateWithdrawPortion now internally derives a separate,
-        // non-liquidity-capped NAV for its solvency haircut, so a temporary under-liquid lending
-        // position is never misread as permanent insolvency — see its own docs.
-        uint256 portion;
-        (portion, totalClaims, completeFundValue) = FundCalculationLibrary
-            .computeImmediateWithdrawPortion(address(this), netFusd, fundValue);
-        if (portion == 0) revert WithdrawAmountTooSmall();
-
-        // withdraw proportionally from ALL supported assets
-        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(poolManagerLogic)
-            .getSupportedAssets();
-        if (complexAssetsData.length != supportedAssets.length) {
-            revert InvalidAssetData();
-        }
-
-        WithdrawOutputs memory out;
-        out.assets = new address[](supportedAssets.length);
-        out.amounts = new uint256[](supportedAssets.length);
-        out.count = 0;
-        valueBefore = fundValue;
-
-        _withdrawProRataInternal(portion, recipient, supportedAssets, complexAssetsData, out);
-
-        outAssets = out.assets;
-        outAmounts = out.amounts;
-
-        uint256 outCount = out.count;
-        assembly {
-            mstore(outAssets, outCount)
-            mstore(outAmounts, outCount)
-        }
-    }
-
-    function _withdrawProRataInternal(
-        uint256 portion,
-        address recipient,
-        IHasSupportedAsset.Asset[] memory supportedAssets,
-        ComplexAsset[] memory complexAssetsData,
-        WithdrawOutputs memory out
-    ) internal {
-        for (uint256 i = 0; i < supportedAssets.length; ++i) {
-            address a = supportedAssets[i].asset;
-
-            ComplexAsset memory cd = complexAssetsData[i];
-            if (cd.withdrawData.length > 0) {
-                if (a != cd.supportedAsset) revert InvalidAssetData();
-            }
-
-            (address withdrawAsset, uint256 withdrawAmount) = _withdrawOne(
-                portion,
-                recipient,
-                a,
-                cd
-            );
-
-            if (withdrawAsset != address(0) && withdrawAmount > 0) {
-                uint256 count = out.count;
-                out.assets[count] = withdrawAsset;
-                out.amounts[count] = withdrawAmount;
-                out.count = count + 1;
-            }
-        }
-    }
-
-    function _withdrawOne(
-        uint256 portion,
-        address recipient,
-        address asset,
-        ComplexAsset memory cd
-    ) internal returns (address withdrawAsset, uint256 withdrawAmount) {
-        (address wa, uint256 wamt, ) = WithdrawalPlanLib.withdrawProcessing(
-            poolManagerLogic,
-            asset,
-            recipient,
-            portion,
-            reservedAssetBalance[asset],
-            cd
+        emit CashWithdrawImmediate(user, amount, result.netFusd, result.feeFusd);
+        emit CashWithdrawImmediateProRata(
+            user,
+            amount,
+            result.netFusd,
+            result.feeFusd,
+            result.outAssets,
+            result.outAmounts
         );
-        withdrawAsset = wa;
-        withdrawAmount = wamt;
+    }
 
-        if (withdrawAsset == address(0) || withdrawAmount == 0) {
-            return (address(0), 0);
-        } else {
-            IERC20(withdrawAsset).safeTransfer(recipient, withdrawAmount);
-            return (withdrawAsset, withdrawAmount);
-        }
+    // ============================================================
+    // =           CASH WITHDRAW — ATTESTED SELECTIVE PLAN         =
+    // ============================================================
+
+    /// @notice Deliberately independent of isImmediateWithdrawEnabled — see this variable's own
+    ///         storage docs above for why the two flags must not be coupled.
+    function setAttestedWithdrawEnabled(bool enabled) external {
+        if (msg.sender != _manager()) revert OnlyManager();
+        isAttestedWithdrawEnabled = enabled;
+        emit AttestedWithdrawEnabledSet(enabled);
+    }
+
+    /// @notice Instant revoke / delayed appoint, mirroring setFeeNumerator/announceFeeIncrease's
+    ///         existing asymmetry. Does not itself change withdrawalAttester.
+    function proposeWithdrawalAttester(address candidate) external {
+        if (msg.sender != _manager()) revert OnlyManager();
+        if (candidate == address(0)) revert ZeroAddress();
+        pendingWithdrawalAttester = candidate;
+        pendingAttesterActivationTime = block.timestamp + attesterRotationDelay;
+        emit WithdrawalAttesterProposed(candidate, pendingAttesterActivationTime);
+    }
+
+    /// @notice Callable by anyone once the rotation delay has elapsed.
+    function activateWithdrawalAttester() external {
+        if (pendingWithdrawalAttester == address(0)) revert NoRotationPending();
+        if (block.timestamp < pendingAttesterActivationTime) revert RotationNotYetDue();
+        address previous = withdrawalAttester;
+        withdrawalAttester = pendingWithdrawalAttester;
+        pendingWithdrawalAttester = address(0);
+        pendingAttesterActivationTime = 0;
+        emit WithdrawalAttesterActivated(previous, withdrawalAttester);
+    }
+
+    /// @notice factoryOwner-only, never manager-settable — see attesterRotationDelay's storage
+    ///         docs for why (mirrors PoolManagerLogic._performanceFeeNumeratorChangeDelay's
+    ///         existing setFactoryConfig-only precedent).
+    function setAttesterRotationDelay(uint256 delay) external {
+        if (msg.sender != IPoolManagerLogic(poolManagerLogic).factoryOwner()) revert OnlyFactoryOwner();
+        if (delay < MIN_ATTESTER_ROTATION_DELAY) revert RotationDelayTooShort();
+        attesterRotationDelay = delay;
+        emit AttesterRotationDelaySet(delay);
+    }
+
+    function setMaxAttestedWithdrawVolumePerWindow(uint256 maxVolume) external {
+        if (msg.sender != _manager()) revert OnlyManager();
+        maxAttestedWithdrawVolumePerWindow = maxVolume;
+        emit MaxAttestedWithdrawVolumePerWindowSet(maxVolume);
+    }
+
+    /// @notice Enforces MIN_ATTESTED_WITHDRAW_DECAY_WINDOW — see that constant's docs for why a
+    ///         floor is required here specifically (an unfloored 0 silently, not obviously,
+    ///         disables the circuit breaker's cross-transaction memory).
+    function setAttestedWithdrawDecayWindow(uint256 window) external {
+        if (msg.sender != _manager()) revert OnlyManager();
+        if (window < MIN_ATTESTED_WITHDRAW_DECAY_WINDOW) revert DecayWindowTooShort();
+        attestedWithdrawDecayWindow = window;
+        emit AttestedWithdrawDecayWindowSet(window);
+    }
+
+    /// @notice Redeems fUSD for an attester-composed, non-uniform mix of vault assets instead of
+    ///         withdrawCashImmediate()'s strict pro-rata slice — see
+    ///         docs/attested-selective-withdrawal-design.md for the full design. Deliberately
+    ///         plain msg.sender (never _actionSender()) — see that doc's Security Considerations
+    ///         section.
+    function withdrawCashImmediateWithPlan(
+        WithdrawalPlan calldata plan,
+        bytes calldata attesterSignature,
+        ComplexAsset[] calldata complexAssetsData
+    ) external nonReentrant returns (address[] memory outAssets, uint256[] memory outAmounts) {
+        if (msg.sender != plan.user) revert NotPlanUser();
+        if (!isAttestedWithdrawEnabled) revert ImmediateWithdrawalDisabled();
+        _updateFeesAndRewardsFor(plan.user);
+
+        WithdrawalPlanLib.PlanExecutionResult memory result = WithdrawalPlanLib.executeWithdrawalPlan(
+            WithdrawalPlanLib.ExecutePlanInput({
+                fusd: fusd,
+                poolManagerLogic: poolManagerLogic,
+                manager: _manager(),
+                withdrawalAttester: withdrawalAttester,
+                nonceAlreadyConsumed: consumedPlanNonce[plan.user][plan.nonce],
+                attestedWithdrawDecayWindow: attestedWithdrawDecayWindow,
+                maxAttestedWithdrawVolumePerWindow: maxAttestedWithdrawVolumePerWindow,
+                currentVolumeTimestamp: attestedWithdrawVolume.lastWithdrawTimestamp,
+                currentVolumeAccumulated: attestedWithdrawVolume.accumulatedValueUsd
+            }),
+            plan,
+            attesterSignature,
+            complexAssetsData
+        );
+
+        consumedPlanNonce[plan.user][plan.nonce] = true;
+        attestedWithdrawVolume = AttestedWithdrawVolume(
+            result.newVolumeTimestamp,
+            result.newVolumeAccumulated
+        );
+
+        uint256 reduction = FundCalculationLibrary.computeAccountedAssetsReduction(
+            result.netFusd,
+            result.totalClaims,
+            accountedAssets,
+            result.completeFundValue,
+            result.valueDelta
+        );
+        if (accountedAssets < reduction) revert InvalidFundValue();
+        accountedAssets -= reduction;
+
+        outAssets = result.outAssets;
+        outAmounts = result.outAmounts;
+
+        emit CashWithdrawImmediateProRata(
+            plan.user,
+            plan.fusdAmount,
+            result.netFusd,
+            result.feeFusd,
+            outAssets,
+            outAmounts
+        );
+        emit AttestedWithdrawPlanExecuted(plan.user, plan.nonce);
     }
 
     // ============================================================
@@ -1502,31 +1604,6 @@ contract PoolLogic is
         // Intentionally empty — simply prevents revert on unknown function selectors for allowed senders
     }
 
-    /**
-    * @dev Computes the total *withdrawable* fund value for immediate withdrawals.
-    *
-    * DESIGN:
-    * - AssetGuards define the total (gross) balance of each asset.
-    * - PoolLogic owns `reservedAssetBalance`, which represents liquidity
-    *   locked for finalized queued withdrawals.
-    * - Immediate withdrawals must NOT use reserved liquidity.
-	- `reservedAssetBalance` ONLY applies to ERC20 assets directly held by PoolLogic.
-    * - Complex assets (Aave, Morpho, NFTs, wrappers, etc.):
-    *     - do NOT expose balanceOf(pool)
-    *     - MUST have reservedAssetBalance == 0
-    *
-    * This function computes the sum of :
-    *   withdrawable balance = guardBalance - reservedBalance
-    *
-    * FNA-07: guardBalance is further capped by whatever external liquidity a guard reports via
-    * IWithdrawableBalanceGuard (delegated to FundCalculationLibrary — see its docs), so one
-    * under-liquid lending position sizes its own share down instead of the whole withdrawal
-    * reverting.
-    */
-    function _withdrawableFundValue() internal view returns (uint256 value) {
-        return FundCalculationLibrary.computeWithdrawableFundValue(address(this), poolManagerLogic);
-    }
-
-    // _checkCallResult moved into WithdrawalPlanLib.sol alongside _withdrawProcessing (its only
-    // caller) — see that library's own docs.
+    // _withdrawableFundValue()/_checkCallResult moved into WithdrawalPlanLib.sol alongside the
+    // rest of the withdrawal-processing logic that used them — see that library's own docs.
 }

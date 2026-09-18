@@ -9,6 +9,25 @@ interface IPoolLogic {
         uint256 slippageTolerance; // duplicated from ComplexAssetSwapData on purpose
     }
 
+    /// @notice One asset's contribution to an attested selective withdrawal.
+    /// @dev See docs/attested-selective-withdrawal-design.md's "Data Structures" section.
+    struct AssetAllocation {
+        address asset;
+        bool useFixedAmount;
+        uint256 portion; // 1e18-scale, meaningful iff !useFixedAmount
+        uint256 fixedAmount; // raw asset units, meaningful iff useFixedAmount
+    }
+
+    /// @notice Attester-signed withdrawal composition for one specific redemption.
+    struct WithdrawalPlan {
+        address user;
+        uint256 fusdAmount;
+        uint256 minValueOutBps;
+        AssetAllocation[] allocations;
+        uint256 nonce;
+        uint256 deadline;
+    }
+
     function factory() external view returns (address);
 
     function fusd() external view returns (address);
@@ -58,4 +77,6 @@ interface IPoolLogic {
     error SlippageExceeded();
     error InvalidReservedBalance();
     error InvalidAssetData();
+    error AssetNotSupported();
+    error InvalidFundValue();
 }
