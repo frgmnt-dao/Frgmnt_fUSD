@@ -39,6 +39,11 @@ contract TestPoolManagerLogic {
 
     address public pool; // optional reference (not used by PoolLogic, but handy in tests)
 
+    /// @notice Mocks PoolManagerLogic.factoryOwner() — PoolLogic.setAttesterRotationDelay() reads
+    ///         this to gate the attested-withdrawal attester-rotation delay. Defaults to the
+    ///         deployer so existing tests that never call setFactoryOwner() keep working.
+    address public factoryOwner;
+
     constructor(
         address _manager,
         address _trader,
@@ -48,6 +53,11 @@ contract TestPoolManagerLogic {
         manager = _manager;
         trader = _trader;
         managerName = _managerName;
+        factoryOwner = msg.sender;
+    }
+
+    function setFactoryOwner(address _factoryOwner) external {
+        factoryOwner = _factoryOwner;
     }
 
     // ---- IManaged-like ----
