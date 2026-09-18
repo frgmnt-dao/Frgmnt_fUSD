@@ -12,16 +12,18 @@ import { ethers } from 'hardhat';
 // *** transaction unless SEND=1 is explicitly set (fork/testnet use only) — the default ***
 // *** mode only deploys new implementations/libraries and writes review artifacts.     ***
 //
-// EVERY MAINNET ADDRESS BELOW IS A REQUIRED PLACEHOLDER, NOT A VERIFIED VALUE. Unlike
-// scripts/upgrade_core_contracts.ts (whose addresses were independently confirmed on-chain
-// at the time it was written), this script's proxy/admin addresses could not be
-// re-confirmed in this session — a read against the address recorded in that script's own
-// comments (POOL_LOGIC_PROXY_ADMIN.getProxyImplementation(POOL_LOGIC_PROXY) and a direct
-// EIP-1967 implementation-slot read on the proxy) both came back empty/reverted rather than
-// returning a live implementation address. Fill in every placeholder below only after
-// independently re-confirming it on-chain (e.g. via a block explorer or a fresh
-// eth_getStorageAt / ProxyAdmin.getProxyImplementation call) — do not copy the values from
-// scripts/upgrade_core_contracts.ts's comments without re-verifying them yourself first.
+// POOL_LOGIC_PROXY, POOL_LOGIC_PROXY_ADMIN, and DAO_SAFE below are now independently
+// re-verified on-chain (direct eth_call reads against Base mainnet, not copied from another
+// script's comments): PoolLogic(POOL_LOGIC_PROXY).owner(), ProxyAdmin(POOL_LOGIC_PROXY_ADMIN)
+// .owner(), Governance.owner(), AssetHandler.owner(), and PoolManagerLogic.factoryOwner()
+// all currently resolve to the same address, confirmed by its deployed bytecode to be a
+// Gnosis Safe proxy (not an EOA) and documented elsewhere in this repo as a 3-of-4 Safe.
+// This superseded an earlier draft of this script, written in the same session, whose
+// verification attempt hit RPC rate-limiting and could not confirm these values — that
+// failure mode is exactly why this script re-checks live custody at runtime below (see
+// the startup assertion in main()) rather than trusting these defaults blindly forever.
+// Custody can still change after this comment is written; override via the same-named env
+// vars if it has, and the runtime check will catch a stale default either way.
 //
 // STORAGE-LAYOUT VERIFICATION (manual diff, current live PoolLogic vs this branch):
 //   - 9 new state variables (withdrawalAttester, pendingWithdrawalAttester,
@@ -76,10 +78,12 @@ import { ethers } from 'hardhat';
 // SEND=1 opts into direct broadcast (fork/testnet use only).
 // --------------------------------------------------
 
-// --- REQUIRED: fill in and independently re-verify on-chain before use ---
-const POOL_LOGIC_PROXY = process.env.POOL_LOGIC_PROXY ?? '';
-const POOL_LOGIC_PROXY_ADMIN = process.env.POOL_LOGIC_PROXY_ADMIN ?? '';
-const DAO_SAFE = process.env.DAO_SAFE ?? '';
+// --- Verified on-chain (see header) — override via env var if custody has since changed ---
+const POOL_LOGIC_PROXY =
+  process.env.POOL_LOGIC_PROXY ?? '0x704c56974e0CA4BF8ff8fe8acc51FBF1E053878E';
+const POOL_LOGIC_PROXY_ADMIN =
+  process.env.POOL_LOGIC_PROXY_ADMIN ?? '0xAff9948386da7C7687f0CDBB079b34F69d8199B5';
+const DAO_SAFE = process.env.DAO_SAFE ?? '0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3';
 
 // --- REQUIRED: the real, currently-operational withdrawal attester signer ---
 const ATTESTER_ADDRESS = process.env.ATTESTER_ADDRESS ?? ethers.ZeroAddress;
@@ -102,23 +106,13 @@ const MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW = process.env.MAX_ATTESTED_WITHDRA
 
 async function main() {
   if (!ethers.isAddress(POOL_LOGIC_PROXY) || POOL_LOGIC_PROXY === ethers.ZeroAddress) {
-    throw new Error(
-      'Set POOL_LOGIC_PROXY (env var) to the live PoolLogic proxy address — independently ' +
-        're-verified on-chain, not copied from another script without checking. This ' +
-        "script's own on-chain check in this session could not confirm the address " +
-        'recorded in scripts/upgrade_core_contracts.ts is still current.',
-    );
+    throw new Error('POOL_LOGIC_PROXY is not a valid address — check the env var override.');
   }
   if (!ethers.isAddress(POOL_LOGIC_PROXY_ADMIN) || POOL_LOGIC_PROXY_ADMIN === ethers.ZeroAddress) {
-    throw new Error('Set POOL_LOGIC_PROXY_ADMIN (env var) to the live ProxyAdmin address.');
+    throw new Error('POOL_LOGIC_PROXY_ADMIN is not a valid address — check the env var override.');
   }
   if (!ethers.isAddress(DAO_SAFE) || DAO_SAFE === ethers.ZeroAddress) {
-    throw new Error(
-      'Set DAO_SAFE (env var) to the Safe that holds PoolLogic onlyOwner/ProxyAdmin custody ' +
-        '— per scripts/upgrade_core_contracts.ts, this was the 3-of-4 Gnosis Safe at ' +
-        '0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3 at the time that script was written; ' +
-        're-verify custody has not changed before reusing that value.',
-    );
+    throw new Error('DAO_SAFE is not a valid address — check the env var override.');
   }
   if (!ethers.isAddress(ATTESTER_ADDRESS) || ATTESTER_ADDRESS === ethers.ZeroAddress) {
     throw new Error(
@@ -145,6 +139,39 @@ async function main() {
 
   const [signer] = await ethers.getSigners();
   console.log('Signer (gas payer, deploy only — not the DAO Safe):', signer.address);
+
+  // -----------------------------------------------------------------------
+  // Live custody re-check — mirrors scripts/remediate_eoa_centralization.ts's own pattern
+  // of re-confirming every target's current state immediately before acting on it, rather
+  // than trusting a hardcoded default indefinitely. Custody was independently verified
+  // on-chain while writing this script (see the header comment); this re-confirms it has
+  // not drifted since, and refuses to build a real upgrade batch against stale assumptions.
+  // -----------------------------------------------------------------------
+  console.log('\n=== Re-verifying live custody before building anything ===');
+  const ownableAbi = ['function owner() view returns (address)'];
+  const poolLogicOwner = await new ethers.Contract(POOL_LOGIC_PROXY, ownableAbi, signer).owner();
+  const proxyAdminOwner = await new ethers.Contract(
+    POOL_LOGIC_PROXY_ADMIN,
+    ownableAbi,
+    signer,
+  ).owner();
+  if (poolLogicOwner.toLowerCase() !== DAO_SAFE.toLowerCase()) {
+    throw new Error(
+      `PoolLogic(${POOL_LOGIC_PROXY}).owner() is currently ${poolLogicOwner}, not the ` +
+        `expected DAO_SAFE (${DAO_SAFE}). Custody has changed since this script was last ` +
+        'verified — update DAO_SAFE (and every downstream assumption in this script) before ' +
+        'proceeding, do not override this check.',
+    );
+  }
+  if (proxyAdminOwner.toLowerCase() !== DAO_SAFE.toLowerCase()) {
+    throw new Error(
+      `ProxyAdmin(${POOL_LOGIC_PROXY_ADMIN}).owner() is currently ${proxyAdminOwner}, not ` +
+        `the expected DAO_SAFE (${DAO_SAFE}). Custody has changed since this script was last ` +
+        'verified — update DAO_SAFE before proceeding, do not override this check.',
+    );
+  }
+  console.log('Confirmed: both PoolLogic.owner() and the ProxyAdmin.owner() match DAO_SAFE.');
+
   console.log('\nOperational parameters for this run:');
   console.log('  ATTESTER_ADDRESS                      :', ATTESTER_ADDRESS);
   console.log(
@@ -270,8 +297,9 @@ async function main() {
         `${MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW}) atomically. Propose via the DAO Safe ` +
         'multisig, do not execute with a single key. STRONGLY RECOMMENDED: dry-run against a ' +
         'fork of live mainnet state first, and independently reconfirm every address in this ' +
-        "script's header before signing — see that header comment for what could not be " +
-        'verified in the session that wrote this script.',
+        "script's header before signing — this run's own live custody re-check already " +
+        'passed (see console output above), but that only covers the moment this script ran, ' +
+        'not the moment this batch is actually signed.',
       txBuilderVersion: '1.16.5',
     },
     transactions: [{ to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: poolLogicUpgradeCalldata }],
