@@ -199,12 +199,20 @@ See `docs/attested-selective-withdrawal-design.md` for the full feature design. 
 | `attestedWithdrawVolume`             | Decaying accumulator (mirrors `SlippageAccumulator.sol`'s math) tracking attested-withdraw USD volume |
 | `attestedWithdrawDecayWindow`        | Manager-settable, floor-enforced decay window for the volume accumulator                              |
 | `maxAttestedWithdrawVolumePerWindow` | Manager-settable cap on decayed volume releasable via this path                                       |
+| `maxSurchargeBps`                    | `factoryOwner`-only, no floor/ceiling of its own — see below                                          |
 
-All appended strictly after `pendingCashWithdrawCount` (the previous last state variable) — `PoolLogic` has no `__gap`, so append-only ordering is what upgrade safety relies on here, same as every prior `PoolLogic` migration.
+All appended strictly after `pendingCashWithdrawCount` (the previous last state variable) — `PoolLogic` has no `__gap`, so append-only ordering is what upgrade safety relies on here, same as every prior `PoolLogic` migration. `maxSurchargeBps` was added after the rest of this table and had to go strictly last too, not next to the conceptually-related `attestedWithdrawVolume` block above it.
+
+### Surcharge (added after initial implementation)
+
+`withdrawCashImmediateWithPlan()` withholds a small, usage-scaled slice of a withdrawal's value and retains it inside the fund, to compensate remaining stakers for the composition-skew cost this withdrawal path can create — see `docs/attested-selective-withdrawal-design.md`'s "Surcharge: Pricing the Composition-Skew Externality" section for the full rationale. Upgrade-relevant specifics:
+
+- The real applied surcharge is bounded by `WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING`, a hardcoded constant, regardless of what governed `maxSurchargeBps` is set to — `setMaxSurchargeBps()` (`factoryOwner`-only) itself performs no bound check, by design, to keep it the cheapest possible shape against `PoolLogic`'s tight budget.
+- `CashWithdrawImmediateProRata` and `AttestedWithdrawPlanExecuted` are now emitted from inside `WithdrawalPlanLib.executeWithdrawalPlan()` rather than from `PoolLogic` — a delegatecall preserves the caller's address for the EVM's `LOG` opcode, so this doesn't change what a consumer of `PoolLogic`'s own event log sees, but it was necessary to keep this fitting in `PoolLogic`'s EIP-170 budget at all (see the design doc's "Bytecode Size Budget" section for the exact headroom numbers before and after this change). `PoolLogic` still declares both events for ABI completeness; it no longer contains the code to emit them from this path.
 
 ### Migration Requirements
 
-- `initializeAttestedWithdrawal(address attester_, uint256 attesterRotationDelay_, uint256 attestedWithdrawDecayWindow_, uint256 maxAttestedWithdrawVolumePerWindow_)` is protected by `onlyOwner` and `reinitializer(3)` — can only run once, and only after `initialize()` (version 1); it does not require `initializeAutoCompounding()` (version 2) to have run first, since `reinitializer(n)` only requires the current version be `< n`, not that every intermediate version was explicitly called.
+- `initializeAttestedWithdrawal(address attester_, uint256 attesterRotationDelay_, uint256 attestedWithdrawDecayWindow_, uint256 maxAttestedWithdrawVolumePerWindow_, uint256 maxSurchargeBps_)` is protected by `onlyOwner` and `reinitializer(3)` — can only run once, and only after `initialize()` (version 1); it does not require `initializeAutoCompounding()` (version 2) to have run first, since `reinitializer(n)` only requires the current version be `< n`, not that every intermediate version was explicitly called. The fifth parameter, `maxSurchargeBps_`, was folded into this same initializer (rather than a later, separate migration) because this feature had not yet been deployed to any live pool when the surcharge was added — no reinitializer-version conflict to manage, so bundling had zero downside.
 - Reverts `RotationDelayTooShort`/`DecayWindowTooShort` if either argument is below its respective floor (`MIN_ATTESTER_ROTATION_DELAY` = 24h, `MIN_ATTESTED_WITHDRAW_DECAY_WINDOW` = 1h) — the feature cannot launch in an already-defeated state via this call.
 - **Audit finding, fixed before this upgrade shipped:** `proposeWithdrawalAttester()` (manager-gated) did not originally check that `attesterRotationDelay` had ever been set. Before this initializer runs, the delay defaults to storage-zero, so a manager could otherwise propose-then-instantly-activate an attester with no real delay — bypassing the floor entirely. `proposeWithdrawalAttester()` now reverts `AttestedWithdrawalNotInitialized` until `attesterRotationDelay != 0`, which is only ever true after this initializer or the floor-enforced `setAttesterRotationDelay()` (`factoryOwner`-only) has run. **This means `attesterRotationDelay` can legitimately become nonzero via `setAttesterRotationDelay()` alone, without this initializer ever running** — a valid alternate bootstrap path, not a bug (see `WithdrawalPlanLib`/`PoolLogic` commit history and `test/AttestedWithdrawal.test.ts`'s governance tests for both paths).
 - `withdrawalAttester`'s real address is a deployment-time operational parameter — **not chosen by this codebase**. It must be the address (EOA or ERC-1271 contract) of the actual off-chain attester backend service before this migration is executed; there is no safe default.
@@ -236,9 +244,9 @@ Latest local verification for this feature (this branch):
 
 ```text
 npx hardhat compile: passed
-npx hardhat test test/AttestedWithdrawal.test.ts: 34 passing
-npm run test: 1116 passing
-npm run check:contract-size: PoolLogic at 351 bytes of EIP-170 headroom
+npx hardhat test test/AttestedWithdrawal.test.ts: 48 passing
+npm run test: 1130 passing
+npm run check:contract-size: PoolLogic at 200 bytes of EIP-170 headroom
 ```
 
 STRONGLY RECOMMENDED, not yet done: dry-run the upgrade + `initializeAttestedWithdrawal()` migration against a forked copy of the actual live mainnet state before executing for real, mirroring the same recommendation already made (and not yet completed, per its own notes) for the `initializeAutoCompounding()` migration in `scripts/upgrade_core_contracts.ts`.
