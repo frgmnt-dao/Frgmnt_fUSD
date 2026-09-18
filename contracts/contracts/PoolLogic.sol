@@ -267,6 +267,7 @@ contract PoolLogic is
     error OnlyFactoryOwner();
     error NotPlanUser();
     error AttestedWithdrawalAlreadyInitialized();
+    error AttestedWithdrawalNotInitialized();
     error RotationDelayTooShort();
     error DecayWindowTooShort();
     error NoRotationPending();
@@ -1015,9 +1016,20 @@ contract PoolLogic is
 
     /// @notice Instant revoke / delayed appoint, mirroring setFeeNumerator/announceFeeIncrease's
     ///         existing asymmetry. Does not itself change withdrawalAttester.
+    /// @dev Audit finding: attesterRotationDelay defaults to 0 (storage default) until
+    ///      initializeAttestedWithdrawal() or setAttesterRotationDelay() sets a real,
+    ///      floor-enforced value. Without this check, a manager could call this function on a
+    ///      not-yet-initialized pool while the delay is still 0, then activateWithdrawalAttester()
+    ///      in the same or next block — a zero-delay attester appointment that completely
+    ///      bypasses MIN_ATTESTER_ROTATION_DELAY and defeats the "feature can never launch in an
+    ///      already-defeated state" guarantee the initializer is supposed to provide. Both
+    ///      legitimate ways attesterRotationDelay becomes nonzero (the initializer, or
+    ///      setAttesterRotationDelay) already enforce the floor, so requiring it be nonzero here
+    ///      is sufficient to guarantee every proposal is subject to a real delay.
     function proposeWithdrawalAttester(address candidate) external {
         if (msg.sender != _manager()) revert OnlyManager();
         if (candidate == address(0)) revert ZeroAddress();
+        if (attesterRotationDelay == 0) revert AttestedWithdrawalNotInitialized();
         pendingWithdrawalAttester = candidate;
         pendingAttesterActivationTime = block.timestamp + attesterRotationDelay;
         emit WithdrawalAttesterProposed(candidate, pendingAttesterActivationTime);
@@ -1110,6 +1122,13 @@ contract PoolLogic is
         outAssets = result.outAssets;
         outAmounts = result.outAmounts;
 
+        // Audit note: reuses CashWithdrawImmediateProRata's (asset[],amount[]) shape purely to
+        // avoid compiling a second dynamic-array-encoding event on top of an already bytecode-
+        // constrained contract — this is NOT a genuine uniform pro-rata withdrawal. Off-chain
+        // consumers must treat any CashWithdrawImmediateProRata emitted in the same transaction
+        // as AttestedWithdrawPlanExecuted as an attester-composed selective withdrawal, not a
+        // uniform one, and should key off the paired event (present here, absent from the
+        // genuine pro-rata path) to distinguish the two.
         emit CashWithdrawImmediateProRata(
             plan.user,
             plan.fusdAmount,

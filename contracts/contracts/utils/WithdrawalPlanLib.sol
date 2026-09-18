@@ -51,6 +51,7 @@ library WithdrawalPlanLib {
     error MinValueOutBpsTooHigh();
     error AttestedWithdrawVolumeCapExceeded();
     error ValueConservationViolated();
+    error InvalidPortion();
     /// @dev Same selector as PoolLogic.CooldownActive()/ZeroAmount() (identical, param-less
     ///      error signatures always hash identically regardless of declaring scope) — declared
     ///      separately here purely so this library doesn't need to import PoolLogic.sol's own
@@ -298,6 +299,14 @@ library WithdrawalPlanLib {
         if (block.timestamp > plan.deadline) revert PlanDeadlineExpired();
         if (input.nonceAlreadyConsumed) revert PlanNonceAlreadyUsed();
         if (plan.minValueOutBps > MAX_MIN_VALUE_OUT_BPS) revert MinValueOutBpsTooHigh();
+        // Audit finding: _withdrawCashImmediateToSafe checks amount == 0 unconditionally, before
+        // its own manager-bypass branch. _chargeWithdrawFee's manager-bypass branch below returns
+        // (amount, 0) directly with no such check, so a manager-signed plan with fusdAmount == 0
+        // could skip the burn entirely and still (within DUST_TOLERANCE) release real value via
+        // the allocations loop — allocations aren't derived from fusdAmount, so a zero fusdAmount
+        // doesn't itself zero out what gets withdrawn. Closing this here restores parity with the
+        // existing pro-rata path's unconditional check, for every caller including the manager.
+        if (plan.fusdAmount == 0) revert ZeroAmount();
 
         (result.netFusd, result.feeFusd) = _chargeWithdrawFee(
             input.fusd,
@@ -507,7 +516,7 @@ library WithdrawalPlanLib {
                 if (plan.allocations[j].asset == asset) revert DuplicateAllocation();
             }
 
-            uint256 portion = alloc.portion;
+            uint256 portion;
             if (alloc.useFixedAmount) {
                 address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
                 if (guard == address(0)) revert InvalidGuard();
@@ -515,6 +524,17 @@ library WithdrawalPlanLib {
                 if (balance == 0) revert ZeroAssetBalance();
                 portion = (alloc.fixedAmount * 1e18) / balance;
                 if (portion > 1e18) portion = 1e18;
+            } else {
+                // Audit finding: unlike the fixed-amount branch above (explicitly clamped) and
+                // unlike the existing pro-rata path (where portion is derived internally via
+                // computeImmediateWithdrawPortion and is structurally guaranteed <= 1e18), a
+                // direct attester-supplied portion had no on-chain upper bound. A portion above
+                // 1e18 (100%) is guard-implementation-dependent — some guards would simply have
+                // their transfer revert, but nothing here guaranteed that for every guard, and
+                // the two-sided value-conservation check running only after the full loop is not
+                // a substitute for bounding the input itself. Reject outright instead.
+                portion = alloc.portion;
+                if (portion > 1e18) revert InvalidPortion();
             }
 
             (address withdrawAsset, uint256 withdrawAmount, ) = withdrawProcessing(
@@ -650,7 +670,16 @@ library WithdrawalPlanLib {
         }
 
         uint256 newTotal = decayed + valueUsd;
-        if (newTotal > maxVolumePerWindow) revert AttestedWithdrawVolumeCapExceeded();
+        // Audit finding: accumulatedValueUsd is a storage uint128, but maxAttestedWithdrawVolumePerWindow
+        // (manager-settable, no enforced ceiling — see its own docs) could be set above
+        // type(uint128).max, in which case newTotal passing the cap check below would still
+        // silently truncate on the uint128() cast further down, corrupting the accumulator
+        // rather than failing safely. Bounding here catches that regardless of how the cap is
+        // configured, and also covers the (practically unreachable, but not otherwise enforced)
+        // case of a single valueUsd already exceeding type(uint128).max.
+        if (newTotal > maxVolumePerWindow || newTotal > type(uint128).max) {
+            revert AttestedWithdrawVolumeCapExceeded();
+        }
 
         return
             VolumeState({

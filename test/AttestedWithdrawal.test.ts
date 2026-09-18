@@ -150,6 +150,73 @@ async function deployAttestedWithdrawalFixture() {
   };
 }
 
+/// @dev Same wiring as deployAttestedWithdrawalFixture but deliberately skips
+///      initializeAttestedWithdrawal() — used to verify the rotation machinery stays inert
+///      (attesterRotationDelay == 0) until that initializer has actually run.
+async function deployUninitializedAttestedWithdrawalFixture() {
+  const [owner, manager, trader, user, attester, other] = await ethers.getSigners();
+
+  const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
+  const fusd = await TestTokenLogic.deploy('Frgmnt USD', 'FUSD', 18);
+  await fusd.waitForDeployment();
+
+  const TestPoolManagerLogic = await ethers.getContractFactory('TestPoolManagerLogic');
+  const poolManager = await TestPoolManagerLogic.deploy(
+    await manager.getAddress(),
+    await trader.getAddress(),
+    'Test Manager',
+    await fusd.getAddress(),
+  );
+  await poolManager.waitForDeployment();
+  await poolManager.setFees(0n, 0n, 0n, 0n, 10_000n);
+
+  const CallResultCheckerFactory = await ethers.getContractFactory('CallResultChecker');
+  const callResultChecker = await CallResultCheckerFactory.deploy();
+  await callResultChecker.waitForDeployment();
+
+  const FundCalculationLibraryFactory = await ethers.getContractFactory('FundCalculationLibrary');
+  const fundCalculationLibrary = await FundCalculationLibraryFactory.deploy();
+  await fundCalculationLibrary.waitForDeployment();
+
+  const PoolTxExecutorFactory = await ethers.getContractFactory('PoolTxExecutor', {
+    libraries: { CallResultChecker: await callResultChecker.getAddress() },
+  });
+  const poolTxExecutor = await PoolTxExecutorFactory.deploy();
+  await poolTxExecutor.waitForDeployment();
+
+  const WithdrawalPlanLibFactory = await ethers.getContractFactory('WithdrawalPlanLib', {
+    libraries: { FundCalculationLibrary: await fundCalculationLibrary.getAddress() },
+  });
+  const withdrawalPlanLib = await WithdrawalPlanLibFactory.deploy();
+  await withdrawalPlanLib.waitForDeployment();
+
+  const PoolLogic = await ethers.getContractFactory('PoolLogic', {
+    libraries: {
+      CallResultChecker: await callResultChecker.getAddress(),
+      FundCalculationLibrary: await fundCalculationLibrary.getAddress(),
+      PoolTxExecutor: await poolTxExecutor.getAddress(),
+      WithdrawalPlanLib: await withdrawalPlanLib.getAddress(),
+    },
+  });
+  const poolImpl = await PoolLogic.deploy();
+  await poolImpl.waitForDeployment();
+
+  const PoolLogicTestProxy = await ethers.getContractFactory('PoolLogicTestProxy');
+  const initData = PoolLogic.interface.encodeFunctionData('initialize', [
+    await fusd.getAddress(),
+    await poolManager.getAddress(),
+    await owner.getAddress(),
+    'Staked Frgmnt USD',
+    'sfUSD',
+  ]);
+  const poolProxy = await PoolLogicTestProxy.deploy(await poolImpl.getAddress(), initData);
+  await poolProxy.waitForDeployment();
+
+  const pool = PoolLogic.attach(await poolProxy.getAddress()) as any;
+
+  return { owner, manager, trader, user, attester, other, fusd, poolManager, pool };
+}
+
 async function mintAndApproveFUSD(fusd: any, pool: any, signer: any, amount: bigint) {
   const addr = await signer.getAddress();
   await fusd.mint(addr, amount);
@@ -401,6 +468,156 @@ describe('PoolLogic — attested selective withdrawal', () => {
     expect(after - before).to.equal(fixedAmount);
   });
 
+  it('rejects a direct (non-fixed-amount) portion above 1e18', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, asset, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const plan = buildPlan({
+      ...fixture,
+      userAddress,
+      allocations: [
+        {
+          asset: assetAddress,
+          useFixedAmount: false,
+          portion: ethers.parseUnits('1', 18) + 1n,
+          fixedAmount: 0n,
+        },
+      ],
+    });
+    const signature = await signPlan(fixture, plan, attester);
+
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+      'InvalidPortion',
+    );
+  });
+
+  it('rejects a zero fusdAmount plan even when signed for the manager (fee-bypass branch)', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, fusd, asset, poolManager, manager, attester } = fixture;
+    await asset.mint(await pool.getAddress(), poolAsset);
+    await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
+
+    const managerAddress = await manager.getAddress();
+    const assetAddress = await asset.getAddress();
+    const plan = buildPlan({
+      ...fixture,
+      userAddress: managerAddress,
+      fusdAmount: 0n,
+      allocations: [
+        { asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: 1n },
+      ],
+    });
+    const signature = await signPlan(fixture, plan, attester);
+
+    await expectRevert(
+      pool.connect(manager).withdrawCashImmediateWithPlan(plan, signature, []),
+      'ZeroAmount',
+    );
+  });
+
+  it('reverts rather than silently truncating when recorded volume would exceed type(uint128).max', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, fusd, asset, user, attester, manager } = fixture;
+
+    // Remove the ordinary cap so only the uint128 overflow guard is exercised.
+    await pool.connect(manager).setMaxAttestedWithdrawVolumePerWindow(ethers.MaxUint256);
+
+    const hugeAmount = (2n ** 128n) + 1_000n; // just above type(uint128).max
+    await fusd.mint(await user.getAddress(), hugeAmount);
+    await fusd.connect(user).approve(await pool.getAddress(), hugeAmount);
+    await asset.mint(await pool.getAddress(), hugeAmount);
+    await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), hugeAmount);
+
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const plan = buildPlan({
+      ...fixture,
+      userAddress,
+      fusdAmount: hugeAmount,
+      allocations: [
+        { asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: hugeAmount },
+      ],
+    });
+    const signature = await signPlan(fixture, plan, attester);
+
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+      'AttestedWithdrawVolumeCapExceeded',
+    );
+  });
+
+  it('decays continuously rather than resetting at a fixed window boundary', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, fusd, asset, user, attester, manager } = fixture;
+
+    // 125 cap: first withdrawal (100) decays to 50 after half the window, so a second 100
+    // would total 150 > 125 and must still revert — a naive fixed-window reset would instead
+    // have zeroed the counter at some boundary and let it through.
+    const cap = ethers.parseUnits('125', 18);
+    await pool.connect(manager).setMaxAttestedWithdrawVolumePerWindow(cap);
+
+    // Non-zero minValueOutBps throughout: a fixed-amount allocation's requested amount round-
+    // trips through portion = fixedAmount*1e18/balance (floors) then withdrawAmount =
+    // balance*portion/1e18 (floors again) inside the guard, which can lose a sub-wei-equivalent
+    // fraction of value once the pool balance isn't an exact multiple of the requested amount.
+    // minValueOutBps=0 (strict) has zero tolerance for that — by design, per the doc's own
+    // "attester can sign a tight minValueOutBps close to 0" guidance, not literally 0 for a
+    // fixed-amount plan. A small, realistic tolerance is used here for exactly that reason.
+    const tolerance = 10n; // 0.1%
+
+    // First withdrawal: 100 (leaves 25 of headroom against the 125 cap).
+    await fundPoolAndUser(fixture);
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const plan1 = buildPlan({
+      ...fixture,
+      userAddress,
+      assetAddress,
+      nonce: 0n,
+      minValueOutBps: tolerance,
+    });
+    const sig1 = await signPlan(fixture, plan1, attester);
+    await pool.connect(user).withdrawCashImmediateWithPlan(plan1, sig1, []);
+
+    // Halfway through the 1h decay window, ~50 has decayed back off the 100 already spent,
+    // so a further 100 (which a naive fixed-window reset would also allow, but only *after* a
+    // full reset) should still be rejected here since 50 (decayed remainder) + 100 > 125 cap.
+    await time.increase(ONE_HOUR / 2);
+    await fusd.mint(userAddress, amount);
+    await fusd.connect(user).approve(await pool.getAddress(), amount);
+    await asset.mint(await pool.getAddress(), poolAsset);
+    await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
+    const plan2 = buildPlan({
+      ...fixture,
+      userAddress,
+      assetAddress,
+      nonce: 1n,
+      minValueOutBps: tolerance,
+    });
+    const sig2 = await signPlan(fixture, plan2, attester);
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan2, sig2, []),
+      'AttestedWithdrawVolumeCapExceeded',
+    );
+
+    // After the full window has fully elapsed since the first withdrawal, the accumulator has
+    // decayed to (near) zero, so the same 100 now fits under the cap again.
+    await time.increase(ONE_HOUR);
+    const plan3 = buildPlan({
+      ...fixture,
+      userAddress,
+      assetAddress,
+      nonce: 2n,
+      minValueOutBps: tolerance,
+    });
+    const sig3 = await signPlan(fixture, plan3, attester);
+    await pool.connect(user).withdrawCashImmediateWithPlan(plan3, sig3, []);
+  });
+
   it('reverts a fixed-amount allocation against a zero-balance asset', async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, fusd, poolManager, user, attester, owner } = fixture;
@@ -573,6 +790,35 @@ describe('PoolLogic — attested selective withdrawal', () => {
       expect(await pool.isAttestedWithdrawEnabled()).to.equal(true);
       await pool.connect(manager).setAttestedWithdrawEnabled(false);
       expect(await pool.isAttestedWithdrawEnabled()).to.equal(false);
+    });
+
+    it('rejects proposeWithdrawalAttester before initializeAttestedWithdrawal has ever run, closing the zero-delay bootstrap gap', async () => {
+      const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      const { pool, manager, other } = fixture;
+
+      expect(await pool.attesterRotationDelay()).to.equal(0n);
+      await expectRevert(
+        pool.connect(manager).proposeWithdrawalAttester(await other.getAddress()),
+        'AttestedWithdrawalNotInitialized',
+      );
+    });
+
+    it('allows proposeWithdrawalAttester once a factoryOwner-set delay makes rotation meaningful, even without the initializer', async () => {
+      const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      const { pool, manager, owner, other } = fixture;
+
+      // factoryOwner (owner, per TestPoolManagerLogic's default) sets a real, floor-enforced
+      // delay directly — this is a legitimate bootstrap path distinct from
+      // initializeAttestedWithdrawal(), and it still fully enforces MIN_ATTESTER_ROTATION_DELAY.
+      await pool.connect(owner).setAttesterRotationDelay(ONE_DAY);
+
+      const candidate = await other.getAddress();
+      await pool.connect(manager).proposeWithdrawalAttester(candidate);
+      await expectRevert(pool.connect(other).activateWithdrawalAttester(), 'RotationNotYetDue');
+
+      await time.increase(ONE_DAY + 1);
+      await pool.connect(other).activateWithdrawalAttester();
+      expect(await pool.withdrawalAttester()).to.equal(candidate);
     });
   });
 });
