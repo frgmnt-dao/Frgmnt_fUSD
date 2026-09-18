@@ -236,6 +236,15 @@ contract PoolLogic is
     ///         safe and needs no enforced floor of its own.
     uint256 public maxAttestedWithdrawVolumePerWindow;
 
+    /// @notice factoryOwner-settable ceiling on the attested-withdrawal pool-usage surcharge (see
+    ///         docs/attested-selective-withdrawal-design.md's "Surcharge" section). Deliberately
+    ///         UNvalidated here — WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING clamps the real
+    ///         applied surcharge at the point of use regardless of what's stored here, so this
+    ///         setter stays the cheapest possible shape against this contract's tight EIP-170
+    ///         budget (see setMaxSurchargeBps()). Zero disables the surcharge entirely and is
+    ///         safe — the same "no floor needed" reasoning as maxAttestedWithdrawVolumePerWindow.
+    uint256 public maxSurchargeBps;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -358,14 +367,27 @@ contract PoolLogic is
     ///         user/amounts/assets shape as the existing pro-rata path) purely to additionally
     ///         record which signed plan nonce this attested withdrawal consumed — avoids
     ///         compiling a second, near-identical event with its own dynamic-array encoding.
-    event AttestedWithdrawPlanExecuted(address indexed user, uint256 indexed nonce);
+    /// @param surchargeAmount The USD-denominated slice of this withdrawal's entitlement withheld
+    ///        and retained in the fund (see maxSurchargeBps) — emitted explicitly so off-chain
+    ///        monitoring can distinguish surcharge-driven under-delivery from ordinary
+    ///        minValueOutBps slack or rounding, and correlate a maxSurchargeBps governance change
+    ///        with its actual per-withdrawal impact.
+    event AttestedWithdrawPlanExecuted(
+        address indexed user,
+        uint256 indexed nonce,
+        uint256 surchargeAmount
+    );
 
     event AttestedWithdrawEnabledSet(bool enabled);
     event WithdrawalAttesterProposed(address indexed candidate, uint256 activationTime);
-    event WithdrawalAttesterActivated(address indexed previousAttester, address indexed newAttester);
+    event WithdrawalAttesterActivated(
+        address indexed previousAttester,
+        address indexed newAttester
+    );
     event AttesterRotationDelaySet(uint256 delay);
     event AttestedWithdrawDecayWindowSet(uint256 window);
     event MaxAttestedWithdrawVolumePerWindowSet(uint256 maxVolume);
+    event MaxSurchargeBpsSet(uint256 bps);
 
     // ============================================================
     // =            ATTESTED SELECTIVE WITHDRAWAL CONSTANTS        =
@@ -438,11 +460,18 @@ contract PoolLogic is
     ///         the standalone setters, so the feature can never launch in an already-defeated
     ///         state — see docs/attested-selective-withdrawal-design.md's "Upgrade & Storage
     ///         Migration" section.
+    /// @param maxSurchargeBps_ Starting value for the surcharge ceiling (see maxSurchargeBps's
+    ///        own storage docs) — bundled into this same initializer rather than a separate
+    ///        migration, since this feature has not yet been deployed to any live pool (no
+    ///        reinitializer version conflict to manage). No floor is enforced here, matching
+    ///        maxSurchargeBps's own "0 is safe" precedent — the pool can launch with the
+    ///        surcharge disabled and enable it later via setMaxSurchargeBps().
     function initializeAttestedWithdrawal(
         address attester_,
         uint256 attesterRotationDelay_,
         uint256 attestedWithdrawDecayWindow_,
-        uint256 maxAttestedWithdrawVolumePerWindow_
+        uint256 maxAttestedWithdrawVolumePerWindow_,
+        uint256 maxSurchargeBps_
     ) external onlyOwner reinitializer(3) {
         if (withdrawalAttester != address(0)) revert AttestedWithdrawalAlreadyInitialized();
         if (attester_ == address(0)) revert ZeroAddress();
@@ -455,6 +484,7 @@ contract PoolLogic is
         attesterRotationDelay = attesterRotationDelay_;
         attestedWithdrawDecayWindow = attestedWithdrawDecayWindow_;
         maxAttestedWithdrawVolumePerWindow = maxAttestedWithdrawVolumePerWindow_;
+        maxSurchargeBps = maxSurchargeBps_;
         isAttestedWithdrawEnabled = true;
     }
 
@@ -967,7 +997,11 @@ contract PoolLogic is
         if (amount == 0) revert ZeroAmount();
 
         WithdrawalPlanLib.ProRataResult memory result = WithdrawalPlanLib.executeProRataWithdrawal(
-            WithdrawalPlanLib.ProRataInput({ fusd: fusd, poolManagerLogic: poolManagerLogic, manager: _manager() }),
+            WithdrawalPlanLib.ProRataInput({
+                fusd: fusd,
+                poolManagerLogic: poolManagerLogic,
+                manager: _manager()
+            }),
             user,
             recipient,
             amount,
@@ -1050,7 +1084,8 @@ contract PoolLogic is
     ///         docs for why (mirrors PoolManagerLogic._performanceFeeNumeratorChangeDelay's
     ///         existing setFactoryConfig-only precedent).
     function setAttesterRotationDelay(uint256 delay) external {
-        if (msg.sender != IPoolManagerLogic(poolManagerLogic).factoryOwner()) revert OnlyFactoryOwner();
+        if (msg.sender != IPoolManagerLogic(poolManagerLogic).factoryOwner())
+            revert OnlyFactoryOwner();
         if (delay < MIN_ATTESTER_ROTATION_DELAY) revert RotationDelayTooShort();
         attesterRotationDelay = delay;
         emit AttesterRotationDelaySet(delay);
@@ -1072,6 +1107,21 @@ contract PoolLogic is
         emit AttestedWithdrawDecayWindowSet(window);
     }
 
+    /// @notice factoryOwner-only, never manager-settable — the manager does not collect this
+    ///         surcharge (it stays in the fund, see withdrawCashImmediateWithPlan()), so unlike
+    ///         most withdrawal parameters here the risk isn't the manager raising it, it's the
+    ///         manager quietly zeroing it out to make the feature look consequence-free. No bound
+    ///         check here by design: WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING clamps the real
+    ///         applied surcharge at the point of use regardless of what's ever stored, keeping
+    ///         this setter the cheapest possible shape (access control + write + event) against
+    ///         this contract's tight EIP-170 budget.
+    function setMaxSurchargeBps(uint256 bps) external {
+        if (msg.sender != IPoolManagerLogic(poolManagerLogic).factoryOwner())
+            revert OnlyFactoryOwner();
+        maxSurchargeBps = bps;
+        emit MaxSurchargeBpsSet(bps);
+    }
+
     /// @notice Redeems fUSD for an attester-composed, non-uniform mix of vault assets instead of
     ///         withdrawCashImmediate()'s strict pro-rata slice — see
     ///         docs/attested-selective-withdrawal-design.md for the full design. Deliberately
@@ -1086,22 +1136,24 @@ contract PoolLogic is
         if (!isAttestedWithdrawEnabled) revert ImmediateWithdrawalDisabled();
         _updateFeesAndRewardsFor(plan.user);
 
-        WithdrawalPlanLib.PlanExecutionResult memory result = WithdrawalPlanLib.executeWithdrawalPlan(
-            WithdrawalPlanLib.ExecutePlanInput({
-                fusd: fusd,
-                poolManagerLogic: poolManagerLogic,
-                manager: _manager(),
-                withdrawalAttester: withdrawalAttester,
-                nonceAlreadyConsumed: consumedPlanNonce[plan.user][plan.nonce],
-                attestedWithdrawDecayWindow: attestedWithdrawDecayWindow,
-                maxAttestedWithdrawVolumePerWindow: maxAttestedWithdrawVolumePerWindow,
-                currentVolumeTimestamp: attestedWithdrawVolume.lastWithdrawTimestamp,
-                currentVolumeAccumulated: attestedWithdrawVolume.accumulatedValueUsd
-            }),
-            plan,
-            attesterSignature,
-            complexAssetsData
-        );
+        WithdrawalPlanLib.PlanExecutionResult memory result = WithdrawalPlanLib
+            .executeWithdrawalPlan(
+                WithdrawalPlanLib.ExecutePlanInput({
+                    fusd: fusd,
+                    poolManagerLogic: poolManagerLogic,
+                    manager: _manager(),
+                    withdrawalAttester: withdrawalAttester,
+                    nonceAlreadyConsumed: consumedPlanNonce[plan.user][plan.nonce],
+                    attestedWithdrawDecayWindow: attestedWithdrawDecayWindow,
+                    maxAttestedWithdrawVolumePerWindow: maxAttestedWithdrawVolumePerWindow,
+                    currentVolumeTimestamp: attestedWithdrawVolume.lastWithdrawTimestamp,
+                    currentVolumeAccumulated: attestedWithdrawVolume.accumulatedValueUsd,
+                    maxSurchargeBps: maxSurchargeBps
+                }),
+                plan,
+                attesterSignature,
+                complexAssetsData
+            );
 
         consumedPlanNonce[plan.user][plan.nonce] = true;
         attestedWithdrawVolume = AttestedWithdrawVolume(
@@ -1116,28 +1168,25 @@ contract PoolLogic is
             result.completeFundValue,
             result.valueDelta
         );
+        // Surcharge: the withheld slice of this withdrawal's entitlement is retained inside the
+        // fund by reducing how much accountedAssets gets pulled down for this withdrawal, rather
+        // than by an unconditional separate increase — accountedAssets only ever rises through
+        // ordinary yield accrual (_accrueYield()) elsewhere in this contract, and crediting the
+        // surcharge that way would let the manager's next performance-fee accrual skim a cut of
+        // it, exactly what retaining it in the fund is meant to avoid. This costs no extra
+        // storage write — it only changes the value fed into the single accountedAssets write
+        // below.
+        reduction = reduction > result.surchargeAmount ? reduction - result.surchargeAmount : 0;
         if (accountedAssets < reduction) revert InvalidFundValue();
         accountedAssets -= reduction;
 
         outAssets = result.outAssets;
         outAmounts = result.outAmounts;
 
-        // Audit note: reuses CashWithdrawImmediateProRata's (asset[],amount[]) shape purely to
-        // avoid compiling a second dynamic-array-encoding event on top of an already bytecode-
-        // constrained contract — this is NOT a genuine uniform pro-rata withdrawal. Off-chain
-        // consumers must treat any CashWithdrawImmediateProRata emitted in the same transaction
-        // as AttestedWithdrawPlanExecuted as an attester-composed selective withdrawal, not a
-        // uniform one, and should key off the paired event (present here, absent from the
-        // genuine pro-rata path) to distinguish the two.
-        emit CashWithdrawImmediateProRata(
-            plan.user,
-            plan.fusdAmount,
-            result.netFusd,
-            result.feeFusd,
-            outAssets,
-            outAmounts
-        );
-        emit AttestedWithdrawPlanExecuted(plan.user, plan.nonce);
+        // CashWithdrawImmediateProRata and AttestedWithdrawPlanExecuted are emitted from inside
+        // WithdrawalPlanLib.executeWithdrawalPlan() itself, not here — see that library's own
+        // event docs for why (bytecode: this contract has essentially no remaining EIP-170
+        // headroom) and for why emitting there instead of here is not a correctness concern.
     }
 
     // ============================================================

@@ -34,6 +34,18 @@ interface IPoolLogic {
         AssetAllocation[] allocations;
         uint256 nonce;
         uint256 deadline;
+        // Attester's own ceiling on the pool-usage surcharge (see WithdrawalPlanLib's
+        // MAX_SURCHARGE_BPS_CEILING) this specific plan will tolerate. The surcharge itself is
+        // computed on-chain from live state the attester cannot know precisely at signing time
+        // (recent attested-withdraw volume relative to fund size), so this field lets the
+        // attester bound their own exposure to that drift, the same way minValueOutBps already
+        // bounds ordinary execution drift. Appended last (not inserted among the original
+        // fields) to minimize the diff across every place the WithdrawalPlan field order must
+        // stay in sync: the EIP-712 typehash string, the struct-hash abi.encode call in
+        // WithdrawalPlanLib._hashPlan(), this declaration, and whatever off-chain service signs
+        // plans. Zero means "reject any nonzero surcharge outright", the same convention
+        // minValueOutBps == 0 already uses.
+        uint256 maxAcceptableSurchargeBps;
     }
 
     function factory() external view returns (address);

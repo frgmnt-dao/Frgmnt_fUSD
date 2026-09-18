@@ -5,6 +5,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { ECDSA } from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import { IERC1271 } from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IPoolLogic } from "../interfaces/IPoolLogic.sol";
 import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
@@ -52,6 +53,37 @@ library WithdrawalPlanLib {
     error AttestedWithdrawVolumeCapExceeded();
     error ValueConservationViolated();
     error InvalidPortion();
+    /// @dev Reverted when the live-computed pool-usage surcharge (see MAX_SURCHARGE_BPS_CEILING)
+    ///      exceeds the ceiling the attester signed into plan.maxAcceptableSurchargeBps. Checked
+    ///      early, before the per-asset allocations loop runs, so this fails cheaply rather than
+    ///      after paying for a full withdrawal that would only revert later anyway.
+    error SurchargeTooHigh();
+
+    /// @dev Byte-for-byte identical signatures to PoolLogic's own CashWithdrawImmediateProRata/
+    ///      AttestedWithdrawPlanExecuted events — declared separately here (rather than imported)
+    ///      purely to avoid a circular import, same reasoning as this library's duplicated
+    ///      CooldownActive/ZeroAmount errors above. Emitted directly from executeWithdrawalPlan()
+    ///      rather than returned for PoolLogic to emit: a delegatecall preserves the caller's
+    ///      address for the EVM's ADDRESS opcode, so a LOG emitted here is indistinguishable
+    ///      on-chain from one PoolLogic emitted itself — same topic0, same log address — and this
+    ///      moves the (non-trivial, dynamic-array-containing) event-encoding bytecode out of
+    ///      PoolLogic, which has essentially no remaining EIP-170 headroom. If this function
+    ///      reverts anywhere after emitting, the EVM discards these logs along with every other
+    ///      state change from the same transaction, exactly like any other revert — emitting
+    ///      before PoolLogic's own later accountedAssets check is not a correctness concern.
+    event CashWithdrawImmediateProRata(
+        address indexed user,
+        uint256 fusdTotal,
+        uint256 fusdNet,
+        uint256 fusdFee,
+        address[] assets,
+        uint256[] amounts
+    );
+    event AttestedWithdrawPlanExecuted(
+        address indexed user,
+        uint256 indexed nonce,
+        uint256 surchargeAmount
+    );
     /// @dev Same selector as PoolLogic.CooldownActive()/ZeroAmount() (identical, param-less
     ///      error signatures always hash identically regardless of declaring scope) — declared
     ///      separately here purely so this library doesn't need to import PoolLogic.sol's own
@@ -72,17 +104,31 @@ library WithdrawalPlanLib {
     ///      declared on a specific contract it doesn't inherit.
     uint256 private constant MAX_MIN_VALUE_OUT_BPS = 100; // 1%
 
+    /// @dev Protocol-level ceiling on the pool-usage surcharge (see the "Surcharge" section of
+    ///      docs/attested-selective-withdrawal-design.md), independent of whatever
+    ///      PoolLogic.maxSurchargeBps is currently governed to. Deliberately enforced here, at
+    ///      the point of use, rather than validated in PoolLogic's setter — this keeps
+    ///      PoolLogic.setMaxSurchargeBps() to the cheapest possible shape (access control + write
+    ///      + event, no bound-check branch) against its already-tight EIP-170 budget, while still
+    ///      guaranteeing the real applied surcharge can never exceed this constant regardless of
+    ///      what's ever written to storage, including by a compromised or careless factoryOwner.
+    uint256 private constant MAX_SURCHARGE_BPS_CEILING = 100; // 1%
+
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+        keccak256(
+            "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+        );
     bytes32 private constant DOMAIN_NAME_HASH = keccak256(bytes("Frgmnt PoolLogic"));
     bytes32 private constant DOMAIN_VERSION_HASH = keccak256(bytes("1"));
 
     bytes32 private constant ASSET_ALLOCATION_TYPEHASH =
-        keccak256("AssetAllocation(address asset,bool useFixedAmount,uint256 portion,uint256 fixedAmount)");
+        keccak256(
+            "AssetAllocation(address asset,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
+        );
 
     bytes32 private constant WITHDRAWAL_PLAN_TYPEHASH =
         keccak256(
-            "WithdrawalPlan(address user,uint256 fusdAmount,uint256 minValueOutBps,AssetAllocation[] allocations,uint256 nonce,uint256 deadline)AssetAllocation(address asset,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
+            "WithdrawalPlan(address user,uint256 fusdAmount,uint256 minValueOutBps,AssetAllocation[] allocations,uint256 nonce,uint256 deadline,uint256 maxAcceptableSurchargeBps)AssetAllocation(address asset,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
         );
 
     /// @dev Decayed-accumulator state for the attested-withdraw circuit breaker — field layout
@@ -109,6 +155,13 @@ library WithdrawalPlanLib {
         uint256 completeFundValue;
         uint64 newVolumeTimestamp;
         uint128 newVolumeAccumulated;
+        // fairFusd - target (see executeWithdrawalPlan): the deliberately-undelivered slice of
+        // this withdrawal's entitlement, retained inside the fund rather than paid out. Deterministic
+        // from target/fairFusd, not measured from the realized valueDelta. PoolLogic uses this to
+        // shrink the accountedAssets reduction it would otherwise apply for this withdrawal (see
+        // withdrawCashImmediateWithPlan()) — it never flows through ordinary yield accrual, so it
+        // is never fee-eligible for the manager.
+        uint256 surchargeAmount;
     }
 
     /// @dev Bundled input to executeWithdrawalPlan — avoids stack-too-deep across what would
@@ -124,6 +177,9 @@ library WithdrawalPlanLib {
         uint256 maxAttestedWithdrawVolumePerWindow;
         uint64 currentVolumeTimestamp;
         uint128 currentVolumeAccumulated;
+        // Governed value from PoolLogic.maxSurchargeBps — unvalidated at the PoolLogic setter
+        // (see MAX_SURCHARGE_BPS_CEILING's own docs), clamped here at the point of use instead.
+        uint256 maxSurchargeBps;
     }
 
     struct WithdrawProcessingLocalVars {
@@ -257,7 +313,8 @@ library WithdrawalPlanLib {
             );
 
             if (
-                v.actualValue < (v.expectedValue * (10_000 - complexData.slippageTolerance)) / 10_000
+                v.actualValue <
+                (v.expectedValue * (10_000 - complexData.slippageTolerance)) / 10_000
             ) revert IPoolLogic.SlippageExceeded();
         }
 
@@ -332,6 +389,26 @@ library WithdrawalPlanLib {
             input.poolManagerLogic
         );
 
+        // Surcharge: a small, usage-scaled slice of this withdrawal's entitlement is deliberately
+        // withheld and retained in the fund, to compensate remaining stakers for the composition-
+        // skew cost an attested withdrawal can impose (it lets a user skip currently-impaired
+        // assets, concentrating them for whoever stays). See docs/attested-selective-withdrawal-
+        // design.md's "Surcharge: Pricing the Composition-Skew Externality" section for the full
+        // rationale. Computed and bounds-checked HERE — before the allocations loop below runs —
+        // deliberately, not folded into the value-conservation check further down: this is the
+        // one part of this function whose input (recent attested-withdraw volume) the attester
+        // cannot know precisely at signing time, so a plan that would exceed the attester's own
+        // signed tolerance must fail here, cheaply, rather than after paying for a full withdrawal
+        // that would only revert later anyway.
+        uint256 pressure = valueBefore == 0
+            ? 0
+            : Math.min((uint256(newVolume.accumulatedValueUsd) * 1e18) / valueBefore, 1e18);
+        uint256 effectiveMaxSurchargeBps = input.maxSurchargeBps > MAX_SURCHARGE_BPS_CEILING
+            ? MAX_SURCHARGE_BPS_CEILING
+            : input.maxSurchargeBps;
+        uint256 surchargeBps = (pressure * effectiveMaxSurchargeBps) / 1e18;
+        if (surchargeBps > plan.maxAcceptableSurchargeBps) revert SurchargeTooHigh();
+
         // Audit finding (4th round): the two-sided value-conservation check previously bounded
         // valueDelta against the raw, nominal `netFusd` fUSD amount. computeImmediateWithdrawPortion
         // already computes a solvency-haircut-adjusted `fairFusd` (identical to what the pro-rata
@@ -350,8 +427,16 @@ library WithdrawalPlanLib {
         // computeAccountedAssetsReduction's "valueBefore" input to mean what its own docs say it
         // means — computing it after the loop (as this function previously did) would have
         // handed PoolLogic an already-withdrawal-reduced figure instead.
-        (, uint256 totalClaims_, uint256 completeFundValue_, uint256 fairFusd) = FundCalculationLibrary
-            .computeImmediateWithdrawPortion(address(this), result.netFusd, valueBefore);
+        (
+            ,
+            uint256 totalClaims_,
+            uint256 completeFundValue_,
+            uint256 fairFusd
+        ) = FundCalculationLibrary.computeImmediateWithdrawPortion(
+                address(this),
+                result.netFusd,
+                valueBefore
+            );
         result.totalClaims = totalClaims_;
         result.completeFundValue = completeFundValue_;
         // Matches executeProRataWithdrawal's own explicit `if (portion == 0) revert
@@ -372,6 +457,19 @@ library WithdrawalPlanLib {
         // pro-rata path's exact short-circuit here fails fast with the same error instead.
         if (fairFusd > valueBefore) revert WithdrawAmountTooSmall();
 
+        // Surcharge, continued: fairFusd is this withdrawal's fair entitlement before any
+        // surcharge; target is what's actually enforced as deliverable, after withholding the
+        // surcharge computed above. Both sides of the value-conservation bound below reference
+        // target, not fairFusd — they must move together, since bounding the upper side against
+        // fairFusd while the lower side demands target would be internally inconsistent (the
+        // upper bound would then permit paying out MORE than target + surchargeBps allows,
+        // silently undoing the surcharge for any withdrawal that happens to deliver close to
+        // fairFusd). surchargeAmount is this gap, deterministic from target/fairFusd — not
+        // measured from the realized valueDelta below — so it's known even if the loop delivers
+        // less than target for unrelated reasons (e.g. minValueOutBps slack).
+        uint256 target = fairFusd - (fairFusd * surchargeBps) / 10_000;
+        result.surchargeAmount = fairFusd - target;
+
         (result.outAssets, result.outAmounts) = _processAllocations(
             input.poolManagerLogic,
             plan.user,
@@ -385,9 +483,26 @@ library WithdrawalPlanLib {
         );
         if (valueBefore < valueAfter) revert IPoolLogic.InvalidFundValue();
         result.valueDelta = valueBefore - valueAfter;
-        if (result.valueDelta > fairFusd + DUST_TOLERANCE) revert ValueConservationViolated();
-        uint256 minAllowed = fairFusd - (fairFusd * plan.minValueOutBps) / 10_000;
+        if (result.valueDelta > target + DUST_TOLERANCE) revert ValueConservationViolated();
+        uint256 minAllowed = target - (target * plan.minValueOutBps) / 10_000;
         if (result.valueDelta < minAllowed) revert ValueConservationViolated();
+
+        // See this event's own docs above for why it's emitted here rather than by PoolLogic.
+        // Audit note: reuses CashWithdrawImmediateProRata's (asset[],amount[]) shape purely to
+        // avoid compiling a second dynamic-array-encoding event on top of an already bytecode-
+        // constrained contract — this is NOT a genuine uniform pro-rata withdrawal. Off-chain
+        // consumers must treat any CashWithdrawImmediateProRata emitted alongside
+        // AttestedWithdrawPlanExecuted in the same transaction as attester-composed, and key off
+        // the paired event (present only on this path) to tell the two apart.
+        emit CashWithdrawImmediateProRata(
+            plan.user,
+            plan.fusdAmount,
+            result.netFusd,
+            result.feeFusd,
+            result.outAssets,
+            result.outAmounts
+        );
+        emit AttestedWithdrawPlanExecuted(plan.user, plan.nonce, result.surchargeAmount);
     }
 
     /// @dev Duplicates PoolLogic._applyWithdrawFeeFusd's exit-fee formula plus the manager-bypass
@@ -410,7 +525,9 @@ library WithdrawalPlanLib {
 
         if (ITokenLogicMinimal(fusd).getExitRemainingCooldown(user) != 0) revert CooldownActive();
 
-        (, , , uint256 exitFeeNumerator, uint256 feeDenominator) = IPoolManagerLogic(poolManagerLogic).getFee();
+        (, , , uint256 exitFeeNumerator, uint256 feeDenominator) = IPoolManagerLogic(
+            poolManagerLogic
+        ).getFee();
 
         if (exitFeeNumerator == 0 || amount == 0) {
             netFusd = amount;
@@ -484,9 +601,11 @@ library WithdrawalPlanLib {
             .computeImmediateWithdrawPortion(address(this), result.netFusd, fundValue);
         if (portion == 0) revert WithdrawAmountTooSmall();
 
-        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(input.poolManagerLogic)
-            .getSupportedAssets();
-        if (complexAssetsData.length != supportedAssets.length) revert IPoolLogic.InvalidAssetData();
+        IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
+            input.poolManagerLogic
+        ).getSupportedAssets();
+        if (complexAssetsData.length != supportedAssets.length)
+            revert IPoolLogic.InvalidAssetData();
 
         uint256 n = supportedAssets.length;
         address[] memory outAssets = new address[](n);
@@ -496,7 +615,8 @@ library WithdrawalPlanLib {
         for (uint256 i = 0; i < n; ++i) {
             address a = supportedAssets[i].asset;
             IPoolLogic.ComplexAsset memory cd = complexAssetsData[i];
-            if (cd.withdrawData.length > 0 && a != cd.supportedAsset) revert IPoolLogic.InvalidAssetData();
+            if (cd.withdrawData.length > 0 && a != cd.supportedAsset)
+                revert IPoolLogic.InvalidAssetData();
 
             (address withdrawAsset, uint256 withdrawAmount, ) = withdrawProcessing(
                 input.poolManagerLogic,
@@ -528,7 +648,8 @@ library WithdrawalPlanLib {
         );
         if (fundValue < valueAfter) revert IPoolLogic.InvalidFundValue();
         result.valueDelta = fundValue - valueAfter;
-        if (result.valueDelta > result.netFusd + DUST_TOLERANCE) revert IPoolLogic.InvalidFundValue();
+        if (result.valueDelta > result.netFusd + DUST_TOLERANCE)
+            revert IPoolLogic.InvalidFundValue();
     }
 
     function _processAllocations(
@@ -611,7 +732,12 @@ library WithdrawalPlanLib {
                 return complexAssetsData[i];
             }
         }
-        return IPoolLogic.ComplexAsset({ supportedAsset: address(0), withdrawData: "", slippageTolerance: 0 });
+        return
+            IPoolLogic.ComplexAsset({
+                supportedAsset: address(0),
+                withdrawData: "",
+                slippageTolerance: 0
+            });
     }
 
     /// @notice Verifies `signature` against `signer` for `digest`, supporting both a plain EOA
@@ -675,12 +801,19 @@ library WithdrawalPlanLib {
                 plan.minValueOutBps,
                 keccak256(abi.encodePacked(allocationHashes)),
                 plan.nonce,
-                plan.deadline
+                plan.deadline,
+                plan.maxAcceptableSurchargeBps
             )
         );
 
         bytes32 domainSeparator = keccak256(
-            abi.encode(EIP712_DOMAIN_TYPEHASH, DOMAIN_NAME_HASH, DOMAIN_VERSION_HASH, block.chainid, address(this))
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                DOMAIN_NAME_HASH,
+                DOMAIN_VERSION_HASH,
+                block.chainid,
+                address(this)
+            )
         );
 
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
@@ -717,7 +850,9 @@ library WithdrawalPlanLib {
         if (current.accumulatedValueUsd != 0) {
             uint256 elapsed = block.timestamp - current.lastWithdrawTimestamp;
             if (elapsed < decayWindow) {
-                decayed = (uint256(current.accumulatedValueUsd) * (decayWindow - elapsed)) / decayWindow;
+                decayed =
+                    (uint256(current.accumulatedValueUsd) * (decayWindow - elapsed)) /
+                    decayWindow;
             }
         }
 
@@ -740,7 +875,11 @@ library WithdrawalPlanLib {
             });
     }
 
-    function _checkCallResult(bytes memory data, bool success, bytes memory returndata) private pure {
+    function _checkCallResult(
+        bytes memory data,
+        bool success,
+        bytes memory returndata
+    ) private pure {
         if (!success) revert TxFailed();
 
         // Only verify return value for ERC20 transfer/approve

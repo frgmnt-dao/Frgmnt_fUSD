@@ -26,10 +26,10 @@ import { ethers } from 'hardhat';
 // vars if it has, and the runtime check will catch a stale default either way.
 //
 // STORAGE-LAYOUT VERIFICATION (manual diff, current live PoolLogic vs this branch):
-//   - 9 new state variables (withdrawalAttester, pendingWithdrawalAttester,
+//   - 10 new state variables (withdrawalAttester, pendingWithdrawalAttester,
 //     pendingAttesterActivationTime, attesterRotationDelay, consumedPlanNonce,
 //     isAttestedWithdrawEnabled, attestedWithdrawVolume, attestedWithdrawDecayWindow,
-//     maxAttestedWithdrawVolumePerWindow), all appended strictly after
+//     maxAttestedWithdrawVolumePerWindow, maxSurchargeBps), all appended strictly after
 //     pendingCashWithdrawCount (the previous last state variable). PoolLogic has no __gap —
 //     append-only ordering is what upgrade safety relies on here, same as every prior
 //     PoolLogic migration (see docs/upgradeable-contracts-notes.md).
@@ -46,7 +46,7 @@ import { ethers } from 'hardhat';
 // transaction:
 //
 //   PoolLogic.initializeAttestedWithdrawal(attester_, attesterRotationDelay_,
-//   attestedWithdrawDecayWindow_, maxAttestedWithdrawVolumePerWindow_)
+//   attestedWithdrawDecayWindow_, maxAttestedWithdrawVolumePerWindow_, maxSurchargeBps_)
 //   (onlyOwner, reinitializer(3)). Reverts RotationDelayTooShort/DecayWindowTooShort if
 //   either delay/window argument is below its respective floor (MIN_ATTESTER_ROTATION_DELAY
 //   = 24h, MIN_ATTESTED_WITHDRAW_DECAY_WINDOW = 1h) — the feature cannot launch in an
@@ -103,6 +103,12 @@ const ATTESTED_WITHDRAW_DECAY_WINDOW_SECONDS = process.env.ATTESTED_WITHDRAW_DEC
 const MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW = process.env.MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW
   ? ethers.parseUnits(process.env.MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW, 18)
   : ethers.parseUnits('10000', 18);
+// Surcharge ceiling — no floor to enforce (0 disables the surcharge safely), and no default
+// recommendation beyond "starts disabled" until the team decides on a value; WithdrawalPlanLib's
+// own hardcoded MAX_SURCHARGE_BPS_CEILING bounds whatever this is set to regardless.
+const MAX_SURCHARGE_BPS = process.env.MAX_SURCHARGE_BPS
+  ? BigInt(process.env.MAX_SURCHARGE_BPS)
+  : 0n;
 
 async function main() {
   if (!ethers.isAddress(POOL_LOGIC_PROXY) || POOL_LOGIC_PROXY === ethers.ZeroAddress) {
@@ -187,6 +193,7 @@ async function main() {
     ethers.formatUnits(MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW, 18),
     'fUSD',
   );
+  console.log('  MAX_SURCHARGE_BPS                      :', MAX_SURCHARGE_BPS.toString());
 
   // -----------------------------------------------------------------------
   // Phase 1: libraries — freshly deployed, self-contained (see header comment on why
@@ -255,6 +262,7 @@ async function main() {
       ATTESTER_ROTATION_DELAY_SECONDS,
       ATTESTED_WITHDRAW_DECAY_WINDOW_SECONDS,
       MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW,
+      MAX_SURCHARGE_BPS,
     ],
   );
   const poolLogicUpgradeCalldata = poolLogicAdmin.interface.encodeFunctionData('upgradeAndCall', [
@@ -294,7 +302,7 @@ async function main() {
         'and the new WithdrawalPlanLib, bundling initializeAttestedWithdrawal(' +
         `${ATTESTER_ADDRESS}, ${ATTESTER_ROTATION_DELAY_SECONDS}, ` +
         `${ATTESTED_WITHDRAW_DECAY_WINDOW_SECONDS}, ` +
-        `${MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW}) atomically. Propose via the DAO Safe ` +
+        `${MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW}, ${MAX_SURCHARGE_BPS}) atomically. Propose via the DAO Safe ` +
         'multisig, do not execute with a single key. STRONGLY RECOMMENDED: dry-run against a ' +
         'fork of live mainnet state first, and independently reconfirm every address in this ' +
         "script's header before signing — this run's own live custody re-check already " +

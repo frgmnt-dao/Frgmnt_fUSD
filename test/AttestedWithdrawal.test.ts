@@ -100,14 +100,19 @@ async function deployAttestedWithdrawalFixture() {
   );
 
   const attesterAddress = await attester.getAddress();
-  await pool
-    .connect(owner)
-    .initializeAttestedWithdrawal(
-      attesterAddress,
-      ONE_DAY,
-      ONE_HOUR,
-      ethers.parseUnits('1000000', 18),
-    );
+  await pool.connect(owner).initializeAttestedWithdrawal(
+    attesterAddress,
+    ONE_DAY,
+    ONE_HOUR,
+    ethers.parseUnits('1000000', 18),
+    // maxSurchargeBps starts at 0 (surcharge disabled) — matches maxAttestedWithdrawVolumePerWindow's
+    // own "0 is safe" precedent, and keeps every OTHER test in this file (which doesn't care
+    // about the surcharge mechanism) completely unaffected: with maxSurchargeBps == 0,
+    // WithdrawalPlanLib's effectiveMaxSurchargeBps clamp is always 0 regardless of accumulated
+    // volume, so surchargeBps is always 0 too. Dedicated surcharge tests below explicitly call
+    // setMaxSurchargeBps() to opt in.
+    0n,
+  );
 
   const chainId = (await ethers.provider.getNetwork()).chainId;
   const domain = {
@@ -124,6 +129,7 @@ async function deployAttestedWithdrawalFixture() {
       { name: 'allocations', type: 'AssetAllocation[]' },
       { name: 'nonce', type: 'uint256' },
       { name: 'deadline', type: 'uint256' },
+      { name: 'maxAcceptableSurchargeBps', type: 'uint256' },
     ],
     AssetAllocation: [
       { name: 'asset', type: 'address' },
@@ -254,6 +260,9 @@ describe('PoolLogic — attested selective withdrawal', () => {
       ],
       nonce: opts.nonce ?? 0n,
       deadline: opts.deadline ?? BigInt(1_900_000_000),
+      // Generous default (matches WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING exactly) so tests
+      // that don't care about the surcharge mechanism never spuriously hit SurchargeTooHigh.
+      maxAcceptableSurchargeBps: opts.maxAcceptableSurchargeBps ?? 100n,
     };
   }
 
@@ -378,8 +387,18 @@ describe('PoolLogic — attested selective withdrawal', () => {
       ...fixture,
       userAddress,
       allocations: [
-        { asset: assetAddress, useFixedAmount: false, portion: ethers.parseUnits('0.5', 18), fixedAmount: 0n },
-        { asset: assetAddress, useFixedAmount: false, portion: ethers.parseUnits('0.5', 18), fixedAmount: 0n },
+        {
+          asset: assetAddress,
+          useFixedAmount: false,
+          portion: ethers.parseUnits('0.5', 18),
+          fixedAmount: 0n,
+        },
+        {
+          asset: assetAddress,
+          useFixedAmount: false,
+          portion: ethers.parseUnits('0.5', 18),
+          fixedAmount: 0n,
+        },
       ],
     });
     const signature = await signPlan(fixture, plan, attester);
@@ -473,7 +492,10 @@ describe('PoolLogic — attested selective withdrawal', () => {
       await mintAndApproveFUSD(fusd, pool, user, ethers.parseUnits('50', 18));
       await fusd.mint(await other.getAddress(), ethers.parseUnits('50', 18));
       await asset.mint(await pool.getAddress(), ethers.parseUnits('80', 18));
-      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), ethers.parseUnits('80', 18));
+      await fusd.triggerIncrementAccountedAssets(
+        await pool.getAddress(),
+        ethers.parseUnits('80', 18),
+      );
     }
 
     it('reverts a plan engineered to pay out at par (ignoring the haircut) in an underwater pool', async () => {
@@ -686,7 +708,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
     expect(after - before).to.equal(fixedAmount);
   });
 
-  it('threads complexAssetsData through to withdrawProcessing\'s slippage check via _matchComplexAsset', async () => {
+  it("threads complexAssetsData through to withdrawProcessing's slippage check via _matchComplexAsset", async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, asset, assetGuard, user, attester } = fixture;
     await fundPoolAndUser(fixture);
@@ -798,9 +820,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
       ...fixture,
       userAddress: managerAddress,
       fusdAmount: 0n,
-      allocations: [
-        { asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: 1n },
-      ],
+      allocations: [{ asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: 1n }],
     });
     const signature = await signPlan(fixture, plan, attester);
 
@@ -817,7 +837,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
     // Remove the ordinary cap so only the uint128 overflow guard is exercised.
     await pool.connect(manager).setMaxAttestedWithdrawVolumePerWindow(ethers.MaxUint256);
 
-    const hugeAmount = (2n ** 128n) + 1_000n; // just above type(uint128).max
+    const hugeAmount = 2n ** 128n + 1_000n; // just above type(uint128).max
     await fusd.mint(await user.getAddress(), hugeAmount);
     await fusd.connect(user).approve(await pool.getAddress(), hugeAmount);
     await asset.mint(await pool.getAddress(), hugeAmount);
@@ -1022,7 +1042,10 @@ describe('PoolLogic — attested selective withdrawal', () => {
         pool.connect(other).setMaxAttestedWithdrawVolumePerWindow(1n),
         'OnlyManager',
       );
-      await expectRevert(pool.connect(other).setAttestedWithdrawDecayWindow(ONE_HOUR), 'OnlyManager');
+      await expectRevert(
+        pool.connect(other).setAttestedWithdrawDecayWindow(ONE_HOUR),
+        'OnlyManager',
+      );
     });
 
     it('restricts setAttesterRotationDelay to the factoryOwner, not the manager', async () => {
@@ -1076,6 +1099,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
             ONE_DAY - 1,
             ONE_HOUR,
             ethers.parseUnits('1000000', 18),
+            0n,
           ),
         'RotationDelayTooShort',
       );
@@ -1087,6 +1111,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
             ONE_DAY,
             ONE_HOUR - 1,
             ethers.parseUnits('1000000', 18),
+            0n,
           ),
         'DecayWindowTooShort',
       );
@@ -1158,7 +1183,9 @@ describe('PoolLogic — attested selective withdrawal', () => {
       await time.increase(ONE_DAY + 1);
       await pool.connect(user).activateWithdrawalAttester();
       await pool.connect(manager).setAttestedWithdrawEnabled(true);
-      await pool.connect(manager).setMaxAttestedWithdrawVolumePerWindow(ethers.parseUnits('1000000', 18));
+      await pool
+        .connect(manager)
+        .setMaxAttestedWithdrawVolumePerWindow(ethers.parseUnits('1000000', 18));
       expect(await pool.attestedWithdrawDecayWindow()).to.equal(0n);
 
       const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
@@ -1168,7 +1195,12 @@ describe('PoolLogic — attested selective withdrawal', () => {
       const assetGuard = await TestAssetGuard.deploy();
       await assetGuard.waitForDeployment();
       await poolManager.setAssetGuard(await asset.getAddress(), await assetGuard.getAddress());
-      await poolManager.setSupportedAsset(await asset.getAddress(), true, ethers.parseUnits('1', 18), 18);
+      await poolManager.setSupportedAsset(
+        await asset.getAddress(),
+        true,
+        ethers.parseUnits('1', 18),
+        18,
+      );
 
       await mintAndApproveFUSD(fusd, pool, user, amount);
       await asset.mint(await pool.getAddress(), poolAsset);
@@ -1192,6 +1224,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
             { name: 'allocations', type: 'AssetAllocation[]' },
             { name: 'nonce', type: 'uint256' },
             { name: 'deadline', type: 'uint256' },
+            { name: 'maxAcceptableSurchargeBps', type: 'uint256' },
           ],
           AssetAllocation: [
             { name: 'asset', type: 'address' },
@@ -1208,6 +1241,391 @@ describe('PoolLogic — attested selective withdrawal', () => {
         pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
         'AttestedWithdrawVolumeCapExceeded',
       );
+    });
+  });
+
+  describe('surcharge', () => {
+    // Pool value (poolAsset) = 1000, so a 100-fUSD withdrawal (`amount`) is exactly 10% of the
+    // fund — enough to produce meaningful, easy-to-hand-compute pressure on a single, first-ever
+    // withdrawal (attestedWithdrawVolume's decayed accumulator already includes THIS withdrawal
+    // by the time pressure is computed, so no prior volume is needed to see a nonzero surcharge).
+    // With maxSurchargeBps set to WithdrawalPlanLib's own MAX_SURCHARGE_BPS_CEILING (100 = 1%),
+    // effectiveMaxSurchargeBps == 100 exactly, so: pressure = 100/1000 = 0.1 (10%),
+    // surchargeBps = 0.1 * 100 = 10 (0.10%), target = 100 * (1 - 10/10000) = 99.9,
+    // surchargeAmount = 0.1.
+    const SURCHARGE_CEILING_BPS = 100n; // WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING
+
+    it('applies a nonzero surcharge that shows up as extra retained accountedAssets, not as a bigger payout', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, fusd, asset, user, attester, owner } = fixture;
+      await fundPoolAndUser(fixture);
+      await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      // Deliver 99 (comfortably inside [target - 1% slack, target + DUST_TOLERANCE] =
+      // [98.901, 99.900...001]) rather than the razor-precise target itself, so this test isn't
+      // fragile to rounding — minValueOutBps supplies the slack, exactly like every other
+      // allocation-sizing test in this file already does.
+      const plan = buildPlan({
+        userAddress,
+        assetAddress,
+        allocations: [
+          {
+            asset: assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: ethers.parseUnits('99', 18),
+          },
+        ],
+        minValueOutBps: 100n,
+      });
+      const signature = await signPlan(fixture, plan, attester);
+
+      const accountedAssetsBefore = await pool.accountedAssets();
+      const before = await asset.balanceOf(userAddress);
+      await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+      const after = await asset.balanceOf(userAddress);
+      const accountedAssetsAfter = await pool.accountedAssets();
+
+      const valueDelta = after - before; // 99, exactly what was actually delivered
+      expect(valueDelta).to.equal(ethers.parseUnits('99', 18));
+
+      // No overhang in this fixture (accountedAssets == fund value before the withdrawal), so
+      // absent any surcharge the reduction would equal valueDelta exactly (matching the sibling
+      // "reduces by exactly valueDelta when there is no overhang" FundCalculationLibrary test).
+      // The surcharge shrinks that reduction further, by exactly surchargeAmount = 0.1 — i.e.
+      // accountedAssets ends up 0.1 HIGHER than a same-sized surcharge-free withdrawal would
+      // have left it, even though the user received the same 99 either way. That 0.1 is the
+      // withheld slice staying inside the fund as extra backing for remaining stakers, not paid
+      // to the user and not paid to the manager.
+      const surchargeAmount = ethers.parseUnits('0.1', 18);
+      expect(accountedAssetsBefore - accountedAssetsAfter).to.equal(valueDelta - surchargeAmount);
+    });
+
+    it('reverts SurchargeTooHigh when the live-computed surcharge exceeds the attester-signed ceiling, and succeeds at the exact boundary', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, asset, user, attester, owner } = fixture;
+      await fundPoolAndUser(fixture);
+      await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const allocations = [
+        {
+          asset: assetAddress,
+          useFixedAmount: true,
+          portion: 0n,
+          fixedAmount: ethers.parseUnits('99', 18),
+        },
+      ];
+
+      // surchargeBps computes to exactly 10 (see the constant block above) — one below it must
+      // revert, exact equality must succeed. Two separate nonces since a plan (and its
+      // allocations) can't be replayed even on revert-then-retry.
+      const tooTight = buildPlan({
+        userAddress,
+        assetAddress,
+        allocations,
+        minValueOutBps: 100n,
+        nonce: 0n,
+        maxAcceptableSurchargeBps: 9n,
+      });
+      const tooTightSig = await signPlan(fixture, tooTight, attester);
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(tooTight, tooTightSig, []),
+        'SurchargeTooHigh',
+      );
+
+      const exact = buildPlan({
+        userAddress,
+        assetAddress,
+        allocations,
+        minValueOutBps: 100n,
+        nonce: 1n,
+        maxAcceptableSurchargeBps: 10n,
+      });
+      const exactSig = await signPlan(fixture, exact, attester);
+      await pool.connect(user).withdrawCashImmediateWithPlan(exact, exactSig, []);
+      expect(await pool.consumedPlanNonce(userAddress, 1n)).to.equal(true);
+    });
+
+    it('clamps the real applied surcharge to MAX_SURCHARGE_BPS_CEILING regardless of a higher governed maxSurchargeBps', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, asset, user, attester, owner } = fixture;
+      await fundPoolAndUser(fixture);
+      // Governed value set well above the hardcoded ceiling (5% vs the 1% ceiling) — the
+      // setter itself performs no bound check by design (see setMaxSurchargeBps's own docs);
+      // WithdrawalPlanLib must clamp at the point of use regardless.
+      await pool.connect(owner).setMaxSurchargeBps(500n);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const plan = buildPlan({
+        userAddress,
+        assetAddress,
+        allocations: [
+          {
+            asset: assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: ethers.parseUnits('99', 18),
+          },
+        ],
+        minValueOutBps: 100n,
+        // If the ceiling clamp did NOT apply, pressure (10%) * 500 bps = 50 bps of surcharge —
+        // well above this signed ceiling, and the plan would revert SurchargeTooHigh. Success
+        // here proves the real applied surcharge was clamped down to the 10-bps figure the
+        // hardcoded 1% ceiling actually produces.
+        maxAcceptableSurchargeBps: 10n,
+      });
+      const signature = await signPlan(fixture, plan, attester);
+
+      await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+    });
+
+    it('a plan signing maxAcceptableSurchargeBps = 0 rejects any nonzero surcharge outright', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, asset, user, attester, owner } = fixture;
+      await fundPoolAndUser(fixture);
+      await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const plan = buildPlan({
+        userAddress,
+        assetAddress,
+        allocations: [
+          {
+            asset: assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: ethers.parseUnits('99', 18),
+          },
+        ],
+        minValueOutBps: 100n,
+        maxAcceptableSurchargeBps: 0n,
+      });
+      const signature = await signPlan(fixture, plan, attester);
+
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+        'SurchargeTooHigh',
+      );
+    });
+
+    it('is a complete no-op when maxSurchargeBps is left at its 0 default, regardless of pressure', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, asset, user, attester } = fixture;
+      await fundPoolAndUser(fixture);
+      // maxSurchargeBps is never set — stays at its storage default, 0. The same 10%-of-fund
+      // withdrawal that produces a real surcharge in the sibling tests above must deliver the
+      // full, un-surcharged amount here, with no slack needed.
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const plan = buildPlan({ userAddress, assetAddress });
+      const signature = await signPlan(fixture, plan, attester);
+
+      const before = await asset.balanceOf(userAddress);
+      await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+      const after = await asset.balanceOf(userAddress);
+      expect(after - before).to.equal(amount);
+    });
+
+    it('binds maxAcceptableSurchargeBps into the signed digest — tampering with it after signing invalidates the signature', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, asset, user, attester } = fixture;
+      await fundPoolAndUser(fixture);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const plan = buildPlan({ userAddress, assetAddress, maxAcceptableSurchargeBps: 100n });
+      const signature = await signPlan(fixture, plan, attester);
+
+      const tampered = { ...plan, maxAcceptableSurchargeBps: 0n };
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(tampered, signature, []),
+        'InvalidAttesterSignature',
+      );
+    });
+
+    it('restricts setMaxSurchargeBps to the factoryOwner, not the manager', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, manager, owner } = fixture;
+
+      await expectRevert(
+        pool.connect(manager).setMaxSurchargeBps(SURCHARGE_CEILING_BPS),
+        'OnlyFactoryOwner',
+      );
+
+      // Deployer address is the mock's default factoryOwner (see TestPoolManagerLogic).
+      await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+      expect(await pool.maxSurchargeBps()).to.equal(SURCHARGE_CEILING_BPS);
+    });
+
+    it('accumulates pressure across sequential withdrawals, charging a later one more than an equivalent isolated first one', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, fusd, asset, user, other, attester, owner } = fixture;
+      await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+
+      // Two independent withdrawing users share the same pool and the same
+      // attestedWithdrawVolume accumulator — pressure is pool-wide, not per-user (matching the
+      // circuit breaker's own existing design).
+      const userAddress = await user.getAddress();
+      const otherAddress = await other.getAddress();
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await mintAndApproveFUSD(fusd, pool, other, amount);
+      await asset.mint(await pool.getAddress(), poolAsset);
+      await fusd.triggerIncrementAccountedAssets(await pool.getAddress(), poolAsset);
+      const assetAddress = await asset.getAddress();
+
+      // First withdrawal: 1% of the 1000-value fund (small, to leave room for the second to
+      // still fit within the same 1000-value fund without going underwater).
+      const small = ethers.parseUnits('10', 18);
+      const firstPlan = buildPlan({
+        userAddress,
+        assetAddress,
+        fusdAmount: small,
+        allocations: [
+          { asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: small },
+        ],
+        minValueOutBps: 100n,
+        nonce: 0n,
+      });
+      const firstSig = await signPlan(fixture, firstPlan, attester);
+      await pool.connect(user).withdrawCashImmediateWithPlan(firstPlan, firstSig, []);
+      // pressure so far: 10/1000 = 1%; surchargeBps = 1% * 100 = 1 (0.01%) — comfortably under
+      // any plan's default 100-bps maxAcceptableSurchargeBps, so this succeeds without needing
+      // any special sizing.
+
+      // Second withdrawal, same size, immediately after: the accumulator now carries the first
+      // withdrawal's volume too (negligible decay across one block), so pressure is measurably
+      // higher than a lone 10-fUSD withdrawal from a fresh 1000-value fund would see alone.
+      const secondPlan = buildPlan({
+        userAddress: otherAddress,
+        assetAddress,
+        fusdAmount: small,
+        allocations: [
+          { asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: small },
+        ],
+        minValueOutBps: 100n,
+        nonce: 0n,
+        // A tight ceiling: if the accumulator did NOT carry forward the first withdrawal's
+        // volume, pressure would be identical to the first call's (1%) and surchargeBps would
+        // still be 1 — passing even a ceiling of 1. Requiring 2 here only passes if the second
+        // withdrawal's measured pressure is strictly higher than the first's, proving
+        // accumulation across calls, not just within one.
+        maxAcceptableSurchargeBps: 1n,
+      });
+      const secondSig = await signPlan(fixture, secondPlan, attester);
+      await expectRevert(
+        pool.connect(other).withdrawCashImmediateWithPlan(secondPlan, secondSig, []),
+        'SurchargeTooHigh',
+      );
+    });
+
+    it('a single large withdrawal alone can trigger SurchargeTooHigh, with zero prior accumulated volume', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, fusd, asset, user, attester, owner } = fixture;
+      await fundPoolAndUser(fixture);
+      await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+
+      // 600 of a 1000-value fund in one shot (60% of the fund) — pressure = 0.6, surchargeBps =
+      // 0.6 * 100 = 60 (0.60%). This is the FIRST and ONLY attested withdrawal this pool has
+      // ever seen; the accumulator carries none of some earlier withdrawal's volume. A signed
+      // ceiling of 30 (below the 60 this single withdrawal alone produces) must still revert —
+      // proving the mechanism doesn't require repeated usage to bite, exactly the "one big
+      // withdrawal the first time" scenario this feature is meant to price.
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const big = ethers.parseUnits('600', 18);
+      // fundPoolAndUser already minted/approved `amount` (100) — top up to the full 600 and
+      // re-approve the FULL new total (approve() replaces, not adds to, the prior allowance).
+      await fusd.mint(userAddress, big - amount);
+      await fusd.connect(user).approve(await pool.getAddress(), big);
+      const plan = buildPlan({
+        userAddress,
+        assetAddress,
+        fusdAmount: big,
+        allocations: [{ asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: big }],
+        minValueOutBps: 100n,
+        maxAcceptableSurchargeBps: 30n,
+      });
+      const signature = await signPlan(fixture, plan, attester);
+
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+        'SurchargeTooHigh',
+      );
+    });
+
+    it('applies the surcharge against the haircut-adjusted fairFusd, not the raw claim, in an underwater pool', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, fusd, asset, user, other, attester, owner } = fixture;
+      // Same underwater setup as the FNA-05 describe block above: two 50 FUSD claims, 80 in
+      // backing assets (80% collateralized) — Alice's (user's) fair share of her 50 claim is 40
+      // at par, before any surcharge.
+      await mintAndApproveFUSD(fusd, pool, user, ethers.parseUnits('50', 18));
+      await fusd.mint(await other.getAddress(), ethers.parseUnits('50', 18));
+      await asset.mint(await pool.getAddress(), ethers.parseUnits('80', 18));
+      await fusd.triggerIncrementAccountedAssets(
+        await pool.getAddress(),
+        ethers.parseUnits('80', 18),
+      );
+      await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+
+      // valueBefore = 80, netFusd = 50 (no exit fee in this fixture) — pressure = 50/80 = 0.625
+      // (62.5%), surchargeBps = 0.625 * 100 = 62 (integer-truncated from 62.5, i.e. 0.62%).
+      // fairFusd (haircut-adjusted, 80% collateralized) = 50 * 0.8 = 40 — NOT the raw 50 claim.
+      // target = 40 - (40 * 62)/10000 = 40 - 0.248 = 39.752; surchargeAmount = 0.248. Delivering
+      // 39.5 (inside [target*(1-1%), target+DUST_TOLERANCE] = [39.3545, 39.752...001]) proves the
+      // surcharge was computed against the haircut-adjusted 40, not the nominal 50 claim — sizing
+      // against 50 instead would put 39.5 outside a very different, wrong bound and this plan
+      // would either revert or the assertion below would fail to match.
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const plan = buildPlan({
+        userAddress,
+        assetAddress,
+        fusdAmount: ethers.parseUnits('50', 18),
+        allocations: [
+          {
+            asset: assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: ethers.parseUnits('39.5', 18),
+          },
+        ],
+        minValueOutBps: 100n,
+      });
+      const signature = await signPlan(fixture, plan, attester);
+
+      const accountedAssetsBefore = await pool.accountedAssets();
+      await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+      const accountedAssetsAfter = await pool.accountedAssets();
+
+      const valueDelta = ethers.parseUnits('39.5', 18);
+      const surchargeAmount = ethers.parseUnits('0.248', 18);
+      expect(accountedAssetsBefore - accountedAssetsAfter).to.equal(valueDelta - surchargeAmount);
+    });
+
+    it("emits AttestedWithdrawPlanExecuted and CashWithdrawImmediateProRata under the pool's own address, even though both are emitted from inside the delegatecalled WithdrawalPlanLib", async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, asset, user, attester } = fixture;
+      await fundPoolAndUser(fixture);
+
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const plan = buildPlan({ userAddress, assetAddress });
+      const signature = await signPlan(fixture, plan, attester);
+
+      // ethers' `.to.emit(pool, ...)` matches on the log's emitting address, not just topic0 —
+      // this only passes if WithdrawalPlanLib's delegatecall-context emit genuinely attributes
+      // the log to the pool proxy's own address, not the library's deployed address.
+      await expect(pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []))
+        .to.emit(pool, 'AttestedWithdrawPlanExecuted')
+        .withArgs(userAddress, plan.nonce, 0n)
+        .and.to.emit(pool, 'CashWithdrawImmediateProRata');
     });
   });
 });
