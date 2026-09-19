@@ -9,6 +9,7 @@ import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import { IPoolLogic } from "../interfaces/IPoolLogic.sol";
 import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
+import { IManaged } from "../interfaces/IManaged.sol";
 import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
 import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
 import { IComplexAssetGuard } from "../interfaces/guards/IComplexAssetGuard.sol";
@@ -143,8 +144,8 @@ library WithdrawalPlanLib {
     }
 
     /// @dev Bundled input to executeWithdrawalPlan — avoids stack-too-deep across what would
-    ///      otherwise be 9+ separate parameters. Flattened (no nested structs) to keep this
-    ///      struct's own ABI-encoding footprint at the PoolLogic call site as small as possible.
+    ///      otherwise be 9+ separate locals. Built inside this library by _loadPlanInput() from
+    ///      the pool's public getters (PoolLogic no longer builds or passes it).
     struct ExecutePlanInput {
         address fusd;
         address poolManagerLogic;
@@ -322,11 +323,11 @@ library WithdrawalPlanLib {
     ///      writes from this function's outputs until it returns successfully, so a revert here
     ///      leaves consumedPlanNonce/attestedWithdrawVolume/accountedAssets untouched.
     function executeWithdrawalPlan(
-        ExecutePlanInput memory input,
         IPoolLogic.WithdrawalPlan calldata plan,
         bytes calldata attesterSignature,
         IPoolLogic.ComplexAsset[] calldata complexAssetsData
     ) external returns (PlanExecutionResult memory result) {
+        ExecutePlanInput memory input = _loadPlanInput(plan.user, plan.nonce);
         bytes32 digest = _hashPlan(plan);
         if (!_isValidSignatureNow(input.withdrawalAttester, digest, attesterSignature)) {
             revert IPoolLogic.InvalidAttesterSignature();
@@ -492,6 +493,29 @@ library WithdrawalPlanLib {
             result.outAmounts
         );
         emit AttestedWithdrawPlanExecuted(plan.user, plan.nonce, result.surchargeAmount);
+    }
+
+    /// @dev Reads every value the plan path needs from the pool through its public getters
+    ///      (self-calls: under delegatecall address(this) is the pool). PoolLogic used to build and
+    ///      pass this struct itself, which cost it a run of storage reads and struct encoding in a
+    ///      contract with almost no EIP-170 headroom left; all of these values already have public
+    ///      getters, and they are read here at the very start of the call, before any external
+    ///      interaction, so the values are identical to what PoolLogic would have passed.
+    function _loadPlanInput(
+        address user,
+        uint256 nonce
+    ) private view returns (ExecutePlanInput memory input) {
+        IPoolLogic pool = IPoolLogic(address(this));
+        input.poolManagerLogic = pool.poolManagerLogic();
+        input.fusd = pool.fusd();
+        input.manager = IManaged(input.poolManagerLogic).manager();
+        input.withdrawalAttester = pool.withdrawalAttester();
+        input.nonceAlreadyConsumed = pool.consumedPlanNonce(user, nonce);
+        input.attestedWithdrawDecayWindow = pool.attestedWithdrawDecayWindow();
+        input.maxAttestedWithdrawVolumePerWindow = pool.maxAttestedWithdrawVolumePerWindow();
+        (input.currentVolumeTimestamp, input.currentVolumeAccumulated) = pool
+            .attestedWithdrawVolume();
+        input.maxSurchargeBps = pool.maxSurchargeBps();
     }
 
     /// @dev Duplicates PoolLogic._applyWithdrawFeeFusd's exit-fee formula plus the manager-bypass

@@ -1171,6 +1171,29 @@ describe('PoolLogic — attested selective withdrawal', () => {
       expect(await pool.withdrawalAttester()).to.equal(candidate);
     });
 
+    it('lets the factoryOwner emergency-stop the feature (off only) and clears a pending attester proposal', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, manager, owner, other } = fixture;
+
+      // A (possibly malicious) manager-proposed attester is inside its rotation delay.
+      await pool.connect(manager).proposeWithdrawalAttester(await other.getAddress());
+      expect(await pool.pendingWithdrawalAttester()).to.equal(await other.getAddress());
+
+      // The factoryOwner — independent of the manager — can switch the feature off...
+      await pool.connect(owner).setAttestedWithdrawEnabled(false);
+      expect(await pool.isAttestedWithdrawEnabled()).to.equal(false);
+      // ...which also cancels the pending proposal, so it cannot be activated once the delay passes.
+      expect(await pool.pendingWithdrawalAttester()).to.equal(ethers.ZeroAddress);
+      expect(await pool.pendingAttesterActivationTime()).to.equal(0n);
+      await time.increase(ONE_DAY + 1);
+      await expectRevert(pool.connect(other).activateWithdrawalAttester(), 'NoRotationPending');
+
+      // It can never be used to turn the feature ON — that stays the manager's decision.
+      await expectRevert(pool.connect(owner).setAttestedWithdrawEnabled(true), 'OnlyManager');
+      await pool.connect(manager).setAttestedWithdrawEnabled(true);
+      expect(await pool.isAttestedWithdrawEnabled()).to.equal(true);
+    });
+
     it('lets the manager instantly disable attested withdrawals as an incident-response kill switch', async () => {
       const fixture = await loadFixture(deployAttestedWithdrawalFixture);
       const { pool, manager } = fixture;

@@ -1045,9 +1045,22 @@ contract PoolLogic is
 
     /// @notice Deliberately independent of isImmediateWithdrawEnabled — see this variable's own
     ///         storage docs above for why the two flags must not be coupled.
+    /// @dev The manager may switch this either way. The factoryOwner may only switch it OFF: it is
+    ///      the independent emergency stop for a compromised or colluding manager (who otherwise
+    ///      controls the attester rotation and the volume cap), and it can never be used to turn
+    ///      the feature on. Switching off also clears any pending attester proposal, so a
+    ///      malicious proposal that is still inside its rotation delay cannot be activated later.
     function setAttestedWithdrawEnabled(bool enabled) external {
-        if (msg.sender != _manager()) revert OnlyManager();
+        if (msg.sender != _manager()) {
+            if (enabled || msg.sender != IPoolManagerLogic(poolManagerLogic).factoryOwner()) {
+                revert OnlyManager();
+            }
+        }
         isAttestedWithdrawEnabled = enabled;
+        if (!enabled) {
+            pendingWithdrawalAttester = address(0);
+            pendingAttesterActivationTime = 0;
+        }
         emit AttestedWithdrawEnabledSet(enabled);
     }
 
@@ -1140,23 +1153,7 @@ contract PoolLogic is
         _updateFeesAndRewardsFor(plan.user);
 
         WithdrawalPlanLib.PlanExecutionResult memory result = WithdrawalPlanLib
-            .executeWithdrawalPlan(
-                WithdrawalPlanLib.ExecutePlanInput({
-                    fusd: fusd,
-                    poolManagerLogic: poolManagerLogic,
-                    manager: _manager(),
-                    withdrawalAttester: withdrawalAttester,
-                    nonceAlreadyConsumed: consumedPlanNonce[plan.user][plan.nonce],
-                    attestedWithdrawDecayWindow: attestedWithdrawDecayWindow,
-                    maxAttestedWithdrawVolumePerWindow: maxAttestedWithdrawVolumePerWindow,
-                    currentVolumeTimestamp: attestedWithdrawVolume.lastWithdrawTimestamp,
-                    currentVolumeAccumulated: attestedWithdrawVolume.accumulatedValueUsd,
-                    maxSurchargeBps: maxSurchargeBps
-                }),
-                plan,
-                attesterSignature,
-                complexAssetsData
-            );
+            .executeWithdrawalPlan(plan, attesterSignature, complexAssetsData);
 
         consumedPlanNonce[plan.user][plan.nonce] = true;
         attestedWithdrawVolume = AttestedWithdrawVolume(

@@ -58,6 +58,24 @@ interface IPoolLogic {
 
     function reservedAssetBalance(address asset) external view returns (uint256);
 
+    // Attested-withdrawal configuration, read by WithdrawalPlanLib through self-calls so that
+    // PoolLogic need not encode ten storage reads into a struct on every call (bytecode).
+    // Implemented by PoolLogic's public state variables of the same names.
+    function withdrawalAttester() external view returns (address);
+
+    function consumedPlanNonce(address user, uint256 nonce) external view returns (bool);
+
+    function attestedWithdrawDecayWindow() external view returns (uint256);
+
+    function maxAttestedWithdrawVolumePerWindow() external view returns (uint256);
+
+    function attestedWithdrawVolume()
+        external
+        view
+        returns (uint64 lastWithdrawTimestamp, uint128 accumulatedValueUsd);
+
+    function maxSurchargeBps() external view returns (uint256);
+
     /// @notice FNA-34: cumulative net yield ever routed into the staking reward index
     ///         (_accrueYield()'s appliedNetYield), regardless of whether any staker has
     ///         harvested it yet. Together with totalRewardHarvested below, the difference is

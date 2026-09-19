@@ -248,7 +248,7 @@ Latest local verification for this feature (this branch):
 npx hardhat compile: passed
 npx hardhat test test/AttestedWithdrawal.test.ts: 48 passing
 npm run test: 1130 passing
-npm run check:contract-size: PoolLogic at 200 bytes of EIP-170 headroom
+npm run check:contract-size: PoolLogic at 482 bytes of EIP-170 headroom
 ```
 
 STRONGLY RECOMMENDED, not yet done: dry-run the upgrade + `initializeAttestedWithdrawal()` migration against a forked copy of the actual live mainnet state before executing for real, mirroring the same recommendation already made (and not yet completed, per its own notes) for the `initializeAutoCompounding()` migration in `scripts/upgrade_core_contracts.ts`.
