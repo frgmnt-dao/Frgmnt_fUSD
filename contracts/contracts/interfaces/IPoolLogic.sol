@@ -13,6 +13,17 @@ interface IPoolLogic {
     /// @dev See docs/attested-selective-withdrawal-design.md's "Data Structures" section.
     struct AssetAllocation {
         address asset;
+        // The asset guard the attester validated for `asset`. Must equal the pool's CURRENT
+        // getAssetGuard(asset) at execution (else GuardMismatch): guards are governed globally
+        // per asset type and can be swapped, so without this binding a signed plan would silently
+        // execute against replacement guard code the attester never reviewed.
+        address guard;
+        // Optional position-level selection inside a guard that fronts several positions
+        // (Aave V4 Spoke reserveIds, Morpho Blue market ids). Empty = the whole asset, exactly as
+        // before. Non-empty = ONLY these positions, each drawn at `portion` of its own value;
+        // requires the guard to implement ISubPositionGuard, strictly ascending ids, and
+        // !useFixedAmount, no complex data and no reserved balance for the asset.
+        bytes32[] positionIds;
         bool useFixedAmount;
         uint256 portion; // 1e18-scale, meaningful iff !useFixedAmount
         // raw asset units, meaningful iff useFixedAmount. Converted on-chain to a portion via
@@ -140,4 +151,16 @@ interface IPoolLogic {
     /// @dev The live-computed pool-usage surcharge exceeds the ceiling the attester signed into
     ///      plan.maxAcceptableSurchargeBps. Checked before the per-asset loop, so it fails cheaply.
     error SurchargeTooHigh();
+
+    /// @dev alloc.guard differs from the pool's current guard for alloc.asset.
+    error GuardMismatch();
+    /// @dev positionIds combined with something a position-level withdrawal does not support
+    ///      (fixed amount, complex data, a reserved balance on the asset).
+    error InvalidSubsetAllocation();
+    /// @dev The asset's guard does not implement ISubPositionGuard.
+    error SubsetNotSupported();
+    /// @dev positionIds not strictly ascending (also rules out duplicates).
+    error PositionIdsNotAscending();
+    /// @dev More positionIds than MAX_POSITION_IDS_PER_ALLOCATION.
+    error TooManyPositionIds();
 }

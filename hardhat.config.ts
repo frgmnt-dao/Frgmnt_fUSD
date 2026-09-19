@@ -194,6 +194,16 @@ const config: HardhatUserConfig = {
         },
       },
 
+      // Subclass of the validated guard above: must be compiled with the SAME settings so the
+      // inherited (validated) code is generated under the same optimizer/viaIR configuration.
+      'contracts/contracts/guards/assetGuards/MorphoBlueLendingPoolSelectiveAssetGuard.sol': {
+        version: '0.8.24',
+        settings: {
+          optimizer: { enabled: true, runs: 1 },
+          viaIR: true,
+        },
+      },
+
       '@uniswap/v3-core/contracts/**/*.sol': {
         version: '0.7.6',
         settings: {

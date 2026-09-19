@@ -155,6 +155,11 @@ Note on step 11: the nonce is written back to storage only after `WithdrawalPlan
 /// @notice One asset's contribution to a selective withdrawal.
 struct AssetAllocation {
     address asset;          // must currently be in PoolManagerLogic.getSupportedAssets()
+    address guard;          // the asset guard the attester validated; must equal the pool's CURRENT
+                            // getAssetGuard(asset) or the plan reverts GuardMismatch (see Position-Level
+                            // Selection below)
+    bytes32[] positionIds;  // optional: draw ONLY these positions inside a guard that fronts several
+                            // (Spoke reserveIds, Morpho Blue market ids). Empty = whole asset.
     bool useFixedAmount;     // false = `portion` is a fraction of this asset's own guard-reported
                              //         balance (1e18 = 100%, same convention as IAssetGuard.withdrawProcessing)
                              // true  = `portion` is ignored; withdraw exactly `fixedAmount` raw units
@@ -201,11 +206,11 @@ uint256 public constant MAX_MIN_VALUE_OUT_BPS = 100; // 1% — proposed default,
 
 ```solidity
 bytes32 private constant ASSET_ALLOCATION_TYPEHASH = keccak256(
-    "AssetAllocation(address asset,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
+    "AssetAllocation(address asset,address guard,bytes32[] positionIds,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
 );
 
 bytes32 private constant WITHDRAWAL_PLAN_TYPEHASH = keccak256(
-    "WithdrawalPlan(address user,uint256 fusdAmount,uint256 minValueOutBps,AssetAllocation[] allocations,uint256 nonce,uint256 deadline)AssetAllocation(address asset,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
+    "WithdrawalPlan(address user,uint256 fusdAmount,uint256 minValueOutBps,AssetAllocation[] allocations,uint256 nonce,uint256 deadline,uint256 maxAcceptableSurchargeBps)AssetAllocation(address asset,address guard,bytes32[] positionIds,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
 );
 ```
 
@@ -244,6 +249,37 @@ As implemented, the bulk of this logic (everything from signature verification t
     - `completeBefore - completeAfter <= target + DUST_TOLERANCE` (fixed, protocol-level upper bound; **not** attester-adjustable; `target = fairFusd - surchargeAmount`)
     - `completeBefore - completeAfter >= target - (target * plan.minValueOutBps / 10_000)` (attester-adjustable lower bound, capped by `MAX_MIN_VALUE_OUT_BPS` — see [Value Conservation](#value-conservation-the-core-safety-invariant))
 11. **Accounting & events, back in `PoolLogic`.** Mark the nonce consumed; write the new circuit-breaker accumulator; decrement `accountedAssets` by the realized value delta (via the same `computeAccountedAssetsReduction` the pro-rata path uses); emit `AttestedWithdrawPlanExecuted(user, nonce)` alongside the existing `CashWithdrawImmediateProRata` event. `CashWithdrawImmediateProRata` is deliberately reused rather than defining a second, near-identical dynamic-array-encoding event purely to save bytecode — an attested selective withdrawal is **not** a genuine uniform pro-rata one, so off-chain consumers must treat any `CashWithdrawImmediateProRata` emitted alongside `AttestedWithdrawPlanExecuted` in the same transaction as attester-composed, and key off the paired event (present only on this path) to tell the two apart.
+
+### Position-Level Selection (asset, guard, positions)
+
+A supported asset is `{address asset, bool isDeposit}` and its behavior is defined by the guard registered for it (`getAssetGuard(asset)`, set globally per asset type by governance). Three kinds of guard exist, and a plan has to be able to address all of them:
+
+| Guard kind                                                      | What `asset` is                     | Positions behind it                                     |
+| --------------------------------------------------------------- | ----------------------------------- | ------------------------------------------------------- |
+| One position per asset (ERC20, Morpho Vault V2, Aave V4 Tokenization) | the token / vault / tokenization    | exactly one — nothing to select                         |
+| Pseudo-asset fronting many positions (Morpho Blue, Aave V4 Spoke) | the Morpho singleton / the Spoke    | markets (`Id`) / reserves (`reserveId`)                 |
+| Aave V3 pool, Uniswap V3 position manager                       | the pool / the NFT manager          | cross-collateral reserves / NFTs — **not selectable**   |
+
+So each `AssetAllocation` names, and the attester signs: **the asset, the guard, the positions inside the guard, and the amount** (the surcharge is a plan-level field).
+
+**Guard binding (all allocations).** `alloc.guard` must equal the pool's current `getAssetGuard(asset)` (`GuardMismatch`), and the guard must be non-zero. Guards are governed per asset type and can be swapped; without the binding, a plan the attester signed against reviewed guard code would silently execute against a replacement.
+
+**Position selection (`positionIds` non-empty).** Only the listed positions are drawn, each at `portion` of its own value. Rules, all enforced on-chain:
+
+- the guard must implement `ISubPositionGuard` (`isSubPositionGuard()` + `withdrawProcessingSubset()`); otherwise `SubsetNotSupported` — a plan is never silently widened to the whole asset;
+- ids strictly ascending (`PositionIdsNotAscending` — also rules out duplicates), at most 32 per allocation (`TooManyPositionIds`);
+- not combined with `useFixedAmount`, complex-asset data, or a reserved balance on the asset (`InvalidSubsetAllocation`);
+- `portion <= 1e18` (`InvalidPortion`);
+- the guard itself rejects any id that is not currently tracked for the pool.
+
+**Where the selection logic lives — validated guards are not edited.** Two new contracts inherit the validated guards and only *add* the subset entry point, reusing the validated `internal` helpers:
+
+- `AaveV4SpokeSelectiveAssetGuard is AaveV4SpokeAssetGuard` — iterates the selected reserveIds instead of every tracked reserve, through the base contract's own per-reserve routine, so Hub-liquidity capping and the shared liquidity ledger apply unchanged; the ledger now only counts *selected* reserves, so an illiquid reserve the plan did not pick can no longer starve one it did.
+- `MorphoBlueLendingPoolSelectiveAssetGuard is MorphoBlueLendingPoolAssetGuard` — reuses the base collectors and no-debt transaction builder, filters their output to the selected market ids, and sizes the liquidity ceiling as the minimum across the *selected* markets only (the base guard uses the minimum across all tracked markets, so one near-fully-utilised market throttles everything). **v1 scope:** a selected market with an open borrow position reverts `SubsetDebtUnsupported`; leveraged unwinds stay on the pro-rata path. Morpho markets are isolated, so drawing from a debt-free market cannot affect the health of a different, levered one, which is simply left untouched.
+
+Deploying either subclass means governance re-pointing the asset type's guard (`setAssetGuard`, global per asset type, ordinary Governance action). The Morpho guard carries owner-set configuration (`uniV3Fee`, `defaultSlippageBps`, buffers, `requiresApproveReset`) that the new instance starts without and must be re-seeded to match before the swap.
+
+**Why the value bound is what makes this safe.** The guards' own arithmetic is not the security boundary — the plan's two-sided bound is, and it is measured on the uncapped complete NAV (see [Value Conservation](#value-conservation-the-core-safety-invariant)). A subset guard that sized a leg wrongly, or a plan that picked positions summing to more or less than the entitlement, fails `ValueConservationViolated` and reverts atomically.
 
 ### Value Conservation: the core safety invariant
 
@@ -385,7 +421,7 @@ target = fairFusd - surchargeAmount
 
 ### Interaction with Existing Systems
 
-- **Guards are untouched.** Every `IAssetGuard` / `IComplexAssetGuard` / `ISlippageCheckingGuard` implementation works as-is; this feature only relocates and reuses the _orchestration_ around them (see [Bytecode Size Budget](#implementation-note-bytecode-size-budget) for exactly how `_withdrawProcessing`'s equivalent logic moves into a shared library used by both the existing pro-rata path and this new one).
+- **Validated guards are untouched.** Every `IAssetGuard` / `IComplexAssetGuard` / `ISlippageCheckingGuard` implementation works as-is with whole-asset allocations; position-level selection is provided by two new *subclass* guards (see [Position-Level Selection](#position-level-selection-asset-guard-positions)), not by editing the validated ones. This feature otherwise only relocates and reuses the _orchestration_ around them (see [Bytecode Size Budget](#implementation-note-bytecode-size-budget) for exactly how `_withdrawProcessing`'s equivalent logic moves into a shared library used by both the existing pro-rata path and this new one).
 - **`reservedAssetBalance` (queued-withdrawal reservations)** is respected automatically, for the same reason: the per-asset withdrawal logic already subtracts reserved balance before computing a withdrawable amount regardless of which entrypoint calls it, and this function doesn't bypass that path.
 - **Cooldown** (`TokenLogic.getExitRemainingCooldown`) is enforced identically to `withdrawCashImmediate()`. This feature changes _which assets_ a withdrawal draws from, not _whether_ a withdrawal is allowed to happen at all.
 - **`accountedAssets`** bookkeeping is unchanged in mechanism — same before/after fund-value delta subtraction — just gated by the new two-sided bound instead of the one-sided bound.
@@ -420,7 +456,7 @@ Given that, the better move is not to duplicate `_withdrawProcessing`'s logic in
 
 **The [Surcharge](#surcharge-pricing-the-composition-skew-externality) addition, shipped afterward, spent most of that margin back down.** Its own logic (the pressure/target math, the new signed field, the new event field) lives almost entirely in `WithdrawalPlanLib`, which has ample room — but the new `factoryOwner`-gated setter, the new storage variable's public getter, and the extra `initializeAttestedWithdrawal` parameter all had to land in `PoolLogic` itself, where headroom was already thin. The first working version of this addition left `PoolLogic` at just **6 bytes of headroom** — technically within the EIP-170 limit, but far too little margin to ship: any later change, even a single new `require` string, would have broken deployability outright. The fix was extending this section's own established pattern one step further: `CashWithdrawImmediateProRata` and `AttestedWithdrawPlanExecuted` are now `emit`ted from directly inside `WithdrawalPlanLib.executeWithdrawalPlan()`, not from `PoolLogic`, moving their (non-trivial, dynamic-array-containing) event-encoding bytecode out of the constrained contract entirely. This relies on one additional piece of EVM behavior beyond what the rest of this library already leans on: a `delegatecall` preserves the caller's address for the `LOG` opcode the same way it preserves it for `SSTORE`, so an event emitted from inside the library is indistinguishable on-chain — same topic0, same emitting address — from one `PoolLogic` emitted itself. `PoolLogic` still _declares_ both events (for ABI completeness, so an off-chain indexer reading `PoolLogic`'s own ABI can still decode them), it just no longer contains the code to emit them from this path. That single change brought headroom back up to **200 bytes** — tighter than before the surcharge, but a real, workable margin rather than a rounding error.
 
-**Later reviews spent and recovered more of it.** Adding a `factoryOwner` emergency stop cost 163 bytes and the position-selection fields on `AssetAllocation` cost a further 140, which together would have exceeded the limit. The recovery came from code this feature owns: `PoolLogic` used to build a ten-field struct of storage reads and hand it to `WithdrawalPlanLib` on every plan withdrawal, but every one of those values already has a public getter. The library now reads them itself through self-calls (the same pattern it already used for `reservedAssetBalance`), at the very start of the call and before any external interaction, so the values are identical to what `PoolLogic` passed. That freed about 394 bytes, and headroom after the emergency stop is **482 bytes**. The cost is a few thousand gas per plan withdrawal for the extra view calls.
+**Later reviews spent and recovered more of it.** Adding a `factoryOwner` emergency stop cost 163 bytes and the position-selection fields on `AssetAllocation` cost a further 140, which together would have exceeded the limit. The recovery came from code this feature owns: `PoolLogic` used to build a ten-field struct of storage reads and hand it to `WithdrawalPlanLib` on every plan withdrawal, but every one of those values already has a public getter. The library now reads them itself through self-calls (the same pattern it already used for `reservedAssetBalance`), at the very start of the call and before any external interaction, so the values are identical to what `PoolLogic` passed. That freed about 394 bytes, and headroom after the emergency stop was **482 bytes**. The cost is a few thousand gas per plan withdrawal for the extra view calls. The final schema (`guard` and `positionIds` on `AssetAllocation`, which enlarge the calldata decoder `PoolLogic` needs for the plan struct) brought headroom to **302 bytes**; every new check itself (guard binding, subset dispatch, the id rules) lives in `WithdrawalPlanLib`.
 
 **Delegatecall-into-a-library carries one well-known, high-severity hazard that must be designed against explicitly: the library must never declare its own storage variables.** A library used via `delegatecall` executes with the _caller's_ storage — if the library itself declares state variables, they occupy the caller's storage slots by position, and a mismatch between what the library "thinks" is at a given slot and what `PoolLogic` actually has there causes silent, arbitrary storage corruption. This is precisely the bug class behind the 2017 Parity multisig library freeze (~$150M+ locked), which resulted from exactly this pattern: a delegatecall-based library that itself held mutable state. `WithdrawalPlanLib` (and any function newly extracted into it, including `_withdrawProcessing`) must be written so every function takes all needed values as explicit parameters and returns explicit outputs — `PoolLogic` performs every `SSTORE` itself, in its own code, after the library call returns. None of the new storage this feature needs (`withdrawalAttester`, `consumedPlanNonce`, `isAttestedWithdrawEnabled`, the circuit-breaker struct, the pending-attester rotation state) should ever be read or written from inside the library directly — only ever passed in and handed back.
 

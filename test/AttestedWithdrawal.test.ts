@@ -136,6 +136,8 @@ async function deployAttestedWithdrawalFixture() {
     ],
     AssetAllocation: [
       { name: 'asset', type: 'address' },
+      { name: 'guard', type: 'address' },
+      { name: 'positionIds', type: 'bytes32[]' },
       { name: 'useFixedAmount', type: 'bool' },
       { name: 'portion', type: 'uint256' },
       { name: 'fixedAmount', type: 'uint256' },
@@ -283,6 +285,14 @@ describe('PoolLogic — attested selective withdrawal', () => {
   }
 
   async function signPlan(fixture: any, plan: any, signer: any) {
+    // Fill the guard binding and (empty) position selection on allocations that don't set them,
+    // mutating the plan in place so the plan later submitted to the contract matches what was
+    // signed. Tests that exercise a wrong guard or a position selection set the fields explicitly.
+    const defaultGuard = fixture.assetGuard ? await fixture.assetGuard.getAddress() : undefined;
+    for (const a of plan.allocations) {
+      if (a.guard === undefined) a.guard = defaultGuard;
+      if (a.positionIds === undefined) a.positionIds = [];
+    }
     const signature = await signer.signTypedData(fixture.domain, fixture.types, plan);
     return signature;
   }
@@ -595,6 +605,320 @@ describe('PoolLogic — attested selective withdrawal', () => {
 
       await expectRevert(
         pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+        'ValueConservationViolated',
+      );
+    });
+  });
+
+  describe('position-level selection (guard binding + positionIds)', () => {
+    const id = (n: number) => ethers.zeroPadValue(ethers.toBeHex(n), 32);
+
+    async function withSubGuard() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { poolManager, asset, user } = fixture;
+      const Sub = await ethers.getContractFactory('TestSubPositionAssetGuard');
+      const subGuard = await Sub.deploy();
+      await subGuard.waitForDeployment();
+      await poolManager.setAssetGuard(await asset.getAddress(), await subGuard.getAddress());
+      await fundPoolAndUser(fixture);
+      return {
+        ...fixture,
+        subGuard,
+        userAddress: await user.getAddress(),
+        assetAddress: await asset.getAddress(),
+        subGuardAddress: await subGuard.getAddress(),
+      };
+    }
+
+    function subsetPlan(f: any, over: any = {}) {
+      return buildPlan({
+        ...f,
+        allocations: [
+          {
+            asset: f.assetAddress,
+            guard: f.subGuardAddress,
+            positionIds: [id(1), id(2)],
+            useFixedAmount: false,
+            // 2 of 4 positions at 20%: 1000 * 0.2 * 2/4 = 100 = fusdAmount
+            portion: ethers.parseUnits('0.2', 18),
+            fixedAmount: 0n,
+            ...over,
+          },
+        ],
+      });
+    }
+
+    it('withdraws from the selected positions and satisfies value conservation', async () => {
+      const f = await withSubGuard();
+      const plan = subsetPlan(f);
+      const signature = await signPlan(f, plan, f.attester);
+      const before = await f.asset.balanceOf(f.userAddress);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, signature, []);
+      expect((await f.asset.balanceOf(f.userAddress)) - before).to.equal(amount);
+    });
+
+    it('still enforces both value-conservation bounds on a position-level plan', async () => {
+      const f = await withSubGuard();
+      // Under-delivery: 10% of the same two positions pays half of what fusdAmount entitles.
+      let plan = subsetPlan(f, { portion: ethers.parseUnits('0.1', 18) });
+      let sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+      // Over-delivery: three positions at 20% pays 1.5x.
+      plan = subsetPlan(f, { positionIds: [id(1), id(2), id(3)] });
+      sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it('binds the guard into the signature and the execution (GuardMismatch)', async () => {
+      const f = await withSubGuard();
+      const wrong = ethers.Wallet.createRandom().address;
+      const plan = subsetPlan(f, { guard: wrong });
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'GuardMismatch',
+      );
+    });
+
+    it('rejects a plan signed for the previous guard after governance swaps the guard', async () => {
+      const f = await withSubGuard();
+      const plan = subsetPlan(f);
+      const sig = await signPlan(f, plan, f.attester);
+      const Sub = await ethers.getContractFactory('TestSubPositionAssetGuard');
+      const replacement = await Sub.deploy();
+      await replacement.waitForDeployment();
+      await f.poolManager.setAssetGuard(f.assetAddress, await replacement.getAddress());
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'GuardMismatch',
+      );
+    });
+
+    it('binds guard and positionIds into the EIP-712 digest (tampering invalidates the signature)', async () => {
+      const f = await withSubGuard();
+      const plan = subsetPlan(f);
+      const sig = await signPlan(f, plan, f.attester);
+      const tamperedIds = {
+        ...plan,
+        allocations: [{ ...plan.allocations[0], positionIds: [id(1), id(3)] }],
+      };
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(tamperedIds, sig, []),
+        'InvalidAttesterSignature',
+      );
+      const emptied = { ...plan, allocations: [{ ...plan.allocations[0], positionIds: [] }] };
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(emptied, sig, []),
+        'InvalidAttesterSignature',
+      );
+    });
+
+    it('rejects positionIds against a guard that is not a sub-position guard (fail closed)', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      await fundPoolAndUser(fixture);
+      const { asset, assetGuard, user, attester, pool } = fixture;
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const plan = buildPlan({
+        ...fixture,
+        userAddress,
+        allocations: [
+          {
+            asset: assetAddress,
+            guard: await assetGuard.getAddress(),
+            positionIds: [id(1)],
+            useFixedAmount: false,
+            portion: ethers.parseUnits('0.1', 18),
+            fixedAmount: 0n,
+          },
+        ],
+      });
+      const sig = await signPlan(fixture, plan, attester);
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'SubsetNotSupported',
+      );
+    });
+
+    it('rejects unsorted, duplicate and over-long id lists', async () => {
+      const f = await withSubGuard();
+      for (const [ids, err] of [
+        [[id(2), id(1)], 'PositionIdsNotAscending'],
+        [[id(1), id(1)], 'PositionIdsNotAscending'],
+        [Array.from({ length: 33 }, (_, i) => id(i + 1)), 'TooManyPositionIds'],
+      ] as const) {
+        const plan = subsetPlan(f, { positionIds: [...ids] });
+        const sig = await signPlan(f, plan, f.attester);
+        await expectRevert(
+          f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+          err,
+        );
+      }
+    });
+
+    it('rejects a fixed amount, complex data, or an out-of-range portion combined with positionIds', async () => {
+      const f = await withSubGuard();
+      let plan = subsetPlan(f, { useFixedAmount: true, fixedAmount: amount });
+      let sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'InvalidSubsetAllocation',
+      );
+
+      plan = subsetPlan(f);
+      sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool
+          .connect(f.user)
+          .withdrawCashImmediateWithPlan(plan, sig, [
+            { supportedAsset: f.assetAddress, withdrawData: '0x', slippageTolerance: 0 },
+          ]),
+        'InvalidSubsetAllocation',
+      );
+
+      plan = subsetPlan(f, { portion: ethers.parseUnits('1', 18) + 1n });
+      sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'InvalidPortion',
+      );
+    });
+
+    it('keeps accountedAssets equal to NAV after a position-level withdrawal', async () => {
+      const f = await withSubGuard();
+      const plan = subsetPlan(f);
+      const sig = await signPlan(f, plan, f.attester);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      expect(await f.pool.accountedAssets()).to.equal(poolAsset - amount);
+      expect(await f.asset.balanceOf(await f.pool.getAddress())).to.equal(poolAsset - amount);
+    });
+  });
+
+  describe('real Aave V4 Spoke selective guard through PoolLogic', () => {
+    const id = (n: number) => ethers.zeroPadValue(ethers.toBeHex(n), 32);
+
+    async function setupSpokePool() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { poolManager, pool, fusd, user } = fixture;
+
+      const manager = await (await ethers.getContractFactory('AaveV4SpokeManager')).deploy();
+      const taker = await (
+        await ethers.getContractFactory('MockAaveV4TakerPositionManager')
+      ).deploy();
+      const giver = await (
+        await ethers.getContractFactory('MockAaveV4GiverPositionManager')
+      ).deploy();
+      const guard = await (
+        await ethers.getContractFactory('AaveV4SpokeSelectiveAssetGuard')
+      ).deploy(await manager.getAddress(), await taker.getAddress(), await giver.getAddress());
+      const spoke = await (await ethers.getContractFactory('MockAaveV4Spoke')).deploy();
+
+      const Token = await ethers.getContractFactory('MockERC20Custom');
+      const usdc = await Token.deploy('USDC', 'USDC', 6);
+      const weth = await Token.deploy('WETH', 'WETH', 18);
+      const TestAssetGuard = await ethers.getContractFactory('TestAssetGuard');
+      const plainGuard = await TestAssetGuard.deploy();
+
+      const poolAddr = await pool.getAddress();
+      const spokeAddr = await spoke.getAddress();
+      const usdcAddr = await usdc.getAddress();
+      const wethAddr = await weth.getAddress();
+
+      // Underlyings: priced, plain-guarded, never held idle by the pool.
+      await poolManager.setSupportedAsset(usdcAddr, true, ethers.parseUnits('1', 18), 6);
+      await poolManager.setAssetGuard(usdcAddr, await plainGuard.getAddress());
+      await poolManager.setSupportedAsset(wethAddr, true, ethers.parseUnits('2000', 18), 18);
+      await poolManager.setAssetGuard(wethAddr, await plainGuard.getAddress());
+      // The Spoke itself is the supported (pre-valued) asset, fronted by the selective guard.
+      await poolManager.setSupportedAsset(spokeAddr, true, ethers.parseUnits('1', 18), 18);
+      await poolManager.setAssetGuard(spokeAddr, await guard.getAddress());
+
+      await manager.setPoolReserves(poolAddr, spokeAddr, [1n, 2n]);
+      await spoke.setReserveUnderlying(1n, usdcAddr);
+      await spoke.setReserveUnderlying(2n, wethAddr);
+      // $1000 USDC in reserve 1, $1000 WETH (0.5 @ $2000) in reserve 2; the Spoke holds the tokens.
+      await spoke.setSuppliedAssets(1n, poolAddr, ethers.parseUnits('1000', 6));
+      await spoke.setSuppliedAssets(2n, poolAddr, ethers.parseUnits('0.5', 18));
+      await usdc.mint(spokeAddr, ethers.parseUnits('1000', 6));
+      await weth.mint(spokeAddr, ethers.parseUnits('0.5', 18));
+
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('2000', 18));
+
+      return {
+        ...fixture,
+        guard,
+        spoke,
+        usdc,
+        weth,
+        spokeAddr,
+        poolAddr,
+        userAddress: await user.getAddress(),
+      };
+    }
+
+    function spokePlan(f: any, ids: string[], portion: bigint) {
+      return buildPlan({
+        ...f,
+        allocations: [
+          {
+            asset: f.spokeAddr,
+            guard: undefined,
+            positionIds: ids,
+            useFixedAmount: false,
+            portion,
+            fixedAmount: 0n,
+          },
+        ],
+      });
+    }
+
+    it('withdraws only the selected reserve even though the other reserve is completely illiquid', async () => {
+      const f = await setupSpokePool();
+      // Reserve 1's Hub is empty: it can deliver nothing right now.
+      await f.spoke.setAvailableLiquidity(1n, 0n);
+
+      const plan = spokePlan(f, [id(2)], ethers.parseUnits('0.1', 18)); // 10% of $1000 = $100
+      plan.allocations[0].guard = await f.guard.getAddress();
+      const sig = await signPlan(f, plan, f.attester);
+
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+
+      expect(await f.weth.balanceOf(f.userAddress)).to.equal(ethers.parseUnits('0.05', 18));
+      expect(await f.usdc.balanceOf(f.userAddress)).to.equal(0n);
+      // Reserve 1 untouched, reserve 2 reduced by exactly the selected slice.
+      expect(await f.spoke.getUserSuppliedAssets(1n, f.poolAddr)).to.equal(
+        ethers.parseUnits('1000', 6),
+      );
+      expect(await f.spoke.getUserSuppliedAssets(2n, f.poolAddr)).to.equal(
+        ethers.parseUnits('0.45', 18),
+      );
+      // accountedAssets tracks NAV: 2000 - 100.
+      expect(await f.pool.accountedAssets()).to.equal(ethers.parseUnits('1900', 18));
+    });
+
+    it('rejects a reserve id the pool does not track, and a plan that draws the wrong value', async () => {
+      const f = await setupSpokePool();
+      let plan = spokePlan(f, [id(9)], ethers.parseUnits('0.1', 18));
+      plan.allocations[0].guard = await f.guard.getAddress();
+      let sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'InvalidPositionId',
+      );
+
+      // Both reserves at 10% pays $200 against a $100 entitlement: the upper bound catches it.
+      plan = spokePlan(f, [id(1), id(2)], ethers.parseUnits('0.1', 18));
+      plan.allocations[0].guard = await f.guard.getAddress();
+      sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
         'ValueConservationViolated',
       );
     });
@@ -976,6 +1300,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
       allocations: [
         {
           asset: await zeroAsset.getAddress(),
+          guard: await zeroGuard.getAddress(),
           useFixedAmount: true,
           portion: 0n,
           fixedAmount: 1n,
@@ -1271,6 +1596,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
       const assetAddress = await asset.getAddress();
       const chainId = (await ethers.provider.getNetwork()).chainId;
       const localFixture = {
+        assetGuard,
         domain: {
           name: 'Frgmnt PoolLogic',
           version: '1',
@@ -1289,6 +1615,8 @@ describe('PoolLogic — attested selective withdrawal', () => {
           ],
           AssetAllocation: [
             { name: 'asset', type: 'address' },
+            { name: 'guard', type: 'address' },
+            { name: 'positionIds', type: 'bytes32[]' },
             { name: 'useFixedAmount', type: 'bool' },
             { name: 'portion', type: 'uint256' },
             { name: 'fixedAmount', type: 'uint256' },

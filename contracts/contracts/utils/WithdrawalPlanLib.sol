@@ -13,6 +13,7 @@ import { IManaged } from "../interfaces/IManaged.sol";
 import { IHasSupportedAsset } from "../interfaces/IHasSupportedAsset.sol";
 import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
 import { IComplexAssetGuard } from "../interfaces/guards/IComplexAssetGuard.sol";
+import { ISubPositionGuard } from "../interfaces/guards/ISubPositionGuard.sol";
 import { FundCalculationLibrary } from "./FundCalculationLibrary.sol";
 
 /// @dev Minimal, library-local mirror of PoolLogic.sol's file-scope ITokenLogic interface —
@@ -94,6 +95,11 @@ library WithdrawalPlanLib {
     ///      what's ever written to storage, including by a compromised or careless factoryOwner.
     uint256 private constant MAX_SURCHARGE_BPS_CEILING = 100; // 1%
 
+    /// @dev Upper bound on positionIds per allocation. Each id costs a few storage reads inside the
+    ///      guard (and an O(n^2) membership scan), so an unbounded array from a signed plan would
+    ///      only ever be a gas hazard; real pools track far fewer positions per guard.
+    uint256 private constant MAX_POSITION_IDS_PER_ALLOCATION = 32;
+
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256(
             "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -103,12 +109,12 @@ library WithdrawalPlanLib {
 
     bytes32 private constant ASSET_ALLOCATION_TYPEHASH =
         keccak256(
-            "AssetAllocation(address asset,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
+            "AssetAllocation(address asset,address guard,bytes32[] positionIds,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
         );
 
     bytes32 private constant WITHDRAWAL_PLAN_TYPEHASH =
         keccak256(
-            "WithdrawalPlan(address user,uint256 fusdAmount,uint256 minValueOutBps,AssetAllocation[] allocations,uint256 nonce,uint256 deadline,uint256 maxAcceptableSurchargeBps)AssetAllocation(address asset,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
+            "WithdrawalPlan(address user,uint256 fusdAmount,uint256 minValueOutBps,AssetAllocation[] allocations,uint256 nonce,uint256 deadline,uint256 maxAcceptableSurchargeBps)AssetAllocation(address asset,address guard,bytes32[] positionIds,bool useFixedAmount,uint256 portion,uint256 fixedAmount)"
         );
 
     /// @dev Decayed-accumulator state for the attested-withdraw circuit breaker — field layout
@@ -168,9 +174,6 @@ library WithdrawalPlanLib {
         uint256 expectedValue;
         IAssetGuard.MultiTransaction[] transactions;
         bool regularProcessing;
-        uint256 txCount;
-        uint256 assetBalanceBefore;
-        uint256 assetBalanceAfter;
         uint256 actualValue;
     }
 
@@ -261,27 +264,9 @@ library WithdrawalPlanLib {
                 .withdrawProcessing(address(this), asset, portion, to);
         }
 
-        v.txCount = v.transactions.length;
-        if (v.txCount > 0) {
-            if (withdrawAsset != address(0)) {
-                v.assetBalanceBefore = IERC20(withdrawAsset).balanceOf(address(this));
-            }
-
-            for (uint256 i = 0; i < v.txCount; ++i) {
-                (bool success, bytes memory returndata) = v.transactions[i].to.call(
-                    v.transactions[i].txData
-                );
-                _checkCallResult(v.transactions[i].txData, success, returndata);
-                externalProcessed = true;
-            }
-
-            if (withdrawAsset != address(0)) {
-                v.assetBalanceAfter = IERC20(withdrawAsset).balanceOf(address(this));
-                if (v.assetBalanceAfter > v.assetBalanceBefore) {
-                    withdrawAmount += (v.assetBalanceAfter - v.assetBalanceBefore);
-                }
-            }
-        }
+        bool ran;
+        (withdrawAmount, ran) = _runTransactions(v.transactions, withdrawAsset, withdrawAmount);
+        externalProcessed = ran;
 
         if (
             v.regularProcessing && complexData.slippageTolerance != 0 && withdrawAsset != address(0)
@@ -298,6 +283,69 @@ library WithdrawalPlanLib {
         }
 
         return (withdrawAsset, withdrawAmount, externalProcessed);
+    }
+
+    /// @dev Executes a guard's planned transactions and returns the delivered amount: the guard's
+    ///      own `withdrawAmount` plus any measured balance delta of `withdrawAsset` (when the guard
+    ///      names one). Shared by the whole-asset path (withdrawProcessing) and the position-level
+    ///      path (_withdrawSubset) so both run guard output through identical, single code.
+    function _runTransactions(
+        IAssetGuard.MultiTransaction[] memory transactions,
+        address withdrawAsset,
+        uint256 withdrawAmount
+    ) private returns (uint256, bool externalProcessed) {
+        uint256 txCount = transactions.length;
+        if (txCount == 0) return (withdrawAmount, false);
+
+        uint256 balanceBefore;
+        if (withdrawAsset != address(0)) {
+            balanceBefore = IERC20(withdrawAsset).balanceOf(address(this));
+        }
+
+        for (uint256 i = 0; i < txCount; ++i) {
+            (bool success, bytes memory returndata) = transactions[i].to.call(
+                transactions[i].txData
+            );
+            _checkCallResult(transactions[i].txData, success, returndata);
+            externalProcessed = true;
+        }
+
+        if (withdrawAsset != address(0)) {
+            uint256 balanceAfter = IERC20(withdrawAsset).balanceOf(address(this));
+            if (balanceAfter > balanceBefore) {
+                withdrawAmount += (balanceAfter - balanceBefore);
+            }
+        }
+        return (withdrawAmount, externalProcessed);
+    }
+
+    /// @dev Position-level withdrawal: draws ONLY `positionIds` from a guard that fronts several
+    ///      positions. No balance sizing, slippage baseline or reserved handling happens here —
+    ///      the caller has already rejected fixed amounts, complex data and reserved balances for
+    ///      this allocation, and the plan's value-conservation bounds (measured on the uncapped
+    ///      NAV) are the authority on what actually left the fund, whatever the guard computed.
+    function _withdrawSubset(
+        address guard,
+        address asset,
+        address to,
+        uint256 portion,
+        bytes32[] calldata positionIds
+    ) private returns (address withdrawAsset, uint256 withdrawAmount) {
+        if (positionIds.length > MAX_POSITION_IDS_PER_ALLOCATION) {
+            revert IPoolLogic.TooManyPositionIds();
+        }
+        for (uint256 i = 1; i < positionIds.length; ++i) {
+            if (positionIds[i] <= positionIds[i - 1]) revert IPoolLogic.PositionIdsNotAscending();
+        }
+        try ISubPositionGuard(guard).isSubPositionGuard() returns (bool supported) {
+            if (!supported) revert IPoolLogic.SubsetNotSupported();
+        } catch {
+            revert IPoolLogic.SubsetNotSupported();
+        }
+        IAssetGuard.MultiTransaction[] memory transactions;
+        (withdrawAsset, withdrawAmount, transactions) = ISubPositionGuard(guard)
+            .withdrawProcessingSubset(address(this), asset, portion, to, positionIds);
+        (withdrawAmount, ) = _runTransactions(transactions, withdrawAsset, withdrawAmount);
     }
 
     /// @notice Verifies + executes an attester-signed WithdrawalPlan end-to-end: signature,
@@ -652,35 +700,55 @@ library WithdrawalPlanLib {
                 if (plan.allocations[j].asset == asset) revert IPoolLogic.DuplicateAllocation();
             }
 
+            // Guard binding (always): the attester signed the guard it validated for this asset.
+            address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
+            if (guard == address(0)) revert IPoolLogic.InvalidGuard();
+            if (guard != alloc.guard) revert IPoolLogic.GuardMismatch();
+
             uint256 portion;
-            if (alloc.useFixedAmount) {
-                address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-                if (guard == address(0)) revert IPoolLogic.InvalidGuard();
-                uint256 balance = IAssetGuard(guard).getBalance(address(this), asset);
-                if (balance == 0) revert IPoolLogic.ZeroAssetBalance();
-                portion = (alloc.fixedAmount * 1e18) / balance;
-                if (portion > 1e18) portion = 1e18;
-            } else {
-                // Audit finding: unlike the fixed-amount branch above (explicitly clamped) and
-                // unlike the existing pro-rata path (where portion is derived internally via
-                // computeImmediateWithdrawPortion and is structurally guaranteed <= 1e18), a
-                // direct attester-supplied portion had no on-chain upper bound. A portion above
-                // 1e18 (100%) is guard-implementation-dependent — some guards would simply have
-                // their transfer revert, but nothing here guaranteed that for every guard, and
-                // the two-sided value-conservation check running only after the full loop is not
-                // a substitute for bounding the input itself. Reject outright instead.
+            address withdrawAsset;
+            uint256 withdrawAmount;
+            if (alloc.positionIds.length > 0) {
+                // Position-level selection: only the listed positions, at a direct portion.
+                if (
+                    alloc.useFixedAmount ||
+                    IPoolLogic(address(this)).reservedAssetBalance(asset) > 0 ||
+                    _matchComplexAsset(complexAssetsData, asset).supportedAsset != address(0)
+                ) revert IPoolLogic.InvalidSubsetAllocation();
                 portion = alloc.portion;
                 if (portion > 1e18) revert IPoolLogic.InvalidPortion();
-            }
+                (withdrawAsset, withdrawAmount) = _withdrawSubset(
+                    guard,
+                    asset,
+                    to,
+                    portion,
+                    alloc.positionIds
+                );
+            } else {
+                if (alloc.useFixedAmount) {
+                    uint256 balance = IAssetGuard(guard).getBalance(address(this), asset);
+                    if (balance == 0) revert IPoolLogic.ZeroAssetBalance();
+                    portion = (alloc.fixedAmount * 1e18) / balance;
+                    if (portion > 1e18) portion = 1e18;
+                } else {
+                    // Audit finding: a direct attester-supplied portion had no on-chain upper
+                    // bound (unlike the fixed-amount branch, explicitly clamped, and the pro-rata
+                    // path, structurally <= 1e18). A portion above 1e18 is guard-implementation-
+                    // dependent, and the value-conservation check after the loop is not a
+                    // substitute for bounding the input itself. Reject outright instead.
+                    portion = alloc.portion;
+                    if (portion > 1e18) revert IPoolLogic.InvalidPortion();
+                }
 
-            (address withdrawAsset, uint256 withdrawAmount, ) = withdrawProcessing(
-                poolManagerLogic,
-                asset,
-                to,
-                portion,
-                IPoolLogic(address(this)).reservedAssetBalance(asset),
-                _matchComplexAsset(complexAssetsData, asset)
-            );
+                (withdrawAsset, withdrawAmount, ) = withdrawProcessing(
+                    poolManagerLogic,
+                    asset,
+                    to,
+                    portion,
+                    IPoolLogic(address(this)).reservedAssetBalance(asset),
+                    _matchComplexAsset(complexAssetsData, asset)
+                );
+            }
 
             if (withdrawAsset != address(0) && withdrawAmount > 0) {
                 IERC20(withdrawAsset).safeTransfer(to, withdrawAmount);
@@ -764,6 +832,8 @@ library WithdrawalPlanLib {
                 abi.encode(
                     ASSET_ALLOCATION_TYPEHASH,
                     alloc.asset,
+                    alloc.guard,
+                    keccak256(abi.encodePacked(alloc.positionIds)),
                     alloc.useFixedAmount,
                     alloc.portion,
                     alloc.fixedAmount

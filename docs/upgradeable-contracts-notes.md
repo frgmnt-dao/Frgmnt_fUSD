@@ -221,6 +221,24 @@ All appended strictly after `pendingCashWithdrawCount` (the previous last state 
 - **The initializer leaves the feature disabled** (`isAttestedWithdrawEnabled == false`). The withdrawal path pays out user funds on the strength of a hot attester key, so it must not go live as a side effect of an upgrade transaction: the manager enables it with `setAttestedWithdrawEnabled(true)` only after the attester service and its parameters are verified. The new path reverts `ImmediateWithdrawalDisabled` until then.
 - **Audit finding, fixed before this upgrade shipped:** `FundCalculationLibrary.computeImmediateWithdrawPortion()` (shared by both the pro-rata and attested-plan withdrawal paths) already computed a solvency-haircut-adjusted `fairFusd` internally, but the attested-plan path's value-conservation check originally bounded delivered value against the raw, nominal `netFusd` instead — a no-op difference while the pool is solvent, but in an underwater pool the attested path could pay out at par while the pro-rata path haircuts everyone else, extracting more than a fair share from remaining stakers (the exact loss-socialization invariant FNA-05 protects). `computeImmediateWithdrawPortion()` itself is deliberately left byte-identical to the already-validated version — `WithdrawalPlanLib.executeWithdrawalPlan()` derives `fairFusd` from that function's existing `totalClaims`/`completeFundValue` outputs via the already-validated `applyClaimsHaircut()` wrapper (the same expression the function evaluates internally), so no shared, previously-audited signature was widened and no haircut logic is duplicated; it bounds both sides of the value-conservation check against it instead, and reverts `WithdrawAmountTooSmall` (matching the pro-rata path) when it is zero. This also corrected `completeFundValue` being computed after the allocations loop instead of before, which had been handing `computeAccountedAssetsReduction` an already-withdrawal-reduced figure instead of the pre-withdrawal one its own docs specify.
 
+### Position-Level Selection: optional guard deployments
+
+The plan schema carries a `guard` and optional `positionIds` per allocation (see the design doc's "Position-Level Selection"). This changes calldata decoding only — no storage. Whole-asset plans work with the existing validated guards; the guard binding requires the plan's `guard` to equal the pool's current guard for the asset.
+
+Selecting individual positions inside a Morpho Blue or Aave V4 Spoke guard needs two NEW contracts, which inherit the validated guards without editing them:
+
+- `AaveV4SpokeSelectiveAssetGuard` (constructor: spoke manager, taker, giver — same as the base).
+- `MorphoBlueLendingPoolSelectiveAssetGuard` (constructor: morpho, morpho manager, swap router, settlement asset; links `MorphoCollectLib`; compiled with the same viaIR settings override as the base guard).
+
+Rollout, only when position-level selection is wanted for that asset type:
+
+1. Deploy the subclass guard.
+2. Morpho only: re-seed the owner-set configuration to match the guard being replaced (`uniV3Fee` pairs, `defaultSlippageBps`, `flashAmountBufferBps`, `repayDebtBufferBps`, `requiresApproveReset`) — the new instance starts with defaults and the whole-asset path depends on these.
+3. Governance `setAssetGuard` for the asset type. This is global per asset type and affects every pool using it, and any plan signed against the previous guard address reverts `GuardMismatch` from that moment (intended).
+4. Attester tooling must sign the new guard address.
+
+Not selectable (fail closed with `SubsetNotSupported`): Aave V3 pool and Uniswap V3 position manager guards. A selected Morpho market with an open borrow reverts `SubsetDebtUnsupported` (v1).
+
 ### Storage Layout Notes
 
 - No existing state variable removed, reordered, or resized.
@@ -246,9 +264,9 @@ Latest local verification for this feature (this branch):
 
 ```text
 npx hardhat compile: passed
-npx hardhat test test/AttestedWithdrawal.test.ts: 48 passing
-npm run test: 1130 passing
-npm run check:contract-size: PoolLogic at 482 bytes of EIP-170 headroom
+npx hardhat test test/AttestedWithdrawal.test.ts test/SelectiveGuards.test.ts: 84 passing
+npm run test: 1166 passing
+npm run check:contract-size: PoolLogic at 302 bytes of EIP-170 headroom
 ```
 
 STRONGLY RECOMMENDED, not yet done: dry-run the upgrade + `initializeAttestedWithdrawal()` migration against a forked copy of the actual live mainnet state before executing for real, mirroring the same recommendation already made (and not yet completed, per its own notes) for the `initializeAutoCompounding()` migration in `scripts/upgrade_core_contracts.ts`.
