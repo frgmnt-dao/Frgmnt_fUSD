@@ -427,16 +427,20 @@ library WithdrawalPlanLib {
         // computeAccountedAssetsReduction's "valueBefore" input to mean what its own docs say it
         // means — computing it after the loop (as this function previously did) would have
         // handed PoolLogic an already-withdrawal-reduced figure instead.
-        (
-            ,
-            uint256 totalClaims_,
-            uint256 completeFundValue_,
-            uint256 fairFusd
-        ) = FundCalculationLibrary.computeImmediateWithdrawPortion(
-                address(this),
-                result.netFusd,
-                valueBefore
-            );
+        // fairFusd is derived here from computeImmediateWithdrawPortion's own existing outputs via
+        // the already-audited applyClaimsHaircut() wrapper — exactly the expression that function
+        // evaluates internally (`_applyClaimsHaircut(netFusd, completeFundValue, totalClaims)`),
+        // including its 0 result when completeFundValue is 0 (the early-return branch). Done this
+        // way, rather than by widening that shared function's return signature, so
+        // FundCalculationLibrary stays byte-identical to the version already validated, with no
+        // duplicated haircut logic anywhere.
+        (, uint256 totalClaims_, uint256 completeFundValue_) = FundCalculationLibrary
+            .computeImmediateWithdrawPortion(address(this), result.netFusd, valueBefore);
+        uint256 fairFusd = FundCalculationLibrary.applyClaimsHaircut(
+            result.netFusd,
+            completeFundValue_,
+            totalClaims_
+        );
         result.totalClaims = totalClaims_;
         result.completeFundValue = completeFundValue_;
         // Matches executeProRataWithdrawal's own explicit `if (portion == 0) revert
@@ -597,7 +601,7 @@ library WithdrawalPlanLib {
         if (fundValue == 0) revert EmptyFund();
 
         uint256 portion;
-        (portion, result.totalClaims, result.completeFundValue, ) = FundCalculationLibrary
+        (portion, result.totalClaims, result.completeFundValue) = FundCalculationLibrary
             .computeImmediateWithdrawPortion(address(this), result.netFusd, fundValue);
         if (portion == 0) revert WithdrawAmountTooSmall();
 

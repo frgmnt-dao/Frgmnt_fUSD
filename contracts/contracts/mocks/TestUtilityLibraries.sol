@@ -193,7 +193,7 @@ contract TestFundCalculationLibrary {
         uint256 netFusd,
         uint256 withdrawableFundValue
     ) external view returns (uint256 portion) {
-        (portion, , , ) = FundCalculationLibrary.computeImmediateWithdrawPortion(
+        (portion, , ) = FundCalculationLibrary.computeImmediateWithdrawPortion(
             pool,
             netFusd,
             withdrawableFundValue
