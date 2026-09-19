@@ -40,25 +40,6 @@ interface ITokenLogicMinimal {
 library WithdrawalPlanLib {
     using SafeERC20 for IERC20;
 
-    error InvalidGuard();
-    error ComplexWithdrawFailed(address asset, address guard);
-    error TxFailed();
-    error InvalidCallData();
-    error InvalidAttesterSignature();
-    error PlanDeadlineExpired();
-    error PlanNonceAlreadyUsed();
-    error DuplicateAllocation();
-    error ZeroAssetBalance();
-    error MinValueOutBpsTooHigh();
-    error AttestedWithdrawVolumeCapExceeded();
-    error ValueConservationViolated();
-    error InvalidPortion();
-    /// @dev Reverted when the live-computed pool-usage surcharge (see MAX_SURCHARGE_BPS_CEILING)
-    ///      exceeds the ceiling the attester signed into plan.maxAcceptableSurchargeBps. Checked
-    ///      early, before the per-asset allocations loop runs, so this fails cheaply rather than
-    ///      after paying for a full withdrawal that would only revert later anyway.
-    error SurchargeTooHigh();
-
     /// @dev Byte-for-byte identical signatures to PoolLogic's own CashWithdrawImmediateProRata/
     ///      AttestedWithdrawPlanExecuted events — declared separately here (rather than imported)
     ///      purely to avoid a circular import, same reasoning as this library's duplicated
@@ -90,8 +71,6 @@ library WithdrawalPlanLib {
     ///      contract-scoped errors (which would require a circular import).
     error CooldownActive();
     error ZeroAmount();
-    error EmptyFund();
-    error WithdrawAmountTooSmall();
 
     /// @dev Fixed, protocol-level upper-bound tolerance on over-delivery — reused verbatim from
     ///      PoolLogic._withdrawCashImmediateToSafe's existing `1e15` constant (not duplicated by
@@ -218,7 +197,7 @@ library WithdrawalPlanLib {
         WithdrawProcessingLocalVars memory v;
 
         v.guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-        if (v.guard == address(0)) revert InvalidGuard();
+        if (v.guard == address(0)) revert IPoolLogic.InvalidGuard();
 
         // FNA-36: sized against net-realizable value (see IUnwindCostAwareGuard/FNA-35), not raw
         // getBalance(), so a leveraged position whose gross equity looks positive but whose real
@@ -273,7 +252,7 @@ library WithdrawalPlanLib {
             returns (address wa, uint256 wamt, IAssetGuard.MultiTransaction[] memory txs) {
                 (withdrawAsset, withdrawAmount, v.transactions) = (wa, wamt, txs);
             } catch {
-                revert ComplexWithdrawFailed(asset, v.guard);
+                revert IPoolLogic.ComplexWithdrawFailed(asset, v.guard);
             }
             v.regularProcessing = false;
         } else {
@@ -350,11 +329,11 @@ library WithdrawalPlanLib {
     ) external returns (PlanExecutionResult memory result) {
         bytes32 digest = _hashPlan(plan);
         if (!_isValidSignatureNow(input.withdrawalAttester, digest, attesterSignature)) {
-            revert InvalidAttesterSignature();
+            revert IPoolLogic.InvalidAttesterSignature();
         }
-        if (block.timestamp > plan.deadline) revert PlanDeadlineExpired();
-        if (input.nonceAlreadyConsumed) revert PlanNonceAlreadyUsed();
-        if (plan.minValueOutBps > MAX_MIN_VALUE_OUT_BPS) revert MinValueOutBpsTooHigh();
+        if (block.timestamp > plan.deadline) revert IPoolLogic.PlanDeadlineExpired();
+        if (input.nonceAlreadyConsumed) revert IPoolLogic.PlanNonceAlreadyUsed();
+        if (plan.minValueOutBps > MAX_MIN_VALUE_OUT_BPS) revert IPoolLogic.MinValueOutBpsTooHigh();
         // Audit finding: _withdrawCashImmediateToSafe checks amount == 0 unconditionally, before
         // its own manager-bypass branch. _chargeWithdrawFee's manager-bypass branch below returns
         // (amount, 0) directly with no such check, so a manager-signed plan with fusdAmount == 0
@@ -411,7 +390,7 @@ library WithdrawalPlanLib {
         // against this value rounded UP, so it is never understated.
         uint256 surchargeBpsX18 = pressure * effectiveMaxSurchargeBps;
         if ((surchargeBpsX18 + 1e18 - 1) / 1e18 > plan.maxAcceptableSurchargeBps) {
-            revert SurchargeTooHigh();
+            revert IPoolLogic.SurchargeTooHigh();
         }
 
         // Audit finding (4th round): the two-sided value-conservation check previously bounded
@@ -453,7 +432,7 @@ library WithdrawalPlanLib {
         // empty pool) — without this, a zero fair entitlement would trivially satisfy the lower
         // value-conservation bound below (valueDelta < 0 is never true), silently letting a
         // real fUSD burn go through for a fair share of $0 instead of reverting outright.
-        if (fairFusd == 0) revert WithdrawAmountTooSmall();
+        if (fairFusd == 0) revert IPoolLogic.WithdrawAmountTooSmall();
         // 5th-round audit: computeImmediateWithdrawPortion returns fairFusd uncapped by
         // withdrawableFundValue specifically in its "temporary liquidity gap" branch (solvent
         // overall, but not everything liquid right now — see that function's own docs), the
@@ -464,7 +443,7 @@ library WithdrawalPlanLib {
         // capped below this inflated fairFusd) — not a fund-safety gap either way, but wastes
         // the caller's gas on a doomed loop and reports a less specific error. Matching the
         // pro-rata path's exact short-circuit here fails fast with the same error instead.
-        if (fairFusd > valueBefore) revert WithdrawAmountTooSmall();
+        if (fairFusd > valueBefore) revert IPoolLogic.WithdrawAmountTooSmall();
 
         // Surcharge, continued: fairFusd is this withdrawal's fair entitlement before any
         // surcharge; target is what's actually enforced as deliverable, after withholding the
@@ -492,9 +471,10 @@ library WithdrawalPlanLib {
         );
         if (valueBefore < valueAfter) revert IPoolLogic.InvalidFundValue();
         result.valueDelta = valueBefore - valueAfter;
-        if (result.valueDelta > target + DUST_TOLERANCE) revert ValueConservationViolated();
+        if (result.valueDelta > target + DUST_TOLERANCE)
+            revert IPoolLogic.ValueConservationViolated();
         uint256 minAllowed = target - (target * plan.minValueOutBps) / 10_000;
-        if (result.valueDelta < minAllowed) revert ValueConservationViolated();
+        if (result.valueDelta < minAllowed) revert IPoolLogic.ValueConservationViolated();
 
         // See this event's own docs above for why it's emitted here rather than by PoolLogic.
         // Audit note: reuses CashWithdrawImmediateProRata's (asset[],amount[]) shape purely to
@@ -603,12 +583,12 @@ library WithdrawalPlanLib {
             address(this),
             input.poolManagerLogic
         );
-        if (fundValue == 0) revert EmptyFund();
+        if (fundValue == 0) revert IPoolLogic.EmptyFund();
 
         uint256 portion;
         (portion, result.totalClaims, result.completeFundValue) = FundCalculationLibrary
             .computeImmediateWithdrawPortion(address(this), result.netFusd, fundValue);
-        if (portion == 0) revert WithdrawAmountTooSmall();
+        if (portion == 0) revert IPoolLogic.WithdrawAmountTooSmall();
 
         IHasSupportedAsset.Asset[] memory supportedAssets = IHasSupportedAsset(
             input.poolManagerLogic
@@ -680,15 +660,15 @@ library WithdrawalPlanLib {
                 revert IPoolLogic.AssetNotSupported();
             }
             for (uint256 j = 0; j < i; ++j) {
-                if (plan.allocations[j].asset == asset) revert DuplicateAllocation();
+                if (plan.allocations[j].asset == asset) revert IPoolLogic.DuplicateAllocation();
             }
 
             uint256 portion;
             if (alloc.useFixedAmount) {
                 address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-                if (guard == address(0)) revert InvalidGuard();
+                if (guard == address(0)) revert IPoolLogic.InvalidGuard();
                 uint256 balance = IAssetGuard(guard).getBalance(address(this), asset);
-                if (balance == 0) revert ZeroAssetBalance();
+                if (balance == 0) revert IPoolLogic.ZeroAssetBalance();
                 portion = (alloc.fixedAmount * 1e18) / balance;
                 if (portion > 1e18) portion = 1e18;
             } else {
@@ -701,7 +681,7 @@ library WithdrawalPlanLib {
                 // the two-sided value-conservation check running only after the full loop is not
                 // a substitute for bounding the input itself. Reject outright instead.
                 portion = alloc.portion;
-                if (portion > 1e18) revert InvalidPortion();
+                if (portion > 1e18) revert IPoolLogic.InvalidPortion();
             }
 
             (address withdrawAsset, uint256 withdrawAmount, ) = withdrawProcessing(
@@ -853,7 +833,7 @@ library WithdrawalPlanLib {
         // configuration-omission path that setter's floor alone doesn't cover. Defended here,
         // at the actual point of use, rather than trying to gate every possible entry point
         // that could leave the feature "enabled" without every parameter configured.
-        if (decayWindow == 0) revert AttestedWithdrawVolumeCapExceeded();
+        if (decayWindow == 0) revert IPoolLogic.AttestedWithdrawVolumeCapExceeded();
 
         uint256 decayed;
         if (current.accumulatedValueUsd != 0) {
@@ -874,7 +854,7 @@ library WithdrawalPlanLib {
         // configured, and also covers the (practically unreachable, but not otherwise enforced)
         // case of a single valueUsd already exceeding type(uint128).max.
         if (newTotal > maxVolumePerWindow || newTotal > type(uint128).max) {
-            revert AttestedWithdrawVolumeCapExceeded();
+            revert IPoolLogic.AttestedWithdrawVolumeCapExceeded();
         }
 
         return
@@ -889,10 +869,10 @@ library WithdrawalPlanLib {
         bool success,
         bytes memory returndata
     ) private pure {
-        if (!success) revert TxFailed();
+        if (!success) revert IPoolLogic.TxFailed();
 
         // Only verify return value for ERC20 transfer/approve
-        if (data.length < 4) revert InvalidCallData();
+        if (data.length < 4) revert IPoolLogic.InvalidCallData();
         bytes4 sig;
         assembly {
             sig := mload(add(data, 32))
@@ -903,7 +883,7 @@ library WithdrawalPlanLib {
         if (isERC20 && returndata.length > 0) {
             // SafeERC20-style: decode as bool
             bool ok = abi.decode(returndata, (bool));
-            if (!ok) revert TxFailed();
+            if (!ok) revert IPoolLogic.TxFailed();
         }
         // For other calls (e.g., Aave withdraw/repay uint256), ignore returndata
     }

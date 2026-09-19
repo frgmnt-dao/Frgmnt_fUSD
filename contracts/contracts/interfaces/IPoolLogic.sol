@@ -99,4 +99,27 @@ interface IPoolLogic {
     error InvalidAssetData();
     error AssetNotSupported();
     error InvalidFundValue();
+
+    // Errors thrown only from WithdrawalPlanLib (the pro-rata guard-dispatch path and the
+    // attested-plan path). Declared here, not in the library, so they appear in PoolLogic's own
+    // ABI — a caller of any withdrawal entry point can receive them, and ABI-driven decoders
+    // (frontends, subgraphs, bots) read PoolLogic's ABI. Selectors are unchanged.
+    error InvalidGuard();
+    error ComplexWithdrawFailed(address asset, address guard);
+    error TxFailed();
+    error InvalidCallData();
+    error EmptyFund();
+    error WithdrawAmountTooSmall();
+    error InvalidAttesterSignature();
+    error PlanDeadlineExpired();
+    error PlanNonceAlreadyUsed();
+    error DuplicateAllocation();
+    error ZeroAssetBalance();
+    error MinValueOutBpsTooHigh();
+    error AttestedWithdrawVolumeCapExceeded();
+    error ValueConservationViolated();
+    error InvalidPortion();
+    /// @dev The live-computed pool-usage surcharge exceeds the ceiling the attester signed into
+    ///      plan.maxAcceptableSurchargeBps. Checked before the per-asset loop, so it fails cheaply.
+    error SurchargeTooHigh();
 }
