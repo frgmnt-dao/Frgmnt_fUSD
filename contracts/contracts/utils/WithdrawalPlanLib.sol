@@ -363,99 +363,60 @@ library WithdrawalPlanLib {
 
         ITokenLogicMinimal(input.fusd).burnFrom(plan.user, result.netFusd);
 
-        uint256 valueBefore = FundCalculationLibrary.computeWithdrawableFundValue(
-            address(this),
-            input.poolManagerLogic
+        // VALUE MEASUREMENT. The value that leaves the fund is measured on the UNCAPPED,
+        // net-realizable, deficit-adjusted, reserved-excluding NAV (`completeFundValue`), before and
+        // after — not on the liquidity-capped NAV the pro-rata path sizes its portion against.
+        // The capped NAV is the wrong yardstick for a plan whose allocations are chosen freely:
+        // a guard whose ceiling is a MINIMUM across several positions (Morpho Blue, Aave V3)
+        // reports a capped balance that does not move linearly when only some positions are
+        // withdrawn, so the measured outflow can be far below the real one. That would make the
+        // lower bound revert legitimate plans and, worse, weaken the UPPER bound by the inverse of
+        // the binding liquidity ratio (a plan could extract many times `target` while the capped
+        // reading still looked like `target`). The uncapped figure is the real, oracle-priced
+        // position change, so the bounds below hold no matter which positions are drawn, and it is
+        // also the correct basis for computeAccountedAssetsReduction (it already receives
+        // completeFundValue as its "valueBefore"). It is read from the already-validated
+        // computeImmediateWithdrawPortion(): passing 1 for its capped-NAV argument avoids its
+        // zero early-return, and only its `completeFundValue` output is used.
+        (, uint256 totalClaims_, uint256 completeBefore) = FundCalculationLibrary
+            .computeImmediateWithdrawPortion(address(this), result.netFusd, 1);
+        // fairFusd is derived from that function's own outputs via the already-validated
+        // applyClaimsHaircut() wrapper (the exact expression it evaluates internally), so the
+        // shared library stays byte-identical to the validated version and nothing is duplicated.
+        uint256 fairFusd = FundCalculationLibrary.applyClaimsHaircut(
+            result.netFusd,
+            completeBefore,
+            totalClaims_
         );
+        result.totalClaims = totalClaims_;
+        result.completeFundValue = completeBefore;
+        // A zero fair entitlement (extreme insolvency or an empty pool) would satisfy the lower
+        // bound below trivially and let a real burn through for $0 — revert, as the pro-rata path
+        // does for the same condition. completeBefore == 0 implies fairFusd == 0, so this also
+        // guarantees the surcharge denominator below is nonzero.
+        if (fairFusd == 0) revert IPoolLogic.WithdrawAmountTooSmall();
 
         // Surcharge: a small, usage-scaled slice of this withdrawal's entitlement is deliberately
-        // withheld and retained in the fund, to compensate remaining stakers for the composition-
-        // skew cost an attested withdrawal can impose (it lets a user skip currently-impaired
-        // assets, concentrating them for whoever stays). See docs/attested-selective-withdrawal-
-        // design.md's "Surcharge: Pricing the Composition-Skew Externality" section for the full
-        // rationale. Computed and bounds-checked HERE — before the allocations loop below runs —
-        // deliberately, not folded into the value-conservation check further down: this is the
-        // one part of this function whose input (recent attested-withdraw volume) the attester
-        // cannot know precisely at signing time, so a plan that would exceed the attester's own
-        // signed tolerance must fail here, cheaply, rather than after paying for a full withdrawal
-        // that would only revert later anyway.
-        uint256 pressure = valueBefore == 0
-            ? 0
-            : Math.min((uint256(newVolume.accumulatedValueUsd) * 1e18) / valueBefore, 1e18);
+        // withheld and stays in the fund, compensating remaining stakers for the composition skew
+        // an attested withdrawal can impose. See the design doc's "Surcharge" section. Computed
+        // and checked here, before the allocations loop, so a plan that exceeds the attester's
+        // signed tolerance fails cheaply instead of after paying for a full withdrawal.
+        uint256 pressure = Math.min(
+            (uint256(newVolume.accumulatedValueUsd) * 1e18) / completeBefore,
+            1e18
+        );
         uint256 effectiveMaxSurchargeBps = input.maxSurchargeBps > MAX_SURCHARGE_BPS_CEILING
             ? MAX_SURCHARGE_BPS_CEILING
             : input.maxSurchargeBps;
-        // Kept in bps scaled by 1e18 (not truncated to whole bps): truncating created a
-        // zero-surcharge zone below 1% pressure and 1-bp steps above it, contradicting the
-        // continuous ramp this mechanism promises. The attester's signed ceiling is compared
-        // against this value rounded UP, so it is never understated.
+        // Kept in bps scaled by 1e18 (not truncated to whole bps) so the ramp is continuous; the
+        // attester's signed ceiling is compared against it rounded UP, so it is never understated.
         uint256 surchargeBpsX18 = pressure * effectiveMaxSurchargeBps;
         if ((surchargeBpsX18 + 1e18 - 1) / 1e18 > plan.maxAcceptableSurchargeBps) {
             revert IPoolLogic.SurchargeTooHigh();
         }
-
-        // Audit finding (4th round): the two-sided value-conservation check previously bounded
-        // valueDelta against the raw, nominal `netFusd` fUSD amount. computeImmediateWithdrawPortion
-        // already computes a solvency-haircut-adjusted `fairFusd` (identical to what the pro-rata
-        // path pays out via its own `portion`) — but that path derives its actual per-asset
-        // withdrawal amounts FROM that haircut-adjusted portion, while this path's allocations
-        // come directly from the attester-signed plan, never scaled by any haircut at all. Left
-        // unfixed, an underwater pool's attested withdrawals could pay out at par (the full
-        // nominal netFusd) while the pro-rata path haircut every other withdrawal proportionally
-        // to the funding shortfall — extracting more than a fair share from remaining stakers, the
-        // exact loss-socialization invariant FNA-05 exists to protect. Bounding against `fairFusd`
-        // instead closes this: when the pool is solvent, fairFusd == netFusd (no behavior change
-        // in the common case); when underwater, both bounds shrink with it, exactly like the
-        // pro-rata path already does via `portion`.
-        // Moved before the allocations loop (matching executeProRataWithdrawal's own ordering)
-        // rather than after: completeFundValue must reflect PRE-withdrawal state for
-        // computeAccountedAssetsReduction's "valueBefore" input to mean what its own docs say it
-        // means — computing it after the loop (as this function previously did) would have
-        // handed PoolLogic an already-withdrawal-reduced figure instead.
-        // fairFusd is derived here from computeImmediateWithdrawPortion's own existing outputs via
-        // the already-audited applyClaimsHaircut() wrapper — exactly the expression that function
-        // evaluates internally (`_applyClaimsHaircut(netFusd, completeFundValue, totalClaims)`),
-        // including its 0 result when completeFundValue is 0 (the early-return branch). Done this
-        // way, rather than by widening that shared function's return signature, so
-        // FundCalculationLibrary stays byte-identical to the version already validated, with no
-        // duplicated haircut logic anywhere.
-        (, uint256 totalClaims_, uint256 completeFundValue_) = FundCalculationLibrary
-            .computeImmediateWithdrawPortion(address(this), result.netFusd, valueBefore);
-        uint256 fairFusd = FundCalculationLibrary.applyClaimsHaircut(
-            result.netFusd,
-            completeFundValue_,
-            totalClaims_
-        );
-        result.totalClaims = totalClaims_;
-        result.completeFundValue = completeFundValue_;
-        // Matches executeProRataWithdrawal's own explicit `if (portion == 0) revert
-        // WithdrawAmountTooSmall();` for the same underlying condition (extreme insolvency or an
-        // empty pool) — without this, a zero fair entitlement would trivially satisfy the lower
-        // value-conservation bound below (valueDelta < 0 is never true), silently letting a
-        // real fUSD burn go through for a fair share of $0 instead of reverting outright.
-        if (fairFusd == 0) revert IPoolLogic.WithdrawAmountTooSmall();
-        // 5th-round audit: computeImmediateWithdrawPortion returns fairFusd uncapped by
-        // withdrawableFundValue specifically in its "temporary liquidity gap" branch (solvent
-        // overall, but not everything liquid right now — see that function's own docs), the
-        // same branch where it returns portion == 0 so executeProRataWithdrawal above reverts
-        // WithdrawAmountTooSmall rather than attempting a doomed partial payout. Without this
-        // check, this path would instead proceed into the full allocations loop and almost
-        // certainly still revert (ValueConservationViolated, since real deliverable value is
-        // capped below this inflated fairFusd) — not a fund-safety gap either way, but wastes
-        // the caller's gas on a doomed loop and reports a less specific error. Matching the
-        // pro-rata path's exact short-circuit here fails fast with the same error instead.
-        if (fairFusd > valueBefore) revert IPoolLogic.WithdrawAmountTooSmall();
-
-        // Surcharge, continued: fairFusd is this withdrawal's fair entitlement before any
-        // surcharge; target is what's actually enforced as deliverable, after withholding the
-        // surcharge computed above. Both sides of the value-conservation bound below reference
-        // target, not fairFusd — they must move together, since bounding the upper side against
-        // fairFusd while the lower side demands target would be internally inconsistent (the
-        // upper bound would then permit paying out MORE than target + the surcharge allows,
-        // silently undoing the surcharge for any withdrawal that happens to deliver close to
-        // fairFusd). surchargeAmount is this gap, deterministic from target/fairFusd — not
-        // measured from the realized valueDelta below — so it's known even if the loop delivers
-        // less than target for unrelated reasons (e.g. minValueOutBps slack).
+        // target is what is enforced as deliverable after withholding the surcharge; BOTH sides of
+        // the value bound below reference it (bounding one side against fairFusd and the other
+        // against target would be internally inconsistent).
         result.surchargeAmount = (fairFusd * surchargeBpsX18) / (1e18 * 10_000);
         uint256 target = fairFusd - result.surchargeAmount;
 
@@ -466,14 +427,18 @@ library WithdrawalPlanLib {
             complexAssetsData
         );
 
-        uint256 valueAfter = FundCalculationLibrary.computeWithdrawableFundValue(
+        // Same call, same basis, after the loop. Also reverts IncompleteNAV if a position became
+        // unvaluable mid-withdrawal, which is the safe direction.
+        (, , uint256 completeAfter) = FundCalculationLibrary.computeImmediateWithdrawPortion(
             address(this),
-            input.poolManagerLogic
+            result.netFusd,
+            1
         );
-        if (valueBefore < valueAfter) revert IPoolLogic.InvalidFundValue();
-        result.valueDelta = valueBefore - valueAfter;
-        if (result.valueDelta > target + DUST_TOLERANCE)
+        if (completeBefore < completeAfter) revert IPoolLogic.InvalidFundValue();
+        result.valueDelta = completeBefore - completeAfter;
+        if (result.valueDelta > target + DUST_TOLERANCE) {
             revert IPoolLogic.ValueConservationViolated();
+        }
         uint256 minAllowed = target - (target * plan.minValueOutBps) / 10_000;
         if (result.valueDelta < minAllowed) revert IPoolLogic.ValueConservationViolated();
 
