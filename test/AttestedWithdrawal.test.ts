@@ -1000,6 +1000,149 @@ describe('PoolLogic — attested selective withdrawal', () => {
     expect((await asset.balanceOf(userAddress)) - before).to.equal(ethers.parseUnits('99.5', 18));
   });
 
+  describe('real Morpho Blue selective guard through PoolLogic', () => {
+    const ONE = ethers.parseUnits('1', 18);
+
+    async function setupMorphoPool() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { poolManager, pool, fusd, user } = fixture;
+
+      const lib = await (await ethers.getContractFactory('MorphoCollectLib')).deploy();
+      const Token = await ethers.getContractFactory('MockERC20Custom');
+      const usdc = await Token.deploy('USDC', 'USDC', 6);
+      const weth = await Token.deploy('WETH', 'WETH', 18);
+      const morpho = await (await ethers.getContractFactory('MockMorphoBlue')).deploy();
+      const morphoManager = await (
+        await ethers.getContractFactory('MockMorphoBlueManager')
+      ).deploy();
+      const guard = await (
+        await ethers.getContractFactory('MorphoBlueLendingPoolSelectiveAssetGuard', {
+          libraries: { MorphoCollectLib: await lib.getAddress() },
+        })
+      ).deploy(
+        await morpho.getAddress(),
+        await morphoManager.getAddress(),
+        ethers.Wallet.createRandom().address,
+        await usdc.getAddress(),
+      );
+      const plainGuard = await (await ethers.getContractFactory('TestAssetGuard')).deploy();
+
+      const poolAddr = await pool.getAddress();
+      const morphoAddr = await morpho.getAddress();
+      const usdcAddr = await usdc.getAddress();
+      const wethAddr = await weth.getAddress();
+
+      await poolManager.setSupportedAsset(usdcAddr, true, ONE, 6);
+      await poolManager.setAssetGuard(usdcAddr, await plainGuard.getAddress());
+      await poolManager.setSupportedAsset(wethAddr, true, ethers.parseUnits('2000', 18), 18);
+      await poolManager.setAssetGuard(wethAddr, await plainGuard.getAddress());
+      await poolManager.setSupportedAsset(morphoAddr, true, ONE, 18);
+      await poolManager.setAssetGuard(morphoAddr, await guard.getAddress());
+
+      // Two debt-free markets (same tokens, different lltv). Each holds $1000 of the pool's supply.
+      //   A: nothing borrowed -> fully liquid.
+      //   B: only $500 of its liquidity is left -> a 50% liquidity ceiling on the pool's $1000.
+      const supplyAssets = 1_000_000n * 10n ** 6n;
+      const supplyShares = supplyAssets * 10n ** 6n;
+      const ids: Record<string, string> = {};
+      for (const [name, lltv, borrowed] of [
+        ['A', 1n, 0n],
+        ['B', 2n, supplyAssets - 500n * 10n ** 6n],
+      ] as const) {
+        const mp = [usdcAddr, wethAddr, ethers.ZeroAddress, ethers.ZeroAddress, lltv];
+        const id = await morpho.marketId(mp);
+        await morpho.setMarket(mp, [
+          supplyAssets,
+          supplyShares,
+          borrowed,
+          borrowed * 10n ** 6n,
+          0n,
+          0n,
+        ]);
+        await morphoManager.setPoolMarkets(poolAddr, [id]);
+        await morpho.setPosition(id, poolAddr, 1000n * 10n ** 6n * 10n ** 6n, 0n, 0n);
+        ids[name] = id;
+      }
+      await usdc.mint(morphoAddr, 2000n * 10n ** 6n);
+
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('2000', 18));
+
+      return {
+        ...fixture,
+        guard,
+        morpho,
+        usdc,
+        ids,
+        guardAddress: await guard.getAddress(),
+        morphoAddr,
+        poolAddr,
+        userAddress: await user.getAddress(),
+      };
+    }
+
+    function morphoPlan(f: any, ids: string[], portion: bigint) {
+      return buildPlan({
+        ...f,
+        minValueOutBps: 10n, // Morpho share->asset conversion floors; allow sub-0.1% rounding
+        allocations: [
+          {
+            asset: f.morphoAddr,
+            guard: f.guardAddress,
+            positionIds: ids,
+            useFixedAmount: false,
+            portion,
+            fixedAmount: 0n,
+          },
+        ],
+      });
+    }
+
+    it('draws from the liquid market and leaves the throttled market untouched', async () => {
+      const f = await setupMorphoPool();
+      const plan = morphoPlan(f, [f.ids.A], ethers.parseUnits('0.1', 18)); // 10% of $1000 = $100
+      const sig = await signPlan(f, plan, f.attester);
+
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+
+      expect(await f.usdc.balanceOf(f.userAddress)).to.equal(100n * 10n ** 6n);
+      const posA = await f.morpho.position(f.ids.A, f.poolAddr);
+      const posB = await f.morpho.position(f.ids.B, f.poolAddr);
+      expect(posA.supplyShares).to.equal(900n * 10n ** 6n * 10n ** 6n);
+      expect(posB.supplyShares).to.equal(1000n * 10n ** 6n * 10n ** 6n);
+      // accountedAssets tracks NAV within rounding (Morpho floors share->asset conversion).
+      const accounted = await f.pool.accountedAssets();
+      expect(accounted).to.be.closeTo(ethers.parseUnits('1900', 18), 10n ** 13n);
+    });
+
+    it('the throttled market delivers only its own liquidity ceiling, which the value bound rejects', async () => {
+      const f = await setupMorphoPool();
+      // Market B can only pay half of any portion, so 10% delivers ~$50 against a $100 entitlement.
+      const plan = morphoPlan(f, [f.ids.B], ethers.parseUnits('0.1', 18));
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+      // Sized to its own ceiling it works: 20% * 50% = 10% of $1000 = $100.
+      const ok = morphoPlan(f, [f.ids.B], ethers.parseUnits('0.2', 18));
+      ok.nonce = 1n;
+      const okSig = await signPlan(f, ok, f.attester);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(ok, okSig, []);
+      expect(await f.usdc.balanceOf(f.userAddress)).to.equal(100n * 10n ** 6n);
+    });
+
+    it('rejects position ids the pool does not track', async () => {
+      const f = await setupMorphoPool();
+      const plan = morphoPlan(f, [ethers.id('not-a-market')], ethers.parseUnits('0.1', 18));
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'InvalidPositionId',
+      );
+    });
+  });
+
   it('rejects a plan redeeming less than the minimum net fUSD (dust-extraction floor)', async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, asset, user, attester } = fixture;

@@ -8,10 +8,13 @@ import {
     Position
 } from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
 import { MarketParamsLib } from "@morpho-org/morpho-blue/src/libraries/MarketParamsLib.sol";
+import { SharesMathLib } from "@morpho-org/morpho-blue/src/libraries/SharesMathLib.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Minimal Morpho Blue core mock for asset guard planning tests.
 contract MockMorphoBlue {
     using MarketParamsLib for MarketParams;
+    using SharesMathLib for uint256;
 
     mapping(Id => MarketParams) private _marketParams;
     mapping(Id => Market) private _markets;
@@ -51,5 +54,41 @@ contract MockMorphoBlue {
 
     function idToMarketParams(Id id) external view returns (MarketParams memory) {
         return _marketParams[id];
+    }
+
+    /// @dev Test-only settlement of the two no-debt exits the selective guard emits. Mirrors
+    ///      Morpho Blue's share-based withdraw (assets == 0, shares > 0) and withdrawCollateral,
+    ///      including the msg.sender == onBehalf authorization, and pays real tokens out of this
+    ///      mock's own balance so end-to-end tests can observe delivered amounts.
+    function withdraw(
+        MarketParams memory params,
+        uint256 assets,
+        uint256 shares,
+        address onBehalf,
+        address receiver
+    ) external returns (uint256 assetsWithdrawn, uint256 sharesWithdrawn) {
+        require(msg.sender == onBehalf, "MockMorphoBlue: unauthorized");
+        require(assets == 0 && shares > 0, "MockMorphoBlue: shares only");
+        Id id = params.id();
+        Market storage m = _markets[id];
+        Position storage p = _positions[id][onBehalf];
+        assetsWithdrawn = shares.toAssetsDown(m.totalSupplyAssets, m.totalSupplyShares);
+        p.supplyShares -= shares;
+        m.totalSupplyShares -= uint128(shares);
+        m.totalSupplyAssets -= uint128(assetsWithdrawn);
+        sharesWithdrawn = shares;
+        IERC20(params.loanToken).transfer(receiver, assetsWithdrawn);
+    }
+
+    function withdrawCollateral(
+        MarketParams memory params,
+        uint256 assets,
+        address onBehalf,
+        address receiver
+    ) external {
+        require(msg.sender == onBehalf, "MockMorphoBlue: unauthorized");
+        Id id = params.id();
+        _positions[id][onBehalf].collateral -= uint128(assets);
+        IERC20(params.collateralToken).transfer(receiver, assets);
     }
 }

@@ -236,8 +236,8 @@ Rollout, only when position-level selection is wanted for that asset type:
 2. Morpho only: re-seed the owner-set configuration to match the guard being replaced (`uniV3Fee` pairs, `defaultSlippageBps`, `flashAmountBufferBps`, `repayDebtBufferBps`, `requiresApproveReset`) — the new instance starts with defaults and the whole-asset path depends on these.
 3. Governance `setAssetGuard` for the asset type. This is global per asset type and affects every pool using it, and any plan signed against the previous guard address reverts `GuardMismatch` from that moment (intended).
 4. Attester tooling must sign the new guard address.
-5. Morpho only: the guard is `Ownable` with the deployer as owner — transfer ownership to the Timelock (same pattern as the FNA-01 fix) once the configuration is replayed.
-6. There is no deploy script for either subclass yet; deployment and the configuration replay are manual until one is written. `MorphoCollectLib` must be linked for the Morpho subclass.
+5. Morpho only: the guard is `Ownable` with the deployer as owner; the script hands ownership to the owner of the guard being replaced after verifying the replayed configuration.
+6. `scripts/deploy_selective_guards.ts` does steps 1, 2 and 5 and WRITES (never sends) the `Governance.setAssetGuard` transactions for step 3. Constructor arguments are read from the old guard's public immutables, and the Morpho configuration is discovered from the old guard's events and read back from live state; nothing is handed over unless every value matches. It needs `OLD_MORPHO_GUARD`, `MORPHO_COLLECT_LIB` (the existing, unchanged library), `MORPHO_ASSET_TYPE`, `GOVERNANCE`, and optionally `OLD_MORPHO_FROM_BLOCK` (the old guard's deployment block, so a public RPC's log-range limit is not hit); the Spoke equivalents are `OLD_SPOKE_GUARD` and `SPOKE_ASSET_TYPE`. Without `SEND=1` it is a dry run that only prints the configuration it would replay. The helpers are exercised against mock guards in `test/SelectiveGuardDeploy.test.ts`; the script itself has not been run against a live network.
 
 Not selectable (fail closed with `SubsetNotSupported`): Aave V3 pool and Uniswap V3 position manager guards. A selected Morpho market with an open borrow reverts `SubsetDebtUnsupported` (v1).
 
@@ -267,9 +267,11 @@ Latest local verification for this feature (this branch):
 ```text
 npx hardhat compile: passed
 npx hardhat test test/AttestedWithdrawal.test.ts test/SelectiveGuards.test.ts: 94 passing
-npm run test: 1179 passing
+npm run test: 1185 passing (1 opt-in test pending)
 npm run check:contract-size: PoolLogic at 168 bytes of EIP-170 headroom
 ```
+
+Upgrade rehearsal from the real live implementation (`test/UpgradeFromAudit.test.ts`, opt-in via `AUDIT_ARTIFACTS`, instructions in the file): builds the `audit` branch, deploys ITS `PoolLogic` (with its own libraries) behind a transparent proxy, generates real staker state through it (stake, yield accrual, a pending reward), then upgrades to this branch's implementation with empty data and checks that (1) storage slots 0-22 are byte-identical, (2) every getter agrees with the pre-upgrade reading, (3) unstake is blocked until `initializeAutoCompounding()` (the documented hazard, reproduced), (4) after the owner-sent `initializeAutoCompounding()` then `initializeAttestedWithdrawal()` the staker's pending reward is preserved exactly (450 fUSD before and after) and harvests in full, and the feature is left disabled. This covers layout and the reward migration for one staker; it does not replace a rehearsal against real mainnet state.
 
 STRONGLY RECOMMENDED, not yet done: dry-run the upgrade + `initializeAttestedWithdrawal()` migration against a forked copy of the actual live mainnet state before executing for real, mirroring the same recommendation already made (and not yet completed, per its own notes) for the `initializeAutoCompounding()` migration in `scripts/upgrade_core_contracts.ts`.
 
