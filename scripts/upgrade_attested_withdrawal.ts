@@ -25,14 +25,27 @@ import { ethers } from 'hardhat';
 // Custody can still change after this comment is written; override via the same-named env
 // vars if it has, and the runtime check will catch a stale default either way.
 //
-// STORAGE-LAYOUT VERIFICATION (manual diff, current live PoolLogic vs this branch):
-//   - 10 new state variables (withdrawalAttester, pendingWithdrawalAttester,
-//     pendingAttesterActivationTime, attesterRotationDelay, consumedPlanNonce,
-//     isAttestedWithdrawEnabled, attestedWithdrawVolume, attestedWithdrawDecayWindow,
-//     maxAttestedWithdrawVolumePerWindow, maxSurchargeBps), all appended strictly after
-//     pendingCashWithdrawCount (the previous last state variable). PoolLogic has no __gap —
-//     append-only ordering is what upgrade safety relies on here, same as every prior
-//     PoolLogic migration (see docs/upgradeable-contracts-notes.md).
+// LIVE STATE THIS SCRIPT ASSUMES (verify before signing — it is read at run time below):
+//   The live proxy is NOT yet on the CertiK-validated feature/06-aave-v4 implementation; it is on
+//   the older `audit`-branch implementation at initializer version 1, with no
+//   compoundedRewardIndex. scripts/upgrade_core_contracts.ts (audit -> feature/06-aave-v4) has not
+//   been executed. This script therefore also handles the version-2 auto-compounding migration
+//   (see MANDATORY MIGRATION SEQUENCE below) rather than assuming it has run.
+//
+// STORAGE-LAYOUT VERIFICATION (empirically diffed with compiler storageLayout output, and by a
+// dynamic upgrade of an `audit`-implementation proxy — slots 0-44 byte-identical before/after):
+//   - Slots 0-16 are identical in the live (`audit`) implementation, feature/06-aave-v4 and this
+//     branch.
+//   - feature/06-aave-v4 appended slots 17-22 (compoundedRewardIndex, autoCompoundStartRewardPerShare,
+//     rewardIndexInitialized, withdrawalEscrow, finalizedUnclaimedFusd, pendingCashWithdrawCount).
+//   - This branch appends 10 more strictly after pendingCashWithdrawCount, slots 23-32:
+//     withdrawalAttester, pendingWithdrawalAttester, pendingAttesterActivationTime,
+//     attesterRotationDelay, consumedPlanNonce, isAttestedWithdrawEnabled, attestedWithdrawVolume
+//     (uint64 + uint128 packed in one slot), attestedWithdrawDecayWindow,
+//     maxAttestedWithdrawVolumePerWindow, maxSurchargeBps. Live -> this branch is therefore 16
+//     appended variables in total. PoolLogic has no __gap — append-only ordering is what upgrade
+//     safety relies on, same as every prior PoolLogic migration (see
+//     docs/upgradeable-contracts-notes.md).
 //   - _withdrawProcessing/_checkCallResult and the pro-rata orchestration
 //     (_withdrawCashImmediateToSafe/_withdrawProRata/_withdrawProRataInternal/_withdrawOne)
 //     moved into the new WithdrawalPlanLib.sol — pure code motion, declares no storage of
@@ -41,19 +54,24 @@ import { ethers } from 'hardhat';
 //     externally-linked libraries the same way deployProxy does; this manual diff is
 //     authoritative, exactly as for every prior PoolLogic upgrade in this repo.
 //
-// MANDATORY POST-UPGRADE MIGRATION CALL — MUST be bundled atomically with the proxy
-// upgrade itself (via upgradeAndCall's data parameter), not run as a separate later
-// transaction:
-//
-//   PoolLogic.initializeAttestedWithdrawal(attester_, attesterRotationDelay_,
-//   attestedWithdrawDecayWindow_, maxAttestedWithdrawVolumePerWindow_, maxSurchargeBps_)
-//   (onlyOwner, reinitializer(3)). Reverts RotationDelayTooShort/DecayWindowTooShort if
-//   either delay/window argument is below its respective floor (MIN_ATTESTER_ROTATION_DELAY
-//   = 24h, MIN_ATTESTED_WITHDRAW_DECAY_WINDOW = 1h) — the feature cannot launch in an
-//   already-defeated state via this call. Leaving the proxy upgraded without this call is
-//   not itself unsafe for EXISTING functionality (the new withdrawal path stays disabled —
-//   isAttestedWithdrawEnabled defaults to false — and every other function is unaffected),
-//   but bundling avoids a second, separately-reviewed transaction.
+// MANDATORY MIGRATION SEQUENCE — one atomic Safe batch, in THIS order:
+//   1. ProxyAdmin.upgradeAndCall(proxy, newImpl, "0x")   — EMPTY init data. The initializers below
+//      are onlyOwner; inside upgradeAndCall's delegatecall msg.sender is the ProxyAdmin, not the
+//      Safe, so bundling them as upgradeAndCall data reverts OwnableUnauthorizedAccount. They must
+//      be separate transactions sent BY THE SAFE (the proxy's owner), atomic via the Safe's
+//      MultiSend batch.
+//   2. PoolLogic.initializeAutoCompounding()             — reinitializer(2). ONLY IF the live pool
+//      has not run it (compoundedRewardIndex == 0 / reverts). It MUST come before step 3: if
+//      initializeAttestedWithdrawal (reinitializer(3)) runs first, this one permanently reverts
+//      InvalidInitialization, compoundedRewardIndex stays 0, and stake/unstake/harvest are dead
+//      until another implementation upgrade. The script detects this at run time and includes it.
+//   3. PoolLogic.initializeAttestedWithdrawal(attester_, attesterRotationDelay_,
+//      attestedWithdrawDecayWindow_, maxAttestedWithdrawVolumePerWindow_, maxSurchargeBps_)
+//      (onlyOwner, reinitializer(3)). Reverts RotationDelayTooShort/DecayWindowTooShort if either
+//      delay/window argument is below its floor (MIN_ATTESTER_ROTATION_DELAY = 24h,
+//      MIN_ATTESTED_WITHDRAW_DECAY_WINDOW = 1h). It deliberately leaves isAttestedWithdrawEnabled
+//      FALSE: the feature stays inert until the manager calls setAttestedWithdrawEnabled(true)
+//      after verifying the attester service.
 //
 // WITHDRAWAL ATTESTER ADDRESS: this is a real operational decision (the off-chain
 // attester backend service's signing address, or an ERC-1271 contract wrapping it) — not
@@ -250,11 +268,44 @@ async function main() {
   console.log('New implementation:', newPoolLogicImplAddress);
 
   // -----------------------------------------------------------------------
-  // Phase 2: owner-gated call, bundled atomically via upgradeAndCall's data parameter.
+  // Phase 2: owner-gated calls, as one atomic Safe batch (see MANDATORY MIGRATION SEQUENCE in the
+  // header). The initializers are onlyOwner and must be sent BY THE SAFE, not passed as
+  // upgradeAndCall data — inside that delegatecall msg.sender is the ProxyAdmin, which is not the
+  // owner, so the call would revert OwnableUnauthorizedAccount.
   // -----------------------------------------------------------------------
   const poolLogic = await ethers.getContractAt('PoolLogic', POOL_LOGIC_PROXY, signer);
   const poolLogicAdmin = await ethers.getContractAt('ProxyAdmin', POOL_LOGIC_PROXY_ADMIN, signer);
 
+  // Detect the version-2 auto-compounding migration state on the LIVE proxy. On the older `audit`
+  // implementation compoundedRewardIndex() does not exist, so the call reverts — that, or a zero
+  // value, both mean "not initialized". If it is not initialized it MUST be initialized before the
+  // version-3 initializer, or it can never be (reinitializer(2) would then revert
+  // InvalidInitialization) and staking is permanently dead until another upgrade.
+  let autoCompoundingInitialized = false;
+  try {
+    autoCompoundingInitialized = (await poolLogic.compoundedRewardIndex()) !== 0n;
+  } catch {
+    autoCompoundingInitialized = false;
+  }
+  console.log(
+    '\nAuto-compounding (reinitializer(2)) already initialized on the live pool:',
+    autoCompoundingInitialized,
+  );
+  if (!autoCompoundingInitialized) {
+    console.log(
+      'The batch will therefore include initializeAutoCompounding() BEFORE ' +
+        'initializeAttestedWithdrawal() — the order is mandatory.',
+    );
+  }
+
+  const upgradeCalldata = poolLogicAdmin.interface.encodeFunctionData('upgradeAndCall', [
+    POOL_LOGIC_PROXY,
+    newPoolLogicImplAddress,
+    '0x',
+  ]);
+  const initializeAutoCompoundingCalldata = poolLogic.interface.encodeFunctionData(
+    'initializeAutoCompounding',
+  );
   const initializeAttestedWithdrawalCalldata = poolLogic.interface.encodeFunctionData(
     'initializeAttestedWithdrawal',
     [
@@ -265,23 +316,23 @@ async function main() {
       MAX_SURCHARGE_BPS,
     ],
   );
-  const poolLogicUpgradeCalldata = poolLogicAdmin.interface.encodeFunctionData('upgradeAndCall', [
-    POOL_LOGIC_PROXY,
-    newPoolLogicImplAddress,
-    initializeAttestedWithdrawalCalldata,
-  ]);
+
+  const batchTransactions = [
+    { to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: upgradeCalldata },
+    ...(autoCompoundingInitialized
+      ? []
+      : [{ to: POOL_LOGIC_PROXY, value: '0', data: initializeAutoCompoundingCalldata }]),
+    { to: POOL_LOGIC_PROXY, value: '0', data: initializeAttestedWithdrawalCalldata },
+  ];
 
   if (process.env.SEND === '1') {
     console.log(
-      '\nSEND=1 set — signing and broadcasting the upgrade directly with the local signer.',
+      '\nSEND=1 set — sending the batch in order with the local signer (fork/testnet only; the ' +
+        'signer must be the proxy owner).',
     );
-    await (
-      await poolLogicAdmin.upgradeAndCall(
-        POOL_LOGIC_PROXY,
-        newPoolLogicImplAddress,
-        initializeAttestedWithdrawalCalldata,
-      )
-    ).wait();
+    for (const tx of batchTransactions) {
+      await (await signer.sendTransaction({ to: tx.to, data: tx.data })).wait();
+    }
     console.log('Done.');
     return;
   }
@@ -299,10 +350,14 @@ async function main() {
       description:
         `Upgrades PoolLogic to the new implementation (${newPoolLogicImplAddress}), linked ` +
         'against freshly-deployed FundCalculationLibrary, PoolTxExecutor, CallResultChecker, ' +
-        'and the new WithdrawalPlanLib, bundling initializeAttestedWithdrawal(' +
+        'and the new WithdrawalPlanLib, as ONE atomic batch: (1) upgradeAndCall with empty data' +
+        (autoCompoundingInitialized ? '' : ', (2) initializeAutoCompounding()') +
+        `, then (${autoCompoundingInitialized ? '2' : '3'}) initializeAttestedWithdrawal(` +
         `${ATTESTER_ADDRESS}, ${ATTESTER_ROTATION_DELAY_SECONDS}, ` +
         `${ATTESTED_WITHDRAW_DECAY_WINDOW_SECONDS}, ` +
-        `${MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW}, ${MAX_SURCHARGE_BPS}) atomically. Propose via the DAO Safe ` +
+        `${MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW}, ${MAX_SURCHARGE_BPS}). The feature is ` +
+        'left DISABLED (isAttestedWithdrawEnabled == false); the manager enables it explicitly ' +
+        'after verifying the attester service. Propose via the DAO Safe ' +
         'multisig, do not execute with a single key. STRONGLY RECOMMENDED: dry-run against a ' +
         'fork of live mainnet state first, and independently reconfirm every address in this ' +
         "script's header before signing — this run's own live custody re-check already " +
@@ -310,7 +365,7 @@ async function main() {
         'not the moment this batch is actually signed.',
       txBuilderVersion: '1.16.5',
     },
-    transactions: [{ to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: poolLogicUpgradeCalldata }],
+    transactions: batchTransactions,
   };
   const safeFile = path.join(dir, `attested-withdrawal-upgrade-dao-safe-${chainId}.json`);
   fs.writeFileSync(safeFile, JSON.stringify(safeBatch, null, 2));

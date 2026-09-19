@@ -113,6 +113,9 @@ async function deployAttestedWithdrawalFixture() {
     // setMaxSurchargeBps() to opt in.
     0n,
   );
+  // initializeAttestedWithdrawal deliberately leaves the feature disabled — the manager enables it
+  // explicitly, so every test here starts from an enabled pool the same way production will.
+  await pool.connect(manager).setAttestedWithdrawEnabled(true);
 
   const chainId = (await ethers.provider.getNetwork()).chainId;
   const domain = {
@@ -220,7 +223,20 @@ async function deployUninitializedAttestedWithdrawalFixture() {
 
   const pool = PoolLogic.attach(await poolProxy.getAddress()) as any;
 
-  return { owner, manager, trader, user, attester, other, fusd, poolManager, pool };
+  return {
+    owner,
+    manager,
+    trader,
+    user,
+    attester,
+    other,
+    fusd,
+    poolManager,
+    pool,
+    PoolLogic,
+    poolImpl,
+    initData,
+  };
 }
 
 async function mintAndApproveFUSD(fusd: any, pool: any, signer: any, amount: bigint) {
@@ -1086,6 +1102,29 @@ describe('PoolLogic — attested selective withdrawal', () => {
       );
     });
 
+    it('initializeAttestedWithdrawal leaves the feature disabled until the manager explicitly enables it', async () => {
+      const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      const { pool, owner, manager, attester } = fixture;
+
+      await pool
+        .connect(owner)
+        .initializeAttestedWithdrawal(
+          await attester.getAddress(),
+          ONE_DAY,
+          ONE_HOUR,
+          ethers.parseUnits('1000000', 18),
+          0n,
+        );
+
+      // Configured but inert: an upgrade transaction must not switch on a path that pays out user
+      // funds on the strength of a hot key as a side effect.
+      expect(await pool.withdrawalAttester()).to.equal(await attester.getAddress());
+      expect(await pool.isAttestedWithdrawEnabled()).to.equal(false);
+
+      await pool.connect(manager).setAttestedWithdrawEnabled(true);
+      expect(await pool.isAttestedWithdrawEnabled()).to.equal(true);
+    });
+
     it('initializeAttestedWithdrawal itself enforces both floors, even on a fresh migration', async () => {
       const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
       const { pool, owner, attester } = fixture;
@@ -1675,5 +1714,92 @@ describe('PoolLogic — attested selective withdrawal', () => {
         .withArgs(userAddress, plan.nonce, 0n)
         .and.to.emit(pool, 'CashWithdrawImmediateProRata');
     });
+  });
+});
+
+describe('PoolLogic — live-upgrade migration sequence (transparent proxy, ProxyAdmin as msg.sender)', () => {
+  const ERC1967_ADMIN_SLOT = '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103';
+  const COMPOUNDED_REWARD_INDEX_SLOT = 17; // PoolLogic storage slot, verified via compiler layout
+
+  /// Simulates the live pool: a transparent proxy already initialized at version 1 whose
+  /// auto-compounding index was never set (as on the older implementation the mainnet proxy runs).
+  async function deployLiveLikeProxy() {
+    const f = await deployUninitializedAttestedWithdrawalFixture();
+    const { owner, PoolLogic, poolImpl, initData } = f;
+    const Proxy = await ethers.getContractFactory('PoolLogicTransparentProxy');
+    const proxy = await Proxy.deploy(
+      await poolImpl.getAddress(),
+      await owner.getAddress(),
+      initData,
+    );
+    await proxy.waitForDeployment();
+    const proxyAddress = await proxy.getAddress();
+
+    await ethers.provider.send('hardhat_setStorageAt', [
+      proxyAddress,
+      ethers.toBeHex(COMPOUNDED_REWARD_INDEX_SLOT, 32),
+      ethers.ZeroHash,
+    ]);
+
+    const adminAddress = ethers.getAddress(
+      '0x' + (await ethers.provider.getStorage(proxyAddress, ERC1967_ADMIN_SLOT)).slice(26),
+    );
+    const proxyAdmin = await ethers.getContractAt('ProxyAdmin', adminAddress);
+    const newImpl = await PoolLogic.deploy();
+    await newImpl.waitForDeployment();
+    const pool = PoolLogic.attach(proxyAddress) as any;
+    return { ...f, pool, proxyAddress, proxyAdmin, newImpl };
+  }
+
+  const initAttestedArgs = (attester: string) =>
+    [attester, ONE_DAY, ONE_HOUR, ethers.parseUnits('1000000', 18), 0n] as const;
+
+  it('starts from the live-like state: initialized at version 1 with no compounding index', async () => {
+    const { pool } = await loadFixture(deployLiveLikeProxy);
+    expect(await pool.compoundedRewardIndex()).to.equal(0n);
+  });
+
+  it('bundling the owner-only initializer as upgradeAndCall data reverts, because msg.sender there is the ProxyAdmin', async () => {
+    const { pool, owner, attester, proxyAdmin, proxyAddress, newImpl } =
+      await loadFixture(deployLiveLikeProxy);
+    const data = pool.interface.encodeFunctionData('initializeAttestedWithdrawal', [
+      ...initAttestedArgs(await attester.getAddress()),
+    ]);
+
+    await expectRevert(
+      proxyAdmin.connect(owner).upgradeAndCall(proxyAddress, await newImpl.getAddress(), data),
+      'OwnableUnauthorizedAccount',
+    );
+  });
+
+  it('running the version-3 initializer before the version-2 one permanently bricks auto-compounding', async () => {
+    const { pool, owner, attester, proxyAdmin, proxyAddress, newImpl } =
+      await loadFixture(deployLiveLikeProxy);
+    await proxyAdmin.connect(owner).upgradeAndCall(proxyAddress, await newImpl.getAddress(), '0x');
+
+    await pool
+      .connect(owner)
+      .initializeAttestedWithdrawal(...initAttestedArgs(await attester.getAddress()));
+    // OpenZeppelin's InvalidInitialization(): Hardhat does not name it through a proxy, so match
+    // its selector.
+    await expectRevert(pool.connect(owner).initializeAutoCompounding(), '0xf92ee8a9');
+    // The index can never be set now, so stake/unstake/harvest (which require it) are dead.
+    expect(await pool.compoundedRewardIndex()).to.equal(0n);
+  });
+
+  it('the correct sequence works: empty-data upgrade, then initializeAutoCompounding, then initializeAttestedWithdrawal, all sent by the owner', async () => {
+    const { pool, owner, attester, proxyAdmin, proxyAddress, newImpl } =
+      await loadFixture(deployLiveLikeProxy);
+    await proxyAdmin.connect(owner).upgradeAndCall(proxyAddress, await newImpl.getAddress(), '0x');
+
+    await pool.connect(owner).initializeAutoCompounding();
+    await pool
+      .connect(owner)
+      .initializeAttestedWithdrawal(...initAttestedArgs(await attester.getAddress()));
+
+    expect(await pool.compoundedRewardIndex()).to.equal(ethers.parseUnits('1', 18));
+    expect(await pool.withdrawalAttester()).to.equal(await attester.getAddress());
+    // The feature is configured but inert until the manager explicitly enables it.
+    expect(await pool.isAttestedWithdrawEnabled()).to.equal(false);
   });
 });

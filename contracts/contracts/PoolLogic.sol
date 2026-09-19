@@ -459,7 +459,11 @@ contract PoolLogic is
     ///         already-deployed, upgraded pool. Both floors are enforced here too, not just in
     ///         the standalone setters, so the feature can never launch in an already-defeated
     ///         state — see docs/attested-selective-withdrawal-design.md's "Upgrade & Storage
-    ///         Migration" section.
+    ///         Migration" section. Deliberately leaves isAttestedWithdrawEnabled FALSE: the
+    ///         feature pays out user funds on the strength of a hot attester key, so the manager
+    ///         enables it explicitly (setAttestedWithdrawEnabled) only after the attester service
+    ///         and its parameters have been verified, instead of it going live as a side effect of
+    ///         an upgrade transaction.
     /// @param maxSurchargeBps_ Starting value for the surcharge ceiling (see maxSurchargeBps's
     ///        own storage docs) — bundled into this same initializer rather than a separate
     ///        migration, since this feature has not yet been deployed to any live pool (no
@@ -485,7 +489,6 @@ contract PoolLogic is
         attestedWithdrawDecayWindow = attestedWithdrawDecayWindow_;
         maxAttestedWithdrawVolumePerWindow = maxAttestedWithdrawVolumePerWindow_;
         maxSurchargeBps = maxSurchargeBps_;
-        isAttestedWithdrawEnabled = true;
     }
 
     /// @notice FNA-03: one-time wiring of the dedicated WithdrawalEscrow deployed for this
