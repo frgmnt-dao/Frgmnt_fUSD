@@ -362,13 +362,13 @@ This means _replacing trust in a new key_ is slow, observable, and outside the s
 
 ```solidity
 pressure = min(decayedAccumulatedVolume(including this withdrawal) * 1e18 / valueBefore, 1e18)
-effectiveMaxSurchargeBps = min(maxSurchargeBps, MAX_SURCHARGE_BPS_CEILING)   // 1e18-scale in, bps out
-surchargeBps = pressure * effectiveMaxSurchargeBps / 1e18
-if (surchargeBps > plan.maxAcceptableSurchargeBps) revert SurchargeTooHigh();
+effectiveMaxSurchargeBps = min(maxSurchargeBps, MAX_SURCHARGE_BPS_CEILING)
+surchargeBpsX18 = pressure * effectiveMaxSurchargeBps            // bps scaled by 1e18, not truncated
+if (ceil(surchargeBpsX18 / 1e18) > plan.maxAcceptableSurchargeBps) revert SurchargeTooHigh();
 
 // ... after fairFusd is known:
-target = fairFusd - (fairFusd * surchargeBps) / 10_000
-surchargeAmount = fairFusd - target
+surchargeAmount = fairFusd * surchargeBpsX18 / (1e18 * 10_000)
+target = fairFusd - surchargeAmount
 ```
 
 `pressure` is the same continuously-decaying volume accumulator the circuit breaker already tracks (see [Bounding a Compromised Attester Key](#bounding-a-compromised-attester-key)), expressed as a fraction of the fund's own current value rather than compared against a manually-chosen cap. This was a deliberate choice over the alternative of tracking each plan's actual asset-composition deviation directly: a composition-aware measure would price the externality more precisely, but computing it requires comparing the plan's allocations against the fund's live per-asset weights — real additional logic and storage reads this feature's bytecode budget could not absorb on top of everything else already in this function (see [Bytecode Size Budget](#implementation-note-bytecode-size-budget)). Scaling recent withdrawal volume against fund size is a cheaper proxy for the same thing: it needs no new state (the accumulator already exists), and it naturally captures both a single very large withdrawal and a burst of smaller ones, since either one moves the same underlying number. It does not distinguish a withdrawal that drained one already-thin asset from an equally-sized one spread evenly across many healthy assets — a known, accepted imprecision, not an oversight.

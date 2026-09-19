@@ -405,8 +405,14 @@ library WithdrawalPlanLib {
         uint256 effectiveMaxSurchargeBps = input.maxSurchargeBps > MAX_SURCHARGE_BPS_CEILING
             ? MAX_SURCHARGE_BPS_CEILING
             : input.maxSurchargeBps;
-        uint256 surchargeBps = (pressure * effectiveMaxSurchargeBps) / 1e18;
-        if (surchargeBps > plan.maxAcceptableSurchargeBps) revert SurchargeTooHigh();
+        // Kept in bps scaled by 1e18 (not truncated to whole bps): truncating created a
+        // zero-surcharge zone below 1% pressure and 1-bp steps above it, contradicting the
+        // continuous ramp this mechanism promises. The attester's signed ceiling is compared
+        // against this value rounded UP, so it is never understated.
+        uint256 surchargeBpsX18 = pressure * effectiveMaxSurchargeBps;
+        if ((surchargeBpsX18 + 1e18 - 1) / 1e18 > plan.maxAcceptableSurchargeBps) {
+            revert SurchargeTooHigh();
+        }
 
         // Audit finding (4th round): the two-sided value-conservation check previously bounded
         // valueDelta against the raw, nominal `netFusd` fUSD amount. computeImmediateWithdrawPortion
@@ -465,13 +471,13 @@ library WithdrawalPlanLib {
         // surcharge computed above. Both sides of the value-conservation bound below reference
         // target, not fairFusd — they must move together, since bounding the upper side against
         // fairFusd while the lower side demands target would be internally inconsistent (the
-        // upper bound would then permit paying out MORE than target + surchargeBps allows,
+        // upper bound would then permit paying out MORE than target + the surcharge allows,
         // silently undoing the surcharge for any withdrawal that happens to deliver close to
         // fairFusd). surchargeAmount is this gap, deterministic from target/fairFusd — not
         // measured from the realized valueDelta below — so it's known even if the loop delivers
         // less than target for unrelated reasons (e.g. minValueOutBps slack).
-        uint256 target = fairFusd - (fairFusd * surchargeBps) / 10_000;
-        result.surchargeAmount = fairFusd - target;
+        result.surchargeAmount = (fairFusd * surchargeBpsX18) / (1e18 * 10_000);
+        uint256 target = fairFusd - result.surchargeAmount;
 
         (result.outAssets, result.outAmounts) = _processAllocations(
             input.poolManagerLogic,

@@ -1573,13 +1573,11 @@ describe('PoolLogic — attested selective withdrawal', () => {
       await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
 
       // valueBefore = 80, netFusd = 50 (no exit fee in this fixture) — pressure = 50/80 = 0.625
-      // (62.5%), surchargeBps = 0.625 * 100 = 62 (integer-truncated from 62.5, i.e. 0.62%).
-      // fairFusd (haircut-adjusted, 80% collateralized) = 50 * 0.8 = 40 — NOT the raw 50 claim.
-      // target = 40 - (40 * 62)/10000 = 40 - 0.248 = 39.752; surchargeAmount = 0.248. Delivering
-      // 39.5 (inside [target*(1-1%), target+DUST_TOLERANCE] = [39.3545, 39.752...001]) proves the
-      // surcharge was computed against the haircut-adjusted 40, not the nominal 50 claim — sizing
-      // against 50 instead would put 39.5 outside a very different, wrong bound and this plan
-      // would either revert or the assertion below would fail to match.
+      // (62.5%), so the surcharge is 62.5 bps (the amount is computed at full precision, not
+      // truncated to whole bps). fairFusd (haircut-adjusted, 80% collateralized) = 50 * 0.8 = 40 —
+      // NOT the raw 50 claim. surchargeAmount = 40 * 62.5 / 10000 = 0.25, target = 39.75.
+      // Delivering 39.5 (inside [target*(1-1%), target+DUST_TOLERANCE] = [39.3525, 39.751]) proves
+      // the surcharge was computed against the haircut-adjusted 40, not the nominal 50 claim.
       const userAddress = await user.getAddress();
       const assetAddress = await asset.getAddress();
       const plan = buildPlan({
@@ -1605,6 +1603,58 @@ describe('PoolLogic — attested selective withdrawal', () => {
       const valueDelta = ethers.parseUnits('39.5', 18);
       expect(accountedAssetsBefore - accountedAssetsAfter).to.equal(valueDelta);
       expect(accountedAssetsAfter).to.equal(await asset.balanceOf(await pool.getAddress()));
+    });
+
+    it('charges a nonzero surcharge below 1% pressure instead of truncating it to zero, and rounds the attester ceiling comparison up', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, fusd, asset, user, attester, owner } = fixture;
+      await fundPoolAndUser(fixture);
+      await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+
+      // 5 of a 1000-value fund = 0.5% pressure. With whole-bp truncation the surcharge used to be
+      // exactly 0 here; at full precision it is 0.5 bps, i.e. 5 * 0.5 / 10000 = 0.00025.
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+      const five = ethers.parseUnits('5', 18);
+      const allocations = [
+        { asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: five },
+      ];
+
+      // 0.5 bps rounds UP to 1 for the ceiling comparison, so a signed ceiling of 0 must reject.
+      const zeroCeiling = buildPlan({
+        userAddress,
+        assetAddress,
+        fusdAmount: five,
+        allocations,
+        nonce: 0n,
+        maxAcceptableSurchargeBps: 0n,
+      });
+      await expectRevert(
+        pool
+          .connect(user)
+          .withdrawCashImmediateWithPlan(
+            zeroCeiling,
+            await signPlan(fixture, zeroCeiling, attester),
+            [],
+          ),
+        'SurchargeTooHigh',
+      );
+
+      const ok = buildPlan({
+        userAddress,
+        assetAddress,
+        fusdAmount: five,
+        allocations,
+        nonce: 1n,
+        maxAcceptableSurchargeBps: 1n,
+      });
+      await expect(
+        pool
+          .connect(user)
+          .withdrawCashImmediateWithPlan(ok, await signPlan(fixture, ok, attester), []),
+      )
+        .to.emit(pool, 'AttestedWithdrawPlanExecuted')
+        .withArgs(userAddress, 1n, ethers.parseUnits('0.00025', 18));
     });
 
     it("emits AttestedWithdrawPlanExecuted and CashWithdrawImmediateProRata under the pool's own address, even though both are emitted from inside the delegatecalled WithdrawalPlanLib", async () => {
