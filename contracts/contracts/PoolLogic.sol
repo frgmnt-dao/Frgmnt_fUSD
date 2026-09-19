@@ -245,6 +245,14 @@ contract PoolLogic is
     ///         safe — the same "no floor needed" reasoning as maxAttestedWithdrawVolumePerWindow.
     uint256 public maxSurchargeBps;
 
+    /// @notice Latched by the factoryOwner's emergency stop (setAttestedWithdrawEnabled(false) from
+    ///         the factoryOwner). While set, the manager cannot switch the feature back on, so a
+    ///         colluding manager cannot undo the stop (or wait out an attester rotation and
+    ///         re-enable). Only the factoryOwner clears it, and clearing it does not itself enable
+    ///         the feature — the manager still has to do that, after reviewing the attester.
+    /// @dev Appended after maxSurchargeBps (new slot); append-only, no existing slot moves.
+    bool public attestedWithdrawOwnerStopped;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -275,6 +283,7 @@ contract PoolLogic is
     error OnlyTokenLogic();
     error OnlyFactoryOwner();
     error NotPlanUser();
+    error AttestedWithdrawOwnerStopActive();
     error AttestedWithdrawalAlreadyInitialized();
     error AttestedWithdrawalNotInitialized();
     error RotationDelayTooShort();
@@ -1045,16 +1054,23 @@ contract PoolLogic is
 
     /// @notice Deliberately independent of isImmediateWithdrawEnabled — see this variable's own
     ///         storage docs above for why the two flags must not be coupled.
-    /// @dev The manager may switch this either way. The factoryOwner may only switch it OFF: it is
-    ///      the independent emergency stop for a compromised or colluding manager (who otherwise
-    ///      controls the attester rotation and the volume cap), and it can never be used to turn
-    ///      the feature on. Switching off also clears any pending attester proposal, so a
-    ///      malicious proposal that is still inside its rotation delay cannot be activated later.
+    /// @dev The manager may switch this either way, except while the factoryOwner's stop is
+    ///      latched. The factoryOwner is the independent emergency stop for a compromised or
+    ///      colluding manager (who otherwise controls the attester rotation and the volume cap):
+    ///      calling this with `false` switches the feature off AND latches the stop, so the manager
+    ///      cannot simply switch it back on. The factoryOwner calling it with `true` only lifts the
+    ///      latch — it never itself enables the feature, so the emergency stop can never be used
+    ///      as an enable lever. Switching off also clears any pending attester proposal, so a
+    ///      malicious proposal still inside its rotation delay cannot be activated later.
     function setAttestedWithdrawEnabled(bool enabled) external {
         if (msg.sender != _manager()) {
-            if (enabled || msg.sender != IPoolManagerLogic(poolManagerLogic).factoryOwner()) {
+            if (msg.sender != IPoolManagerLogic(poolManagerLogic).factoryOwner()) {
                 revert OnlyManager();
             }
+            attestedWithdrawOwnerStopped = !enabled;
+            if (enabled) return;
+        } else if (enabled && attestedWithdrawOwnerStopped) {
+            revert AttestedWithdrawOwnerStopActive();
         }
         isAttestedWithdrawEnabled = enabled;
         if (!enabled) {

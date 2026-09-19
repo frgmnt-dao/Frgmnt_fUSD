@@ -1598,7 +1598,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
       expect(await pool.withdrawalAttester()).to.equal(candidate);
     });
 
-    it('lets the factoryOwner emergency-stop the feature (off only) and clears a pending attester proposal', async () => {
+    it('lets the factoryOwner emergency-stop the feature and clears a pending attester proposal', async () => {
       const fixture = await loadFixture(deployAttestedWithdrawalFixture);
       const { pool, manager, owner, other } = fixture;
 
@@ -1609,14 +1609,57 @@ describe('PoolLogic — attested selective withdrawal', () => {
       // The factoryOwner — independent of the manager — can switch the feature off...
       await pool.connect(owner).setAttestedWithdrawEnabled(false);
       expect(await pool.isAttestedWithdrawEnabled()).to.equal(false);
+      expect(await pool.attestedWithdrawOwnerStopped()).to.equal(true);
       // ...which also cancels the pending proposal, so it cannot be activated once the delay passes.
       expect(await pool.pendingWithdrawalAttester()).to.equal(ethers.ZeroAddress);
       expect(await pool.pendingAttesterActivationTime()).to.equal(0n);
       await time.increase(ONE_DAY + 1);
       await expectRevert(pool.connect(other).activateWithdrawalAttester(), 'NoRotationPending');
+    });
 
-      // It can never be used to turn the feature ON — that stays the manager's decision.
-      await expectRevert(pool.connect(owner).setAttestedWithdrawEnabled(true), 'OnlyManager');
+    it('the factoryOwner stop is sticky: the manager cannot re-enable, even after re-proposing and rotating an attester', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, manager, owner, other } = fixture;
+
+      await pool.connect(owner).setAttestedWithdrawEnabled(false);
+      await expectRevert(
+        pool.connect(manager).setAttestedWithdrawEnabled(true),
+        'AttestedWithdrawOwnerStopActive',
+      );
+
+      // A colluding manager waits out a fresh rotation while disabled...
+      await pool.connect(manager).proposeWithdrawalAttester(await other.getAddress());
+      await time.increase(ONE_DAY + 1);
+      await pool.connect(other).activateWithdrawalAttester();
+      // ...but still cannot switch the feature back on.
+      await expectRevert(
+        pool.connect(manager).setAttestedWithdrawEnabled(true),
+        'AttestedWithdrawOwnerStopActive',
+      );
+      expect(await pool.isAttestedWithdrawEnabled()).to.equal(false);
+    });
+
+    it('only the factoryOwner lifts the stop, and lifting it does not itself enable the feature', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, manager, owner, other } = fixture;
+
+      await pool.connect(owner).setAttestedWithdrawEnabled(false);
+      await expectRevert(pool.connect(other).setAttestedWithdrawEnabled(true), 'OnlyManager');
+
+      await pool.connect(owner).setAttestedWithdrawEnabled(true);
+      expect(await pool.attestedWithdrawOwnerStopped()).to.equal(false);
+      // The emergency stop can never be used as an enable lever.
+      expect(await pool.isAttestedWithdrawEnabled()).to.equal(false);
+
+      await pool.connect(manager).setAttestedWithdrawEnabled(true);
+      expect(await pool.isAttestedWithdrawEnabled()).to.equal(true);
+    });
+
+    it('a manager-initiated disable is not latched: the manager can switch back on', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, manager } = fixture;
+      await pool.connect(manager).setAttestedWithdrawEnabled(false);
+      expect(await pool.attestedWithdrawOwnerStopped()).to.equal(false);
       await pool.connect(manager).setAttestedWithdrawEnabled(true);
       expect(await pool.isAttestedWithdrawEnabled()).to.equal(true);
     });

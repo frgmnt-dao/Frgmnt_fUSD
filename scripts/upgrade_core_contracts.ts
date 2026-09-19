@@ -24,8 +24,16 @@ import { ethers, upgrades } from 'hardhat';
 // Also re-validated automatically per-contract below via
 // @openzeppelin/hardhat-upgrades' forceImport + validateUpgrade.
 //
-// TWO MANDATORY POST-UPGRADE MIGRATION CALLS — MUST be bundled atomically with their
-// respective proxy upgrade, not run as a separate later transaction:
+// TWO MANDATORY POST-UPGRADE MIGRATION CALLS — MUST land atomically with their respective
+// proxy upgrade, not as a separate later transaction. TokenLogic's is bundled as
+// upgradeToAndCall data (msg.sender there is still the DAO Safe). PoolLogic's CANNOT be bundled
+// as upgradeAndCall data — inside that delegatecall msg.sender is the ProxyAdmin, so the
+// onlyOwner initializer would revert — so it is a separate owner-sent call placed in the same
+// Safe MultiSend batch (atomic all the same). On this branch PoolLogic also links
+// WithdrawalPlanLib and carries the attested-withdrawal feature, which stays dormant (disabled,
+// no attester) until initializeAttestedWithdrawal() runs — see
+// scripts/upgrade_attested_withdrawal.ts. If this script is used to install the implementation,
+// that script's own upgrade step is redundant; run only its initializer step.
 //
 //   1) PoolLogic.initializeAutoCompounding() (onlyOwner, reinitializer(2)). The new
 //      compoundedRewardIndex field starts at 0 on the live proxy (the audit-branch
@@ -89,9 +97,10 @@ import { ethers, upgrades } from 'hardhat';
 // the CURRENT live implementation — so it's issued as its own plain transaction directly
 // against the proxy rather than through upgradeAndCall's data parameter.
 //
-// LIBRARY LINKING: PoolLogic links FundCalculationLibrary, PoolTxExecutor, and
-// CallResultChecker at compile time. The first two changed since audit and are
-// redeployed here; CallResultChecker is unchanged (confirmed via diff) and reused.
+// LIBRARY LINKING: PoolLogic links FundCalculationLibrary, PoolTxExecutor, CallResultChecker
+// and WithdrawalPlanLib at compile time. The first two changed since audit and are redeployed
+// here, WithdrawalPlanLib is new and deployed here (linked to the new FundCalculationLibrary);
+// CallResultChecker is unchanged (confirmed via diff) and reused.
 //
 // CUSTODY (confirmed on-chain 2026-08-07 via direct eth_call against each contract —
 // re-verify before running, do not assume; an earlier draft of this comment incorrectly
@@ -186,6 +195,17 @@ async function main() {
     EXISTING_CALL_RESULT_CHECKER + ')',
   );
 
+  // PoolLogic on this branch also links WithdrawalPlanLib (the extracted withdrawal
+  // orchestration), which itself links FundCalculationLibrary. Without it PoolLogic cannot
+  // be deployed at all.
+  const WithdrawalPlanLibFactory = await ethers.getContractFactory('WithdrawalPlanLib', {
+    signer,
+    libraries: { FundCalculationLibrary: fundLib.target },
+  });
+  const withdrawalPlanLib = await WithdrawalPlanLibFactory.deploy();
+  await withdrawalPlanLib.waitForDeployment();
+  console.log('New WithdrawalPlanLib:', withdrawalPlanLib.target);
+
   // -----------------------------------------------------------------------
   // Phase 1b: AssetHandler (Transparent) — storage-validated deploy.
   // -----------------------------------------------------------------------
@@ -240,6 +260,7 @@ async function main() {
       FundCalculationLibrary: fundLib.target,
       PoolTxExecutor: poolTxExecutor.target,
       CallResultChecker: EXISTING_CALL_RESULT_CHECKER,
+      WithdrawalPlanLib: withdrawalPlanLib.target,
     },
   });
   const newPoolLogicImpl = await PoolLogicFactory.deploy();
@@ -290,10 +311,15 @@ async function main() {
     'initializeAutoCompounding',
     [],
   );
+  // The upgrade itself carries EMPTY init data. initializeAutoCompounding() is onlyOwner, and
+  // inside ProxyAdmin.upgradeAndCall's delegatecall msg.sender is the ProxyAdmin, not the owner,
+  // so passing it as upgradeAndCall data would revert OwnableUnauthorizedAccount and fail the
+  // whole batch. It is instead a separate call sent by the owner (the DAO Safe) and made atomic
+  // with the upgrade by being in the same Safe MultiSend batch.
   const poolLogicUpgradeCalldata = poolLogicAdmin.interface.encodeFunctionData('upgradeAndCall', [
     POOL_LOGIC_PROXY,
     newPoolLogicImplAddress,
-    initializeAutoCompoundingCalldata,
+    '0x',
   ]);
 
   // FNA-50: plain call on the AssetHandler proxy itself, NOT routed through
@@ -321,12 +347,10 @@ async function main() {
       await tokenLogic.upgradeToAndCall(newTokenLogicImplAddress, initializeDepositFusdCapCalldata)
     ).wait();
     await (
-      await poolLogicAdmin.upgradeAndCall(
-        POOL_LOGIC_PROXY,
-        newPoolLogicImplAddress,
-        initializeAutoCompoundingCalldata,
-      )
+      await poolLogicAdmin.upgradeAndCall(POOL_LOGIC_PROXY, newPoolLogicImplAddress, '0x')
     ).wait();
+    // Owner-sent, immediately after the upgrade (see poolLogicUpgradeCalldata above).
+    await (await poolLogic.initializeAutoCompounding()).wait();
     await (await assetHandler.setSequencerUptimeFeed(SEQUENCER_UPTIME_FEED)).wait();
     console.log('Done.');
     return;
@@ -387,9 +411,10 @@ async function main() {
       name: 'PoolLogic + TokenLogic upgrade (sync to feature/06-aave-v4)',
       description:
         `Upgrades PoolLogic to the new implementation (${newPoolLogicImplAddress}), ` +
-        'linked against redeployed FundCalculationLibrary and PoolTxExecutor, bundling ' +
-        'initializeAutoCompounding() atomically — stake/unstake/harvest stay broken for ' +
-        'every staker until this transaction lands. Also upgrades TokenLogic to the new ' +
+        'linked against redeployed FundCalculationLibrary, PoolTxExecutor and ' +
+        `WithdrawalPlanLib (${withdrawalPlanLib.target}), then calling ` +
+        'initializeAutoCompounding() as a separate owner-sent transaction in the same atomic ' +
+        'batch — stake/unstake/harvest stay broken for every staker until this batch lands. Also upgrades TokenLogic to the new ' +
         `implementation (${newTokenLogicImplAddress}), bundling ` +
         `initializeDepositFusdCap(${NEW_DEPOSIT_FUSD_CAP.toString()}) atomically — ` +
         'deposits stay broken (0 cap) until this transaction lands. Propose via the DAO ' +
@@ -401,6 +426,8 @@ async function main() {
     },
     transactions: [
       { to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: poolLogicUpgradeCalldata },
+      // Sent by the Safe (PoolLogic's owner), in the same MultiSend batch as the upgrade above.
+      { to: POOL_LOGIC_PROXY, value: '0', data: initializeAutoCompoundingCalldata },
       { to: TOKEN_LOGIC_PROXY, value: '0', data: tokenLogicUpgradeCalldata },
     ],
   };
