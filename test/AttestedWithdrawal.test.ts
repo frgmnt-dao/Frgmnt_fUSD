@@ -1255,7 +1255,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
     // surchargeAmount = 0.1.
     const SURCHARGE_CEILING_BPS = 100n; // WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING
 
-    it('applies a nonzero surcharge that shows up as extra retained accountedAssets, not as a bigger payout', async () => {
+    it('retains the surcharge in the fund without leaving accountedAssets above NAV', async () => {
       const fixture = await loadFixture(deployAttestedWithdrawalFixture);
       const { pool, fusd, asset, user, attester, owner } = fixture;
       await fundPoolAndUser(fixture);
@@ -1291,16 +1291,14 @@ describe('PoolLogic — attested selective withdrawal', () => {
       const valueDelta = after - before; // 99, exactly what was actually delivered
       expect(valueDelta).to.equal(ethers.parseUnits('99', 18));
 
-      // No overhang in this fixture (accountedAssets == fund value before the withdrawal), so
-      // absent any surcharge the reduction would equal valueDelta exactly (matching the sibling
-      // "reduces by exactly valueDelta when there is no overhang" FundCalculationLibrary test).
-      // The surcharge shrinks that reduction further, by exactly surchargeAmount = 0.1 — i.e.
-      // accountedAssets ends up 0.1 HIGHER than a same-sized surcharge-free withdrawal would
-      // have left it, even though the user received the same 99 either way. That 0.1 is the
-      // withheld slice staying inside the fund as extra backing for remaining stakers, not paid
-      // to the user and not paid to the manager.
-      const surchargeAmount = ethers.parseUnits('0.1', 18);
-      expect(accountedAssetsBefore - accountedAssetsAfter).to.equal(valueDelta - surchargeAmount);
+      // accountedAssets falls by exactly the real outflow (valueDelta) — no extra adjustment for
+      // the surcharge. The user received less than a surcharge-free withdrawal would have paid,
+      // so the fund already keeps the withheld slice through the smaller NAV drop, and
+      // accountedAssets must stay EQUAL to NAV afterwards: no overhang (which would swallow the
+      // next genuine yield) and no gap (which the next accrual would treat as yield and charge
+      // the manager's performance fee on).
+      expect(accountedAssetsBefore - accountedAssetsAfter).to.equal(valueDelta);
+      expect(accountedAssetsAfter).to.equal(await asset.balanceOf(await pool.getAddress()));
     });
 
     it('reverts SurchargeTooHigh when the live-computed surcharge exceeds the attester-signed ceiling, and succeeds at the exact boundary', async () => {
@@ -1605,8 +1603,8 @@ describe('PoolLogic — attested selective withdrawal', () => {
       const accountedAssetsAfter = await pool.accountedAssets();
 
       const valueDelta = ethers.parseUnits('39.5', 18);
-      const surchargeAmount = ethers.parseUnits('0.248', 18);
-      expect(accountedAssetsBefore - accountedAssetsAfter).to.equal(valueDelta - surchargeAmount);
+      expect(accountedAssetsBefore - accountedAssetsAfter).to.equal(valueDelta);
+      expect(accountedAssetsAfter).to.equal(await asset.balanceOf(await pool.getAddress()));
     });
 
     it("emits AttestedWithdrawPlanExecuted and CashWithdrawImmediateProRata under the pool's own address, even though both are emitted from inside the delegatecalled WithdrawalPlanLib", async () => {

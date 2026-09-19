@@ -1168,15 +1168,12 @@ contract PoolLogic is
             result.completeFundValue,
             result.valueDelta
         );
-        // Surcharge: the withheld slice of this withdrawal's entitlement is retained inside the
-        // fund by reducing how much accountedAssets gets pulled down for this withdrawal, rather
-        // than by an unconditional separate increase — accountedAssets only ever rises through
-        // ordinary yield accrual (_accrueYield()) elsewhere in this contract, and crediting the
-        // surcharge that way would let the manager's next performance-fee accrual skim a cut of
-        // it, exactly what retaining it in the fund is meant to avoid. This costs no extra
-        // storage write — it only changes the value fed into the single accountedAssets write
-        // below.
-        reduction = reduction > result.surchargeAmount ? reduction - result.surchargeAmount : 0;
+        // The surcharge needs no adjustment here. valueDelta is the real value that left the fund
+        // and the user receives only `target`, so the withheld slice is already retained by the
+        // smaller NAV drop; reducing accountedAssets by valueDelta (plus the FNA-42 loss share)
+        // keeps it equal to NAV — no overhang and no yield gap, so nothing is skimmed as
+        // performance fee. Subtracting surchargeAmount again would leave accountedAssets above
+        // NAV and swallow the next genuine yield.
         if (accountedAssets < reduction) revert InvalidFundValue();
         accountedAssets -= reduction;
 

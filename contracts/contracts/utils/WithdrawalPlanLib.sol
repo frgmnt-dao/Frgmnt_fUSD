@@ -156,11 +156,10 @@ library WithdrawalPlanLib {
         uint64 newVolumeTimestamp;
         uint128 newVolumeAccumulated;
         // fairFusd - target (see executeWithdrawalPlan): the deliberately-undelivered slice of
-        // this withdrawal's entitlement, retained inside the fund rather than paid out. Deterministic
-        // from target/fairFusd, not measured from the realized valueDelta. PoolLogic uses this to
-        // shrink the accountedAssets reduction it would otherwise apply for this withdrawal (see
-        // withdrawCashImmediateWithPlan()) — it never flows through ordinary yield accrual, so it
-        // is never fee-eligible for the manager.
+        // this withdrawal's entitlement, retained inside the fund. Deterministic from
+        // target/fairFusd, not measured from the realized valueDelta. Informational only (it is
+        // emitted in AttestedWithdrawPlanExecuted): accounting needs no adjustment for it, since
+        // valueDelta already reflects the smaller outflow.
         uint256 surchargeAmount;
     }
 
