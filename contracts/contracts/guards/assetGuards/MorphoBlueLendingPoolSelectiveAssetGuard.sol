@@ -38,6 +38,14 @@ import { MorphoBlueLendingPoolAssetGuard } from "./MorphoBlueLendingPoolAssetGua
 ///      not choose. Value delivered is still bounded on-chain by the plan's value-conservation
 ///      check regardless of this guard's arithmetic.
 ///
+///      Known limits (inherited from reusing the validated collectors, which this contract does
+///      not modify): the collectors read EVERY tracked market before the output is filtered, so a
+///      market the plan did not select can still revert the call if its IRM or oracle reverts, and
+///      gas grows with the number of tracked markets rather than the selection size. The liquidity
+///      ceiling is decoupled from unselected markets; failures are not. Also, as in the base
+///      guard, a donation of supply shares into a near-fully-utilised selected market can drive
+///      the ceiling toward zero and delay a plan; the attester can drop that market from the plan.
+///
 ///      Position id = the market Id (bytes32).
 contract MorphoBlueLendingPoolSelectiveAssetGuard is
     MorphoBlueLendingPoolAssetGuard,

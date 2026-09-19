@@ -924,6 +924,109 @@ describe('PoolLogic — attested selective withdrawal', () => {
     });
   });
 
+  it('only the plan user can execute their plan (a third party cannot force-execute it)', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, asset, user, attester, other } = fixture;
+    await fundPoolAndUser(fixture);
+    const plan = buildPlan({
+      ...fixture,
+      userAddress: await user.getAddress(),
+      assetAddress: await asset.getAddress(),
+    });
+    const signature = await signPlan(fixture, plan, attester);
+    await expectRevert(
+      pool.connect(other).withdrawCashImmediateWithPlan(plan, signature, []),
+      'NotPlanUser',
+    );
+    // The nonce is untouched, so the rightful user can still execute it.
+    await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+  });
+
+  it('enforces the exit cooldown on the plan path', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, fusd, asset, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+    const userAddress = await user.getAddress();
+    await fusd.setExitCooldown(userAddress, 1000n);
+    const plan = buildPlan({ ...fixture, userAddress, assetAddress: await asset.getAddress() });
+    const signature = await signPlan(fixture, plan, attester);
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+      'CooldownActive',
+    );
+  });
+
+  it('charges the exit fee on the plan path: the user receives the net amount', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, fusd, asset, poolManager, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+    await poolManager.setFees(0n, 0n, 0n, 100n, 10_000n); // 1% exit fee
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const net = ethers.parseUnits('99', 18);
+    const plan = buildPlan({
+      ...fixture,
+      userAddress,
+      assetAddress,
+      allocations: [{ asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: net }],
+    });
+    const signature = await signPlan(fixture, plan, attester);
+    const before = await asset.balanceOf(userAddress);
+    await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+    expect((await asset.balanceOf(userAddress)) - before).to.equal(net);
+    expect(await fusd.balanceOf(userAddress)).to.equal(0n);
+  });
+
+  it('accepts a small under-delivery inside the signed minValueOutBps tolerance, and rejects it outside', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, asset, assetGuard, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    // The guard delivers 99.5% of what was asked.
+    await assetGuard.setWithdrawMode(false, false, 9_950);
+
+    let plan = buildPlan({ ...fixture, userAddress, assetAddress, minValueOutBps: 0n });
+    let signature = await signPlan(fixture, plan, attester);
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+      'ValueConservationViolated',
+    );
+
+    plan = buildPlan({ ...fixture, userAddress, assetAddress, minValueOutBps: 100n });
+    signature = await signPlan(fixture, plan, attester);
+    const before = await asset.balanceOf(userAddress);
+    await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+    expect((await asset.balanceOf(userAddress)) - before).to.equal(ethers.parseUnits('99.5', 18));
+  });
+
+  it('rejects a plan redeeming less than the minimum net fUSD (dust-extraction floor)', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, asset, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+    const plan = buildPlan({
+      ...fixture,
+      userAddress,
+      assetAddress,
+      fusdAmount: 2n,
+      allocations: [
+        {
+          asset: assetAddress,
+          useFixedAmount: true,
+          portion: 0n,
+          fixedAmount: 2n,
+        },
+      ],
+    });
+    const signature = await signPlan(fixture, plan, attester);
+    await expectRevert(
+      pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
+      'WithdrawAmountTooSmall',
+    );
+  });
+
   it('cannot draw down more value than a guard actually has available, matching how reservedAssetBalance-backed liquidity is protected', async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, fusd, asset, assetGuard, user, attester } = fixture;

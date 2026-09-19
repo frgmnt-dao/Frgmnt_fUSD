@@ -1275,7 +1275,10 @@ describe('PoolLogic', () => {
 
     await fundPool();
     await assetGuard.setTransaction(await target.getAddress(), '0x12');
-    await expectRevert(pool.connect(user).withdrawCashImmediate(amount), 'InvalidCallData');
+    await expect(pool.connect(user).withdrawCashImmediate(amount)).to.be.revertedWithCustomError(
+      pool,
+      'InvalidCallData',
+    );
 
     await fundPool();
     await assetGuard.setTransaction(

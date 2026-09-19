@@ -80,6 +80,14 @@ library WithdrawalPlanLib {
     ///      withdrawal paths tolerate identical dust).
     uint256 private constant DUST_TOLERANCE = 1e15;
 
+    /// @dev Smallest net fUSD (after the exit fee) an attested plan may redeem: $0.01. The dust
+    ///      tolerance above is absolute, so without a floor a plan could burn a few wei of fUSD
+    ///      and release up to DUST_TOLERANCE of real value per transaction, and the volume breaker
+    ///      (which meters netFusd) would barely register it. With this floor the burn is always at
+    ///      least 10x the most that the tolerance can release, so the trade is never profitable.
+    ///      Smaller redemptions remain possible through the pro-rata path.
+    uint256 private constant MIN_PLAN_NET_FUSD = 1e16;
+
     /// @dev Must stay numerically identical to PoolLogic.MAX_MIN_VALUE_OUT_BPS — duplicated here
     ///      (rather than cross-contract-referenced) because a library cannot read a constant
     ///      declared on a specific contract it doesn't inherit.
@@ -442,7 +450,9 @@ library WithdrawalPlanLib {
         // bound below trivially and let a real burn through for $0 — revert, as the pro-rata path
         // does for the same condition. completeBefore == 0 implies fairFusd == 0, so this also
         // guarantees the surcharge denominator below is nonzero.
-        if (fairFusd == 0) revert IPoolLogic.WithdrawAmountTooSmall();
+        if (fairFusd == 0 || result.netFusd < MIN_PLAN_NET_FUSD) {
+            revert IPoolLogic.WithdrawAmountTooSmall();
+        }
 
         // Surcharge: a small, usage-scaled slice of this withdrawal's entitlement is deliberately
         // withheld and stays in the fund, compensating remaining stakers for the composition skew

@@ -1398,7 +1398,7 @@ contract PoolLogic is
     //
     // The per-asset guard-dispatch logic formerly here (_withdrawProcessing) now lives in
     // WithdrawalPlanLib.withdrawProcessing() — an externally-linked library, reached via
-    // delegatecall from _withdrawOne() above — moved out purely to recover EIP-170 bytecode
+    // delegatecall from executeProRataWithdrawal()/executeWithdrawalPlan() — moved out purely to recover EIP-170 bytecode
     // headroom (see that library's own docs). Behavior is unchanged; only where the code lives.
 
     /**

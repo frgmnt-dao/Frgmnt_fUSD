@@ -115,6 +115,43 @@ describe('AaveV4SpokeSelectiveAssetGuard', () => {
     ).to.be.revertedWithCustomError(f.guard, 'InvalidPositionId');
   });
 
+  it('rejects a reserve id with high bits set instead of truncating it to a tracked one', async () => {
+    const f = await deploy();
+    await twoReserves(f);
+    // 2^255 + 1 must not alias reserve 1.
+    await expect(
+      f.guard.withdrawProcessingSubset(f.poolAddr, f.spokeAddr, ONE, f.other.address, [
+        hex32((1n << 255n) + 1n),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'InvalidPositionId');
+  });
+
+  it('portion 0 produces no transactions, and a 1-wei portion floors each amount exactly', async () => {
+    const f = await deploy();
+    await twoReserves(f);
+    const [, , none] = await f.guard.withdrawProcessingSubset(
+      f.poolAddr,
+      f.spokeAddr,
+      0n,
+      f.other.address,
+      [hex32(1n), hex32(2n)],
+    );
+    expect(none.length).to.equal(0);
+
+    const [, , tiny] = await f.guard.withdrawProcessingSubset(
+      f.poolAddr,
+      f.spokeAddr,
+      1n,
+      f.other.address,
+      [hex32(1n), hex32(2n)],
+    );
+    // 1000e6 USDC * 1e-18 floors to 0 (reserve 1 skipped); 2e18 WETH * 1e-18 = 2 wei (reserve 2).
+    expect(tiny.length).to.equal(2);
+    const d = spokeIface.decodeFunctionData('withdraw', tiny[0].txData);
+    expect(d[0]).to.equal(2n);
+    expect(d[1]).to.equal(2n);
+  });
+
   it('rejects unsorted and duplicate ids', async () => {
     const f = await deploy();
     await twoReserves(f);
@@ -238,6 +275,7 @@ describe('MorphoBlueLendingPoolSelectiveAssetGuard', () => {
       morphoManager,
       usdcAddr: await usdc.getAddress(),
       wethAddr: await weth.getAddress(),
+      pool,
       poolAddr: await pool.getAddress(),
     };
   }
@@ -397,6 +435,62 @@ describe('MorphoBlueLendingPoolSelectiveAssetGuard', () => {
       [a.id],
     );
     expect(sub.length).to.equal(2);
+  });
+
+  it('portion 0 produces no transactions, and a 1-wei portion floors each leg exactly', async () => {
+    const f = await deploy();
+    const a = await addMarket(f, 1n, 0n);
+    const [, , none] = await f.guard.withdrawProcessingSubset(
+      f.poolAddr,
+      ethers.ZeroAddress,
+      0n,
+      f.other.address,
+      [a.id],
+    );
+    expect(none.length).to.equal(0);
+
+    const [, , tiny] = await f.guard.withdrawProcessingSubset(
+      f.poolAddr,
+      ethers.ZeroAddress,
+      1n,
+      f.other.address,
+      [a.id],
+    );
+    // 500_000 supply shares * 1e-18 floors to 0 (no supply leg); 1e18 collateral * 1e-18 = 1.
+    expect(tiny.length).to.equal(1);
+    expect(morphoIface.decodeFunctionData('withdrawCollateral', tiny[0].txData)[1]).to.equal(1n);
+  });
+
+  it('a collateral-only market (no supply shares) yields just the collateral withdrawal', async () => {
+    const f = await deploy();
+    const a = await addMarket(f, 1n, 900_000n); // very illiquid, but the pool has no supply here
+    await f.morpho.setPosition(a.id, f.poolAddr, 0n, 0n, ethers.parseEther('1'));
+    const [, , txs] = await f.guard.withdrawProcessingSubset(
+      f.poolAddr,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+      [a.id],
+    );
+    expect(txs.length).to.equal(1);
+    expect(morphoIface.decodeFunctionData('withdrawCollateral', txs[0].txData)[1]).to.equal(
+      ethers.parseEther('1'),
+    );
+  });
+
+  it('skips, without reverting, a selected market whose loan token is not a supported asset', async () => {
+    const f = await deploy();
+    const a = await addMarket(f, 1n, 0n);
+    await f.pool.setAsset(f.usdcAddr, false, ONE);
+    await f.pool.setAsset(f.wethAddr, false, ONE);
+    const [, , txs] = await f.guard.withdrawProcessingSubset(
+      f.poolAddr,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+      [a.id],
+    );
+    expect(txs.length).to.equal(0);
   });
 
   it('rejects a portion above 100% and a zero recipient', async () => {

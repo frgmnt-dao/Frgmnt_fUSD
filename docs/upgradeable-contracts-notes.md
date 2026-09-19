@@ -236,6 +236,8 @@ Rollout, only when position-level selection is wanted for that asset type:
 2. Morpho only: re-seed the owner-set configuration to match the guard being replaced (`uniV3Fee` pairs, `defaultSlippageBps`, `flashAmountBufferBps`, `repayDebtBufferBps`, `requiresApproveReset`) — the new instance starts with defaults and the whole-asset path depends on these.
 3. Governance `setAssetGuard` for the asset type. This is global per asset type and affects every pool using it, and any plan signed against the previous guard address reverts `GuardMismatch` from that moment (intended).
 4. Attester tooling must sign the new guard address.
+5. Morpho only: the guard is `Ownable` with the deployer as owner — transfer ownership to the Timelock (same pattern as the FNA-01 fix) once the configuration is replayed.
+6. There is no deploy script for either subclass yet; deployment and the configuration replay are manual until one is written. `MorphoCollectLib` must be linked for the Morpho subclass.
 
 Not selectable (fail closed with `SubsetNotSupported`): Aave V3 pool and Uniswap V3 position manager guards. A selected Morpho market with an open borrow reverts `SubsetDebtUnsupported` (v1).
 
@@ -264,8 +266,8 @@ Latest local verification for this feature (this branch):
 
 ```text
 npx hardhat compile: passed
-npx hardhat test test/AttestedWithdrawal.test.ts test/SelectiveGuards.test.ts: 84 passing
-npm run test: 1166 passing
+npx hardhat test test/AttestedWithdrawal.test.ts test/SelectiveGuards.test.ts: 94 passing
+npm run test: 1176 passing
 npm run check:contract-size: PoolLogic at 302 bytes of EIP-170 headroom
 ```
 
