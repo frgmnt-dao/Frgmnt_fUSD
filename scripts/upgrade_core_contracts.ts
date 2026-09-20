@@ -89,7 +89,16 @@ import { ethers, upgrades } from 'hardhat';
 //      cover the current live fUSD totalSupply (~97,188.41 as of 2026-08-06) with
 //      room left for actual new deposits — 500,000 leaves ~402,811.59 of headroom.
 //
-// A THIRD, UNRELATED GOVERNANCE_SAFE CALL (FNA-50), added to the same eoaBatch below but not
+// THIRD MANDATORY PoolLogic STEP (FNA-03): WithdrawalEscrow. PoolLogic.withdrawalEscrow starts
+// at address(0) on the live proxy, and finalizeCashWithdraw() reverts EscrowNotSet() while it is
+// unset — queued cash-withdraw finalization is blocked (fail-closed, no funds lost) until an
+// escrow bound to the pool is deployed and wired with the onlyOwner initializeWithdrawalEscrow().
+// This script therefore deploys WithdrawalEscrow(POOL_LOGIC_PROXY) in phase 1 and adds
+// initializeWithdrawalEscrow(escrow) to the same DAO Safe batch, after the upgrade and
+// initializeAutoCompounding(). Requests that were already finalized before the escrow existed
+// keep using the legacy reservedAssetBalance bookkeeping (see PoolLogic.claimCashWithdraw).
+//
+// A FOURTH, UNRELATED GOVERNANCE_SAFE CALL (FNA-50), added to the same eoaBatch below but not
 // bundled with any upgrade: AssetHandler.setSequencerUptimeFeed() — confirmed still unset on
 // the live proxy (2026-08-30), which makes the sequencer-down grace-period check in
 // _checkSequencerUp() a permanent no-op. Unlike the two migration calls above, this doesn't
@@ -205,6 +214,14 @@ async function main() {
   const withdrawalPlanLib = await WithdrawalPlanLibFactory.deploy();
   await withdrawalPlanLib.waitForDeployment();
   console.log('New WithdrawalPlanLib:', withdrawalPlanLib.target);
+
+  // FNA-03: the escrow is immutable-bound to the pool PROXY address, so it can be deployed now
+  // (the address is stable across the implementation upgrade) and wired in the Safe batch.
+  const WithdrawalEscrowFactory = await ethers.getContractFactory('WithdrawalEscrow', signer);
+  const withdrawalEscrow = await WithdrawalEscrowFactory.deploy(POOL_LOGIC_PROXY);
+  await withdrawalEscrow.waitForDeployment();
+  const withdrawalEscrowAddress = await withdrawalEscrow.getAddress();
+  console.log('New WithdrawalEscrow (bound to the pool proxy):', withdrawalEscrowAddress);
 
   // -----------------------------------------------------------------------
   // Phase 1b: AssetHandler (Transparent) — storage-validated deploy.
@@ -322,6 +339,11 @@ async function main() {
     '0x',
   ]);
 
+  const initializeWithdrawalEscrowCalldata = poolLogic.interface.encodeFunctionData(
+    'initializeWithdrawalEscrow',
+    [withdrawalEscrowAddress],
+  );
+
   // FNA-50: plain call on the AssetHandler proxy itself, NOT routed through
   // ASSET_HANDLER_PROXY_ADMIN — see the SEQUENCER_UPTIME_FEED comment above for why.
   const setSequencerUptimeFeedCalldata = assetHandler.interface.encodeFunctionData(
@@ -351,6 +373,7 @@ async function main() {
     ).wait();
     // Owner-sent, immediately after the upgrade (see poolLogicUpgradeCalldata above).
     await (await poolLogic.initializeAutoCompounding()).wait();
+    await (await poolLogic.initializeWithdrawalEscrow(withdrawalEscrowAddress)).wait();
     await (await assetHandler.setSequencerUptimeFeed(SEQUENCER_UPTIME_FEED)).wait();
     console.log('Done.');
     return;
@@ -428,6 +451,8 @@ async function main() {
       { to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: poolLogicUpgradeCalldata },
       // Sent by the Safe (PoolLogic's owner), in the same MultiSend batch as the upgrade above.
       { to: POOL_LOGIC_PROXY, value: '0', data: initializeAutoCompoundingCalldata },
+      // FNA-03: wires the escrow; finalizeCashWithdraw() reverts EscrowNotSet() until this lands.
+      { to: POOL_LOGIC_PROXY, value: '0', data: initializeWithdrawalEscrowCalldata },
       { to: TOKEN_LOGIC_PROXY, value: '0', data: tokenLogicUpgradeCalldata },
     ],
   };

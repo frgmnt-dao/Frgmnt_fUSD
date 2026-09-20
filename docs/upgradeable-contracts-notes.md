@@ -241,6 +241,10 @@ Rollout, only when position-level selection is wanted for that asset type:
 
 Not selectable (fail closed with `SubsetNotSupported`): Aave V3 pool and Uniswap V3 position manager guards. A selected Morpho market with an open borrow reverts `SubsetDebtUnsupported` (v1).
 
+### Post-upgrade step inherited from the validated baseline: WithdrawalEscrow (FNA-03)
+
+Not part of this feature, but required by the same upgrade and previously undocumented in the scripts. `PoolLogic.withdrawalEscrow` (slot 20) is zero on the live proxy, and `finalizeCashWithdraw()` reverts `EscrowNotSet()` while it is zero. Effect if skipped: queued cash-withdraw requests cannot be finalized (fail-closed: nothing is lost, requests stay pending); instant withdrawals, staking and unstaking are unaffected. Fix: deploy `WithdrawalEscrow(<pool proxy>)` (it is immutable-bound to the proxy address, so it can be deployed before the upgrade) and have the owner call `initializeWithdrawalEscrow(escrow)` after the upgrade. `scripts/upgrade_core_contracts.ts` now deploys the escrow and includes that call in the DAO Safe batch after `initializeAutoCompounding()`; requests finalized before the escrow existed keep using the legacy `reservedAssetBalance` bookkeeping. The script has not been run against a live network.
+
 ### Storage Layout Notes
 
 - No existing state variable removed, reordered, or resized.
