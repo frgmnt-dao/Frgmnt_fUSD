@@ -1,8 +1,10 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import {
+  deployAaveV3SelectiveGuard,
   deployMorphoSelectiveGuard,
   deploySpokeSelectiveGuard,
+  deployUniswapSelectiveGuard,
   readMorphoGuardConfig,
 } from '../scripts/utils/selectiveGuards';
 
@@ -117,6 +119,85 @@ describe('selective guard deployment helpers', () => {
     expect(await guard.aaveV4SpokeManager()).to.equal(manager);
     expect(await guard.takerPositionManager()).to.equal(taker);
     expect(await guard.giverPositionManager()).to.equal(giver);
+    expect(await guard.isSubPositionGuard()).to.equal(true);
+  });
+
+  it('replays the Uniswap V3 guard admin-set configuration and hands the admin role over', async () => {
+    const [deployer, timelock] = await ethers.getSigners();
+    const old: any = await (await ethers.getContractFactory('UniswapV3AssetGuard')).deploy();
+    await old.waitForDeployment();
+    const poolA = ethers.Wallet.createRandom().address;
+    const poolB = ethers.Wallet.createRandom().address;
+    await old.setWithdrawalSlippageBps(150);
+    await old.setWithdrawalTwapWindow(900);
+    await old.setMinimumPoolLiquidity(poolA, 1_000n);
+    await old.setMinimumPoolLiquidity(poolB, 5_000n);
+    await old.setMinimumPoolLiquidity(poolB, 0n); // cleared again: must not be replayed
+    await old.setAdmin(timelock.address);
+
+    const { address, config } = await deployUniswapSelectiveGuard({
+      signer: deployer,
+      oldGuardAddress: await old.getAddress(),
+      log: quiet,
+    });
+    const guard: any = await ethers.getContractAt('UniswapV3SelectiveAssetGuard', address);
+    expect(config.minimumPoolLiquidity.map((m) => m.pool)).to.deep.equal([poolA]);
+    expect(await guard.withdrawalSlippageBps()).to.equal(150n);
+    expect(await guard.withdrawalTwapWindow()).to.equal(900n);
+    expect(await guard.minimumPoolLiquidity(poolA)).to.equal(1_000n);
+    expect(await guard.minimumPoolLiquidity(poolB)).to.equal(0n);
+    expect(await guard.admin()).to.equal(timelock.address);
+    expect(await guard.isSubPositionGuard()).to.equal(true);
+  });
+
+  it('replays the Aave V3 guard configuration (fees, paths, flags), including a cleared USDT default', async () => {
+    const [deployer, timelock] = await ethers.getSigners();
+    const Token = await ethers.getContractFactory('MockERC20Custom');
+    const usdc = await Token.deploy('USDC', 'USDC', 6);
+    const weth = await Token.deploy('WETH', 'WETH', 18);
+    const usdcAddr = await usdc.getAddress();
+    const wethAddr = await weth.getAddress();
+    const settlement = ethers.Wallet.createRandom().address;
+    const router = ethers.Wallet.createRandom().address;
+    const provider = ethers.Wallet.createRandom().address;
+    const lendingPool = ethers.Wallet.createRandom().address;
+
+    const old: any = await (
+      await ethers.getContractFactory('AaveV3LendingPoolAssetGuard')
+    ).deploy(provider, lendingPool, settlement, router);
+    await old.waitForDeployment();
+    const path = ethers.solidityPacked(['address', 'uint24', 'address'], [usdcAddr, 500, wethAddr]);
+    const reversed = ethers.solidityPacked(
+      ['address', 'uint24', 'address'],
+      [wethAddr, 500, usdcAddr],
+    );
+    await old.setDefaultSlippageBps(90);
+    await old.setFlashAmountBufferBps(55);
+    await old.setUniV3Fee(usdcAddr, wethAddr, 500);
+    await old.setUniV3PathExactIn(usdcAddr, wethAddr, path);
+    await old.setUniV3PathExactOut(wethAddr, usdcAddr, reversed);
+    await old.setRequiresApproveReset(usdcAddr, true);
+    await old.setRequiresApproveReset(await old.USDT_BASE(), false); // clear the constructor default
+    await old.setOwner(timelock.address);
+
+    const { address } = await deployAaveV3SelectiveGuard({
+      signer: deployer,
+      oldGuardAddress: await old.getAddress(),
+      log: quiet,
+    });
+    const guard: any = await ethers.getContractAt('AaveV3LendingPoolSelectiveAssetGuard', address);
+    expect(await guard.aaveProtocolDataProvider()).to.equal(provider);
+    expect(await guard.aaveLendingPool()).to.equal(lendingPool);
+    expect(await guard.preferredSettlementAsset()).to.equal(settlement);
+    expect(await guard.swapRouter()).to.equal(router);
+    expect(await guard.defaultSlippageBps()).to.equal(90n);
+    expect(await guard.flashAmountBufferBps()).to.equal(55n);
+    expect(await guard.uniV3Fee(usdcAddr, wethAddr)).to.equal(500n);
+    expect(await guard.uniV3PathExactIn(usdcAddr, wethAddr)).to.equal(path);
+    expect(await guard.uniV3PathExactOut(wethAddr, usdcAddr)).to.equal(reversed);
+    expect(await guard.requiresApproveReset(usdcAddr)).to.equal(true);
+    expect(await guard.requiresApproveReset(await old.USDT_BASE())).to.equal(false);
+    expect(await guard.owner()).to.equal(timelock.address);
     expect(await guard.isSubPositionGuard()).to.equal(true);
   });
 });

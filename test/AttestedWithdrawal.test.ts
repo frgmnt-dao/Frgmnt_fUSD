@@ -1011,7 +1011,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
       const Token = await ethers.getContractFactory('MockERC20Custom');
       const usdc = await Token.deploy('USDC', 'USDC', 6);
       const weth = await Token.deploy('WETH', 'WETH', 18);
-      const morpho = await (await ethers.getContractFactory('MockMorphoBlue')).deploy();
+      const morpho: any = await (await ethers.getContractFactory('MockMorphoBlue')).deploy();
       const morphoManager = await (
         await ethers.getContractFactory('MockMorphoBlueManager')
       ).deploy();

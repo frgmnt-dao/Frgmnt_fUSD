@@ -1,11 +1,16 @@
 import fs from 'fs';
 import path from 'path';
 import { ethers } from 'hardhat';
-import { deployMorphoSelectiveGuard, deploySpokeSelectiveGuard } from './utils/selectiveGuards';
+import {
+  deployAaveV3SelectiveGuard,
+  deployMorphoSelectiveGuard,
+  deploySpokeSelectiveGuard,
+  deployUniswapSelectiveGuard,
+} from './utils/selectiveGuards';
 
 // --------------------------------------------------
 // Deploys the position-selection guards (attested selective withdrawal) as replacements for
-// the CertiK-validated Morpho Blue and Aave V4 Spoke asset guards, then WRITES the governance
+// the CertiK-validated Morpho Blue, Aave V3, Aave V4 Spoke and Uniswap V3 asset guards, then WRITES the governance
 // transactions that would switch each asset type over. It never sends a governance
 // transaction: Governance.setAssetGuard is global per asset type, affects every pool, and
 // invalidates every plan signed against the previous guard address — that is a reviewed,
@@ -26,9 +31,15 @@ import { deployMorphoSelectiveGuard, deploySpokeSelectiveGuard } from './utils/s
 //   OLD_MORPHO_FROM_BLOCK     first block to scan for the old guard's config events (default 0;
 //                             set to the guard's deployment block on a public RPC)
 //   OLD_SPOKE_GUARD           address of the currently registered Aave V4 Spoke asset guard
+//   OLD_AAVE_V3_GUARD         address of the currently registered Aave V3 asset guard
+//   AAVE_V3_ASSET_TYPE        Governance asset type registered to the Aave V3 guard
+//   OLD_AAVE_V3_FROM_BLOCK    first block to scan for the old Aave V3 guard's config events
+//   OLD_UNISWAP_GUARD         address of the currently registered Uniswap V3 asset guard
+//   UNISWAP_ASSET_TYPE        Governance asset type registered to the Uniswap V3 guard
+//   OLD_UNISWAP_FROM_BLOCK    first block to scan for the old Uniswap guard's config events
 //   SPOKE_ASSET_TYPE          Governance asset type registered to the Spoke guard
 //   GOVERNANCE                Governance proxy (to encode setAssetGuard against)
-//   Set either OLD_* to deploy only that guard.
+//   Set any of the OLD_* variables to deploy only those guards.
 //   SEND=1                    actually deploy. Without it the script only prints what it would do.
 //
 // After deploying: the Morpho guard is compiled with the same viaIR settings override as its
@@ -38,8 +49,12 @@ import { deployMorphoSelectiveGuard, deploySpokeSelectiveGuard } from './utils/s
 async function main() {
   const oldMorpho = process.env.OLD_MORPHO_GUARD;
   const oldSpoke = process.env.OLD_SPOKE_GUARD;
-  if (!oldMorpho && !oldSpoke) {
-    throw new Error('Set OLD_MORPHO_GUARD and/or OLD_SPOKE_GUARD.');
+  const oldUniswap = process.env.OLD_UNISWAP_GUARD;
+  const oldAaveV3 = process.env.OLD_AAVE_V3_GUARD;
+  if (!oldMorpho && !oldSpoke && !oldUniswap && !oldAaveV3) {
+    throw new Error(
+      'Set OLD_MORPHO_GUARD, OLD_SPOKE_GUARD, OLD_UNISWAP_GUARD and/or OLD_AAVE_V3_GUARD.',
+    );
   }
   const governanceAddress = process.env.GOVERNANCE;
   if (!governanceAddress) throw new Error('Set GOVERNANCE (the Governance proxy address).');
@@ -52,6 +67,12 @@ async function main() {
   if (oldSpoke && !process.env.SPOKE_ASSET_TYPE) {
     throw new Error('Set SPOKE_ASSET_TYPE to deploy the Spoke guard.');
   }
+  if (oldAaveV3 && !process.env.AAVE_V3_ASSET_TYPE) {
+    throw new Error('Set AAVE_V3_ASSET_TYPE to deploy the Aave V3 guard.');
+  }
+  if (oldUniswap && !process.env.UNISWAP_ASSET_TYPE) {
+    throw new Error('Set UNISWAP_ASSET_TYPE to deploy the Uniswap V3 guard.');
+  }
 
   const [signer] = await ethers.getSigners();
   console.log('Deployer:', signer.address);
@@ -61,6 +82,8 @@ async function main() {
       [
         oldMorpho && 'MorphoBlueLendingPoolSelectiveAssetGuard',
         oldSpoke && 'AaveV4SpokeSelectiveAssetGuard',
+        oldUniswap && 'UniswapV3SelectiveAssetGuard',
+        oldAaveV3 && 'AaveV3LendingPoolSelectiveAssetGuard',
       ]
         .filter(Boolean)
         .join(', '),
@@ -93,6 +116,38 @@ async function main() {
       value: '0',
       data: governance.interface.encodeFunctionData('setAssetGuard', [
         BigInt(process.env.MORPHO_ASSET_TYPE!),
+        address,
+      ]),
+    });
+  }
+  if (oldAaveV3) {
+    const { address } = await deployAaveV3SelectiveGuard({
+      signer,
+      oldGuardAddress: oldAaveV3,
+      fromBlock: Number(process.env.OLD_AAVE_V3_FROM_BLOCK ?? 0),
+    });
+    transactions.push({
+      description: `Governance.setAssetGuard(${process.env.AAVE_V3_ASSET_TYPE}, ${address}) — Aave V3 selective guard`,
+      to: governanceAddress,
+      value: '0',
+      data: governance.interface.encodeFunctionData('setAssetGuard', [
+        BigInt(process.env.AAVE_V3_ASSET_TYPE!),
+        address,
+      ]),
+    });
+  }
+  if (oldUniswap) {
+    const { address } = await deployUniswapSelectiveGuard({
+      signer,
+      oldGuardAddress: oldUniswap,
+      fromBlock: Number(process.env.OLD_UNISWAP_FROM_BLOCK ?? 0),
+    });
+    transactions.push({
+      description: `Governance.setAssetGuard(${process.env.UNISWAP_ASSET_TYPE}, ${address}) — Uniswap V3 selective guard`,
+      to: governanceAddress,
+      value: '0',
+      data: governance.interface.encodeFunctionData('setAssetGuard', [
+        BigInt(process.env.UNISWAP_ASSET_TYPE!),
         address,
       ]),
     });

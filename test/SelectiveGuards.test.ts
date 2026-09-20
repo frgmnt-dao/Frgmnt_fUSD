@@ -290,11 +290,12 @@ describe('MorphoBlueLendingPoolSelectiveAssetGuard', () => {
     lltv: bigint,
     borrowAssets: bigint,
   ) {
+    const morpho: any = f.morpho;
     const mp = [f.usdcAddr, f.wethAddr, ethers.ZeroAddress, ethers.ZeroAddress, lltv];
-    const id = await f.morpho.marketId(mp);
-    await f.morpho.setMarket(mp, [1_000_000n, 1_000_000n, borrowAssets, borrowAssets, 0n, 0n]);
+    const id = await morpho.marketId(mp);
+    await morpho.setMarket(mp, [1_000_000n, 1_000_000n, borrowAssets, borrowAssets, 0n, 0n]);
     await f.morphoManager.setPoolMarkets(f.poolAddr, [id]);
-    await f.morpho.setPosition(id, f.poolAddr, 500_000n, 0n, ethers.parseEther('1'));
+    await morpho.setPosition(id, f.poolAddr, 500_000n, 0n, ethers.parseEther('1'));
     return { id: id as string, mp };
   }
 
@@ -506,5 +507,338 @@ describe('MorphoBlueLendingPoolSelectiveAssetGuard', () => {
         a.id,
       ]),
     ).to.be.revertedWithCustomError(f.guard, 'ToZero');
+  });
+});
+
+describe('UniswapV3SelectiveAssetGuard', () => {
+  async function deploy() {
+    const [, other] = await ethers.getSigners();
+    const poolAndFactory: any = await (
+      await ethers.getContractFactory('MockAssetHandlerAndPool')
+    ).deploy();
+    const nfpm: any = await (
+      await ethers.getContractFactory('MockUniV3PositionManagerExtended')
+    ).deploy(ethers.ZeroAddress);
+    const nftGuard: any = await (
+      await ethers.getContractFactory('MockUniswapV3PositionGuard')
+    ).deploy();
+    await poolAndFactory.setContractGuard(nfpm.target, nftGuard.target);
+    await nftGuard.setOwnedTokenIds(poolAndFactory.target, [1, 2, 3, 4]);
+    const guard: any = await (
+      await ethers.getContractFactory('TestUniswapV3SelectiveGuardHarness')
+    ).deploy();
+    return {
+      other,
+      guard,
+      nftGuard,
+      pool: poolAndFactory.target as string,
+      asset: nfpm.target as string,
+    };
+  }
+
+  const nfpmIface = new ethers.Interface([
+    'function decreaseLiquidity((uint256 tokenId,uint128 liquidity,uint256 amount0Min,uint256 amount1Min,uint256 deadline))',
+    'function collect((uint256 tokenId,address recipient,uint128 amount0Max,uint128 amount1Max))',
+  ]);
+  const tokenIdOf = (tx: any) => {
+    const name = nfpmIface.parseTransaction({ data: tx.txData })!.name;
+    return nfpmIface.decodeFunctionData(name, tx.txData)[0][0] as bigint;
+  };
+
+  it('advertises the sub-position capability and inherits the validated guard', async () => {
+    const { guard } = await deploy();
+    expect(await guard.isSubPositionGuard()).to.equal(true);
+  });
+
+  it('keeps only the (decreaseLiquidity, collect) pair of each selected NFT', async () => {
+    const f = await deploy();
+    const [wa, wamt, txs] = await f.guard.withdrawProcessingSubset(
+      f.pool,
+      f.asset,
+      ONE / 2n,
+      f.other.address,
+      [hex32(2n), hex32(4n)],
+    );
+    expect(wa).to.equal(ethers.ZeroAddress);
+    expect(wamt).to.equal(0n);
+    expect(txs.map(tokenIdOf)).to.deep.equal([2n, 2n, 4n, 4n]);
+    for (const tx of txs) expect(tx.to).to.equal(f.asset);
+  });
+
+  it('an empty selection produces no transactions', async () => {
+    const f = await deploy();
+    const [, , txs] = await f.guard.withdrawProcessingSubset(
+      f.pool,
+      f.asset,
+      ONE,
+      f.other.address,
+      [],
+    );
+    expect(txs.length).to.equal(0);
+  });
+
+  it('rejects ids the pool does not own, unsorted and duplicate ids', async () => {
+    const f = await deploy();
+    await expect(
+      f.guard.withdrawProcessingSubset(f.pool, f.asset, ONE, f.other.address, [hex32(9n)]),
+    ).to.be.revertedWithCustomError(f.guard, 'InvalidPositionId');
+    await expect(
+      f.guard.withdrawProcessingSubset(f.pool, f.asset, ONE, f.other.address, [
+        hex32(3n),
+        hex32(1n),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'PositionsNotAscending');
+    await expect(
+      f.guard.withdrawProcessingSubset(f.pool, f.asset, ONE, f.other.address, [
+        hex32(1n),
+        hex32(1n),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'PositionsNotAscending');
+  });
+
+  it('rejects an id with high bits set instead of aliasing a low tokenId', async () => {
+    const f = await deploy();
+    await expect(
+      f.guard.withdrawProcessingSubset(f.pool, f.asset, ONE, f.other.address, [
+        hex32((1n << 255n) + 1n),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'InvalidPositionId');
+  });
+
+  it('rejects a portion above 100% and a zero recipient', async () => {
+    const f = await deploy();
+    await expect(
+      f.guard.withdrawProcessingSubset(f.pool, f.asset, ONE + 1n, f.other.address, [hex32(1n)]),
+    ).to.be.revertedWithCustomError(f.guard, 'SubsetBadPortion');
+    await expect(
+      f.guard.withdrawProcessingSubset(f.pool, f.asset, ONE, ethers.ZeroAddress, [hex32(1n)]),
+    ).to.be.revertedWithCustomError(f.guard, 'SubsetToZero');
+  });
+
+  it('fails closed on any transaction that is not a decreaseLiquidity/collect', async () => {
+    const f = await deploy();
+    await f.guard.setInjectUnexpected(true);
+    await expect(
+      f.guard.withdrawProcessingSubset(f.pool, f.asset, ONE, f.other.address, [hex32(1n)]),
+    ).to.be.revertedWithCustomError(f.guard, 'UnexpectedTransaction');
+  });
+});
+
+describe('AaveV3LendingPoolSelectiveAssetGuard', () => {
+  const idOf = (addr: string) => ethers.zeroPadValue(addr, 32);
+
+  async function deploy() {
+    const [deployer, other] = await ethers.getSigners();
+    const aavePool: any = await (await ethers.getContractFactory('MockAaveV3Pool')).deploy();
+    const dataProvider: any = await (
+      await ethers.getContractFactory('MockAaveProtocolDataProvider')
+    ).deploy();
+    const Token = await ethers.getContractFactory('MockERC20Custom');
+    const usdc: any = await Token.deploy('USDC', 'USDC', 6);
+    const weth: any = await Token.deploy('WETH', 'WETH', 18);
+    const aUsdc: any = await Token.deploy('aUSDC', 'aUSDC', 6);
+    const aWeth: any = await Token.deploy('aWETH', 'aWETH', 18);
+    const dWeth: any = await Token.deploy('dWETH', 'dWETH', 18);
+
+    const guard: any = await (
+      await ethers.getContractFactory('AaveV3LendingPoolSelectiveAssetGuard')
+    ).deploy(
+      await dataProvider.getAddress(),
+      await aavePool.getAddress(),
+      await usdc.getAddress(),
+      ethers.Wallet.createRandom().address,
+    );
+
+    const factory: any = await (
+      await ethers.getContractFactory('MockFactory')
+    ).deploy(deployer.address);
+    const pm: any = await (
+      await ethers.getContractFactory('MockPoolManagerLogicWithAssets')
+    ).deploy(await factory.getAddress(), deployer.address, deployer.address);
+    const pl: any = await (
+      await ethers.getContractFactory('MockPoolLogicWithManager')
+    ).deploy(await pm.getAddress(), await factory.getAddress());
+
+    const a = {
+      usdc: await usdc.getAddress(),
+      weth: await weth.getAddress(),
+      aUsdc: await aUsdc.getAddress(),
+      aWeth: await aWeth.getAddress(),
+      dWeth: await dWeth.getAddress(),
+      pool: await pl.getAddress(),
+    };
+    for (const t of [a.usdc, a.weth]) {
+      await pm.setSupportedAsset(t, true);
+      await factory.setAssetPrice(t, ethers.parseUnits('1', 18));
+    }
+    // Two reserves, each holding 1000 units of the pool's supply, both fully liquid by default.
+    await dataProvider.setReserveTokens(a.usdc, a.aUsdc, ethers.ZeroAddress, ethers.ZeroAddress);
+    await aavePool.setReserveTokens(a.usdc, a.aUsdc, ethers.ZeroAddress);
+    await dataProvider.setReserveTokens(a.weth, a.aWeth, ethers.ZeroAddress, ethers.ZeroAddress);
+    await aavePool.setReserveTokens(a.weth, a.aWeth, ethers.ZeroAddress);
+    await aUsdc.mint(a.pool, 1000n * 10n ** 6n);
+    await aWeth.mint(a.pool, 1000n * 10n ** 18n);
+    await usdc.mint(a.aUsdc, 1000n * 10n ** 6n);
+    await weth.mint(a.aWeth, 1000n * 10n ** 18n);
+
+    return { guard, aavePool, dataProvider, usdc, weth, aUsdc, aWeth, dWeth, a, other };
+  }
+
+  const aaveIface = new ethers.Interface([
+    'function withdraw(address asset, uint256 amount, address to)',
+    'function transfer(address to, uint256 amount)',
+  ]);
+
+  it('advertises the sub-position capability', async () => {
+    const { guard } = await deploy();
+    expect(await guard.isSubPositionGuard()).to.equal(true);
+  });
+
+  it('draws only the selected reserve (a withdraw and a transfer to the recipient)', async () => {
+    const f = await deploy();
+    const [wa, wamt, txs] = await f.guard.withdrawProcessingSubset(
+      f.a.pool,
+      ethers.ZeroAddress,
+      ONE / 2n,
+      f.other.address,
+      [idOf(f.a.weth)],
+    );
+    expect(wa).to.equal(ethers.ZeroAddress);
+    expect(wamt).to.equal(0n);
+    expect(txs.length).to.equal(2);
+    const w = aaveIface.decodeFunctionData('withdraw', txs[0].txData);
+    expect(w[0]).to.equal(f.a.weth);
+    expect(w[1]).to.equal(500n * 10n ** 18n);
+    expect(txs[1].to).to.equal(f.a.weth);
+    const t = aaveIface.decodeFunctionData('transfer', txs[1].txData);
+    expect(t[0]).to.equal(f.other.address);
+  });
+
+  it('a liquid reserve is not throttled by an illiquid reserve the plan did not select', async () => {
+    const f = await deploy();
+    // Re-point the WETH reserve at an aToken whose underlying has only 10% liquidity.
+    const aTight: any = await (
+      await ethers.getContractFactory('MockERC20Custom')
+    ).deploy('aT', 'aT', 18);
+    const aTightAddr = await aTight.getAddress();
+    await f.dataProvider.setReserveTokens(
+      f.a.weth,
+      aTightAddr,
+      ethers.ZeroAddress,
+      ethers.ZeroAddress,
+    );
+    await f.aavePool.setReserveTokens(f.a.weth, aTightAddr, ethers.ZeroAddress);
+    await aTight.mint(f.a.pool, 1000n * 10n ** 18n);
+    await f.weth.mint(aTightAddr, 100n * 10n ** 18n); // 100 of 1000 liquid = 10%
+
+    // Whole-asset path: a single ceiling applies to every reserve, so USDC is cut to 10% as well.
+    const [, , all] = await f.guard.withdrawProcessing(
+      f.a.pool,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+    );
+    const wholeUsdc = all
+      .filter((t: any) => t.txData.startsWith(aaveIface.getFunction('withdraw')!.selector))
+      .map((t: any) => aaveIface.decodeFunctionData('withdraw', t.txData))
+      .find((d: any) => d[0] === f.a.usdc);
+    expect(wholeUsdc[1]).to.equal(100n * 10n ** 6n);
+
+    // Selecting only USDC: the full 1000, because the illiquid reserve is not part of the plan.
+    const [, , sub] = await f.guard.withdrawProcessingSubset(
+      f.a.pool,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+      [idOf(f.a.usdc)],
+    );
+    expect(aaveIface.decodeFunctionData('withdraw', sub[0].txData)[1]).to.equal(1000n * 10n ** 6n);
+
+    // Selecting the illiquid reserve applies ITS ceiling only: 10% of 1000.
+    const [, , tight] = await f.guard.withdrawProcessingSubset(
+      f.a.pool,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+      [idOf(f.a.weth)],
+    );
+    expect(aaveIface.decodeFunctionData('withdraw', tight[0].txData)[1]).to.equal(
+      100n * 10n ** 18n,
+    );
+  });
+
+  it('rejects ids that are not supported reserves, unsorted ids, duplicates and ids with high bits', async () => {
+    const f = await deploy();
+    const stranger = ethers.Wallet.createRandom().address;
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, f.other.address, [
+        idOf(stranger),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'InvalidPositionId');
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, f.other.address, [
+        ethers.zeroPadValue(ethers.toBeHex((1n << 200n) + 1n), 32),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'InvalidPositionId');
+    const [lo, hi] = [f.a.usdc, f.a.weth].sort((x, y) => (BigInt(x) < BigInt(y) ? -1 : 1));
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, f.other.address, [
+        idOf(hi),
+        idOf(lo),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'PositionsNotAscending');
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, f.other.address, [
+        idOf(lo),
+        idOf(lo),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'PositionsNotAscending');
+  });
+
+  it('is refused while the pool carries ANY Aave debt, even in an unselected reserve', async () => {
+    const f = await deploy();
+    await f.dataProvider.setReserveTokens(f.a.weth, f.a.aWeth, ethers.ZeroAddress, f.a.dWeth);
+    await f.aavePool.setReserveTokens(f.a.weth, f.a.aWeth, f.a.dWeth);
+    await f.dWeth.mint(f.a.pool, 1n * 10n ** 18n);
+    // Select only USDC, which itself has no debt: still refused (one shared account / health factor).
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, f.other.address, [
+        idOf(f.a.usdc),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'SubsetDebtUnsupported');
+  });
+
+  it('rejects a portion above 100% and a zero recipient; portion 0 yields nothing', async () => {
+    const f = await deploy();
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE + 1n, f.other.address, [
+        idOf(f.a.usdc),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'SubsetBadPortion');
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, ethers.ZeroAddress, [
+        idOf(f.a.usdc),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'SubsetToZero');
+    const [, , txs] = await f.guard.withdrawProcessingSubset(
+      f.a.pool,
+      ethers.ZeroAddress,
+      0n,
+      f.other.address,
+      [idOf(f.a.usdc)],
+    );
+    expect(txs.length).to.equal(0);
+  });
+
+  it('an empty selection produces no transactions', async () => {
+    const f = await deploy();
+    const [, , txs] = await f.guard.withdrawProcessingSubset(
+      f.a.pool,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+      [],
+    );
+    expect(txs.length).to.equal(0);
   });
 });
