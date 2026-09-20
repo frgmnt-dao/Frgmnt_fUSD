@@ -455,8 +455,9 @@ library WithdrawalPlanLib {
         }
 
         // Surcharge: a small, usage-scaled slice of this withdrawal's entitlement is deliberately
-        // withheld and stays in the fund, compensating remaining stakers for the composition skew
-        // an attested withdrawal can impose. See the design doc's "Surcharge" section. Computed
+        // withheld and stays in the fund as extra collateral (not paid out, not credited as yield)
+        // to cushion remaining holders against the composition skew an attested withdrawal can
+        // impose. See the design doc's "Surcharge" section. Computed
         // and checked here, before the allocations loop, so a plan that exceeds the attester's
         // signed tolerance fails cheaply instead of after paying for a full withdrawal.
         uint256 pressure = Math.min(
