@@ -2,6 +2,11 @@
 pragma solidity ^0.8.24;
 
 import { DataTypes } from "../interfaces/aave/v3/DataTypes.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+interface IBurnableMock {
+    function burn(address from, uint256 amount) external;
+}
 
 /// @notice Minimal Aave V3 Pool mock for AaveLendingPoolAssetGuard tests.
 contract MockAaveV3Pool {
@@ -78,8 +83,22 @@ contract MockAaveV3Pool {
     }
 
     function supply(address, uint256, address, uint16) external {}
-    function withdraw(address, uint256, address) external returns (uint256) {
-        return 0;
+    /// @dev Opt-in settlement so end-to-end tests can observe real movements. Off by default,
+    ///      where withdraw() stays the no-op every existing guard test relies on. When on it
+    ///      mirrors Aave: burn the caller's aToken, pay the underlying (held by the aToken
+    ///      address, which must have approved this pool) to `to`.
+    bool public settleWithdrawals;
+
+    function setSettleWithdrawals(bool on) external {
+        settleWithdrawals = on;
+    }
+
+    function withdraw(address asset, uint256 amount, address to) external returns (uint256) {
+        if (!settleWithdrawals) return 0;
+        address aToken = _aTokens[asset];
+        IBurnableMock(aToken).burn(msg.sender, amount);
+        IERC20(asset).transferFrom(aToken, to, amount);
+        return amount;
     }
     function borrow(address, uint256, uint256, uint16, address) external {}
     function repay(address, uint256, uint256, address) external returns (uint256) {

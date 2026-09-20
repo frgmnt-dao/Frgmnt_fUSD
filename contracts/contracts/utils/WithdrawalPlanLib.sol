@@ -93,6 +93,9 @@ library WithdrawalPlanLib {
     ///      declared on a specific contract it doesn't inherit.
     uint256 private constant MAX_MIN_VALUE_OUT_BPS = 100; // 1%
 
+    /// @dev Effective ceiling on attestedWithdrawDecayWindow; see _checkAndRecordVolume.
+    uint256 private constant MAX_DECAY_WINDOW = 30 days;
+
     /// @dev Protocol-level ceiling on the pool-usage surcharge (see the "Surcharge" section of
     ///      docs/attested-selective-withdrawal-design.md), independent of whatever
     ///      PoolLogic.maxSurchargeBps is currently governed to. Deliberately enforced here, at
@@ -904,6 +907,13 @@ library WithdrawalPlanLib {
         // at the actual point of use, rather than trying to gate every possible entry point
         // that could leave the feature "enabled" without every parameter configured.
         if (decayWindow == 0) revert IPoolLogic.AttestedWithdrawVolumeCapExceeded();
+
+        // The window is manager-settable with a floor but no ceiling. A value near 2**256 would
+        // make `accumulated * (decayWindow - elapsed)` below overflow and revert every plan
+        // withdrawal by panic, so an unreasonably large window is treated as MAX_DECAY_WINDOW
+        // (a stored value above it simply behaves as 30 days) instead of being able to disable
+        // the feature.
+        if (decayWindow > MAX_DECAY_WINDOW) decayWindow = MAX_DECAY_WINDOW;
 
         uint256 decayed;
         if (current.accumulatedValueUsd != 0) {

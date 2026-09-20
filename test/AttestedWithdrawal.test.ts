@@ -1143,6 +1143,197 @@ describe('PoolLogic — attested selective withdrawal', () => {
     });
   });
 
+  describe('real Aave V3 selective guard through PoolLogic', () => {
+    const ONE = ethers.parseUnits('1', 18);
+
+    async function setupAavePool() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { poolManager, pool, fusd, user } = fixture;
+
+      const aavePool: any = await (await ethers.getContractFactory('MockAaveV3Pool')).deploy();
+      const dataProvider: any = await (
+        await ethers.getContractFactory('MockAaveProtocolDataProvider')
+      ).deploy();
+      const Token = await ethers.getContractFactory('MockERC20Custom');
+      const usdc: any = await Token.deploy('USDC', 'USDC', 6);
+      const weth: any = await Token.deploy('WETH', 'WETH', 18);
+      const aUsdc: any = await Token.deploy('aUSDC', 'aUSDC', 6);
+      const aWeth: any = await Token.deploy('aWETH', 'aWETH', 18);
+      const guard: any = await (
+        await ethers.getContractFactory('AaveV3LendingPoolSelectiveAssetGuard')
+      ).deploy(
+        await dataProvider.getAddress(),
+        await aavePool.getAddress(),
+        await usdc.getAddress(),
+        ethers.Wallet.createRandom().address,
+      );
+      const plainGuard = await (await ethers.getContractFactory('TestAssetGuard')).deploy();
+
+      const poolAddr = await pool.getAddress();
+      const aaveAddr = await aavePool.getAddress();
+      const usdcAddr = await usdc.getAddress();
+      const wethAddr = await weth.getAddress();
+      const aUsdcAddr = await aUsdc.getAddress();
+      const aWethAddr = await aWeth.getAddress();
+
+      await poolManager.setSupportedAsset(usdcAddr, true, ONE, 6);
+      await poolManager.setAssetGuard(usdcAddr, await plainGuard.getAddress());
+      await poolManager.setSupportedAsset(wethAddr, true, ethers.parseUnits('2000', 18), 18);
+      await poolManager.setAssetGuard(wethAddr, await plainGuard.getAddress());
+      await poolManager.setSupportedAsset(aaveAddr, true, ONE, 18);
+      await poolManager.setAssetGuard(aaveAddr, await guard.getAddress());
+
+      for (const [u, a] of [
+        [usdcAddr, aUsdcAddr],
+        [wethAddr, aWethAddr],
+      ]) {
+        await dataProvider.setReserveTokens(u, a, ethers.ZeroAddress, ethers.ZeroAddress);
+        await aavePool.setReserveTokens(u, a, ethers.ZeroAddress);
+      }
+      // $1000 in each reserve. USDC is nearly frozen: only $100 of it is liquid right now.
+      await aUsdc.mint(poolAddr, 1000n * 10n ** 6n);
+      await usdc.mint(aUsdcAddr, 100n * 10n ** 6n);
+      await aWeth.mint(poolAddr, ethers.parseUnits('0.5', 18));
+      await weth.mint(aWethAddr, ethers.parseUnits('0.5', 18));
+      // The aToken addresses hold the liquidity and let the mock pool pay it out.
+      for (const [a, u] of [
+        [aUsdcAddr, usdc],
+        [aWethAddr, weth],
+      ] as const) {
+        await ethers.provider.send('hardhat_impersonateAccount', [a]);
+        await ethers.provider.send('hardhat_setBalance', [a, '0x56BC75E2D63100000']);
+        const signer = await ethers.getSigner(a);
+        await u.connect(signer).approve(aaveAddr, ethers.MaxUint256);
+        await ethers.provider.send('hardhat_stopImpersonatingAccount', [a]);
+      }
+      await aavePool.setSettleWithdrawals(true);
+
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('2000', 18));
+
+      return {
+        ...fixture,
+        guard,
+        aavePool,
+        usdc,
+        weth,
+        aWeth,
+        aaveAddr,
+        wethAddr,
+        poolAddr,
+        guardAddress: await guard.getAddress(),
+        userAddress: await user.getAddress(),
+      };
+    }
+
+    function aavePlan(f: any, reserves: string[], portion: bigint) {
+      return buildPlan({
+        ...f,
+        minValueOutBps: 10n,
+        allocations: [
+          {
+            asset: f.aaveAddr,
+            guard: f.guardAddress,
+            positionIds: reserves.map((r) => ethers.zeroPadValue(r, 32)),
+            useFixedAmount: false,
+            portion,
+            fixedAmount: 0n,
+          },
+        ],
+      });
+    }
+
+    it('draws from the liquid reserve while the other reserve is nearly frozen', async () => {
+      const f = await setupAavePool();
+      const plan = aavePlan(f, [f.wethAddr], ethers.parseUnits('0.1', 18)); // 10% of $1000
+      const sig = await signPlan(f, plan, f.attester);
+
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+
+      expect(await f.weth.balanceOf(f.userAddress)).to.equal(ethers.parseUnits('0.05', 18));
+      expect(await f.usdc.balanceOf(f.userAddress)).to.equal(0n);
+      expect(await f.aWeth.balanceOf(f.poolAddr)).to.equal(ethers.parseUnits('0.45', 18));
+      expect(await f.pool.accountedAssets()).to.be.closeTo(
+        ethers.parseUnits('1900', 18),
+        10n ** 13n,
+      );
+    });
+
+    it('the frozen reserve delivers only its liquidity ceiling, which the value bound rejects', async () => {
+      const f = await setupAavePool();
+      // Only 10% of the USDC reserve is liquid, so a 10% portion delivers ~$10 against $100.
+      const plan = aavePlan(f, [await f.usdc.getAddress()], ethers.parseUnits('0.1', 18));
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it('is refused while the pool has any Aave debt', async () => {
+      const f = await setupAavePool();
+      const Token = await ethers.getContractFactory('MockERC20Custom');
+      const debt: any = await Token.deploy('dWETH', 'dWETH', 18);
+      const dataProvider: any = await ethers.getContractAt(
+        'MockAaveProtocolDataProvider',
+        await f.guard.aaveProtocolDataProvider(),
+      );
+      await dataProvider.setReserveTokens(
+        f.wethAddr,
+        await f.aWeth.getAddress(),
+        ethers.ZeroAddress,
+        await debt.getAddress(),
+      );
+      await f.aavePool.setReserveTokens(
+        f.wethAddr,
+        await f.aWeth.getAddress(),
+        await debt.getAddress(),
+      );
+      // With debt, valuing the position needs the guard's swap routes for the unwind.
+      const usdcAddr = await f.usdc.getAddress();
+      await f.guard.setUniV3Fee(f.wethAddr, usdcAddr, 500);
+      await f.guard.setUniV3Fee(usdcAddr, f.wethAddr, 500);
+      await debt.mint(f.poolAddr, 1n);
+      const plan = aavePlan(f, [f.wethAddr], ethers.parseUnits('0.1', 18));
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'SubsetDebtUnsupported',
+      );
+    });
+  });
+
+  it('an absurdly large decay window cannot overflow the accumulator and disable plan withdrawals', async () => {
+    const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+    const { pool, manager, asset, user, attester } = fixture;
+    await fundPoolAndUser(fixture);
+    await pool.connect(manager).setAttestedWithdrawDecayWindow(2n ** 255n);
+    const userAddress = await user.getAddress();
+    const assetAddress = await asset.getAddress();
+
+    // Two sequential plans: the second runs the decay arithmetic against a nonzero accumulator.
+    const half = ethers.parseUnits('50', 18);
+    for (const nonce of [0n, 1n]) {
+      const plan = buildPlan({
+        ...fixture,
+        userAddress,
+        assetAddress,
+        fusdAmount: half,
+        nonce,
+        minValueOutBps: 10n, // fixed-amount conversion floors, so allow sub-0.1% rounding
+        allocations: [
+          { asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: half },
+        ],
+      });
+      const signature = await signPlan(fixture, plan, attester);
+      await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+    }
+    expect(await asset.balanceOf(userAddress)).to.be.closeTo(
+      ethers.parseUnits('100', 18),
+      10n ** 6n,
+    );
+  });
+
   it('rejects a plan redeeming less than the minimum net fUSD (dust-extraction floor)', async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, asset, user, attester } = fixture;

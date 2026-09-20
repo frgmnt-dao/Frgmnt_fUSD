@@ -18,4 +18,9 @@ contract MockERC20Custom is ERC20 {
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
     }
+
+    /// @dev Test-only: lets a mock lending pool burn an aToken balance on withdraw.
+    function burn(address from, uint256 amount) external {
+        _burn(from, amount);
+    }
 }
