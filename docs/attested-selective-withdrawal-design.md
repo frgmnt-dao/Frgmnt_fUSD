@@ -10,7 +10,7 @@ This document was iterated on twice: once before implementation (see [Design Ref
 
 - **[Reviewer Guide](#reviewer-guide--changes-relative-to-the-certik-validated-baseline)**: exactly what this feature changes relative to the CertiK-validated baseline, why each change was required, and how to verify it.
 - **[Part 1 — Overview](#part-1--overview)**: what this feature is, the gap it closes, and its scope.
-- **[Part 2 — Design](#part-2--design)**: the trust model, the end-to-end flow, the on-chain data structures, the function itself, and the invariants that keep it safe.
+- **[Part 2 — Design](#part-2--design)**: the [end-to-end walkthrough](#how-it-works--end-to-end-walkthrough) (how a plan executes and how it uses each guard), the trust model, the end-to-end flow, the on-chain data structures, the function itself, and the invariants that keep it safe.
 - **[Part 3 — Implementation](#part-3--implementation)**: how the design maps onto the actual contracts — the bytecode constraint that shaped the architecture, the upgrade path, and test coverage.
 - **[Part 4 — Review History](#part-4--review-history)**: every finding raised against this feature, before and after it was coded, and how each was resolved.
 - **[Open Questions](#open-questions)**: what's deliberately deferred past this version.
@@ -163,6 +163,109 @@ The only existing mitigation is `PoolLogic.setImmediateWithdrawEnabled(false)` (
 - Position-level selection is offered only while the pool carries **no debt** in the guard: for Aave V3 any open debt anywhere in the account reverts `SubsetDebtUnsupported` (the reserves then back one shared account, and the validated unwind applies one portion to everything so the health factor is unchanged); for Morpho Blue a selected market with an open borrow reverts the same way (markets are isolated, so debt in an unselected market is fine). Leveraged unwinds stay on the whole-asset path. A guard that cannot select positions at all fails closed (`SubsetNotSupported`).
 
 ## Part 2 — Design
+
+### How It Works — End-to-End Walkthrough
+
+This section explains the whole mechanism in one place, in plain terms, and then shows exactly how it uses the asset guards. Everything here is a description of the code as implemented (`PoolLogic.withdrawCashImmediateWithPlan` and `WithdrawalPlanLib.executeWithdrawalPlan`).
+
+#### The idea in one paragraph
+
+A normal immediate withdrawal takes the same fraction of **every** asset the pool holds, so everyone who leaves gets the same mix and nobody gains by leaving first. That breaks down when one asset temporarily cannot pay out its fraction: the withdrawal reverts for everyone. A **plan-based** withdrawal lets one user redeem for a different mix that avoids the problem asset. An off-chain **attester** looks at the pool, decides which assets and positions to draw from and how much, and signs that as a plan. The contract does not trust the plan's arithmetic: it re-measures, from the guards' own valuation, how much value actually left the fund, and reverts unless that equals what the user's burned fUSD entitles them to (minus a small, usage-scaled surcharge).
+
+#### Who does what
+
+| Party                                                  | Role                                                                                                                                                                         |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Attester** (off-chain key, EOA or ERC-1271 contract) | Chooses composition only: which assets, which guard, which positions, how much of each. Signs the plan. Holds no funds and no on-chain permissions.                          |
+| **User**                                               | Submits the signed plan in their own transaction. Only the plan's user can execute it. Burns fUSD and receives the assets.                                                   |
+| **`PoolLogic`**                                        | The pool. Checks the caller and the feature flag, settles fees/rewards, calls the library, then performs every storage write (nonce, volume accumulator, `accountedAssets`). |
+| **`WithdrawalPlanLib`**                                | Delegatecalled library (no storage of its own). Verifies the signature, enforces every bound, dispatches to the guards, measures value.                                      |
+| **Asset guards** (validated code)                      | Know how to value and withdraw one kind of asset. They are called exactly as in the pro-rata path and are not told anything about the plan.                                  |
+| **`FundCalculationLibrary`** (validated code)          | Computes the pool's value (NAV), the claims and the solvency haircut.                                                                                                        |
+
+#### Step by step
+
+**Off-chain (attester).** For each supported asset the attester reads which guard serves it, how much of it is liquid now, and for multi-position guards which positions exist (Spoke reserves, Morpho markets, Uniswap NFTs, Aave reserves). It picks the allocations, sets the user's tolerance (`minValueOutBps`, at most 1%) and the ceiling on the surcharge it will accept, and signs the EIP-712 `WithdrawalPlan` for one user, one nonce, one deadline (at most 7 days ahead).
+
+**On-chain.**
+
+```
+User ──(plan, signature)──► PoolLogic.withdrawCashImmediateWithPlan
+   1. caller must be plan.user; feature must be enabled; settle fees/rewards
+   2. WithdrawalPlanLib.executeWithdrawalPlan:
+        a. verify signature (attester), deadline, nonce unused, tolerance <= 1%
+        b. exit fee + cooldown (same as the normal path) -> netFusd
+        c. circuit breaker: add netFusd to the decaying volume; reject if over the cap
+        d. burn netFusd from the user
+        e. read NAV and claims (uncapped, deficit-adjusted): completeBefore, totalClaims
+        f. fairFusd = netFusd, haircut if the pool is underwater
+        g. surcharge = fairFusd x (usage pressure x max rate); target = fairFusd - surcharge
+        h. for each allocation: bind guard, dispatch to the guard, run its transactions,
+           forward what the user is owed                      (see "How the guards are used")
+        i. fUSD supply must be unchanged; read NAV again: completeAfter
+        j. value that left = completeBefore - completeAfter must be within
+           [target - tolerance, target + dust]
+        k. receipt-side check on the assets actually delivered as tokens
+   3. PoolLogic writes: nonce consumed, new volume, accountedAssets reduced by the real outflow
+```
+
+The bounds in step j and k are what make the design safe: however the attester composed the plan, the fund cannot lose meaningfully more than `target`, and the user cannot receive meaningfully less (where that can be measured).
+
+#### How the guards are used
+
+**Which guard serves an asset.** `PoolManagerLogic.getAssetGuard(asset)` looks up the asset's _type_ in `AssetHandler` and then the guard registered for that type in `Governance`. So a guard serves every asset of its type, in every pool, and governance can swap it. That is why each allocation carries the guard the attester validated (`alloc.guard`) and the plan reverts `GuardMismatch` if the current guard differs: a signed plan can never run against replacement code the attester did not review.
+
+**The guard contract.** Every guard exposes `withdrawProcessing(pool, asset, portion, to)`, which returns `(withdrawAsset, withdrawAmount, transactions)`. It is a plan, not an action: a list of calls for the pool to execute. The library runs those calls as the pool (through a delegatecalled context, so `msg.sender` for the target is the pool), then:
+
+- if the guard named a `withdrawAsset`, the library measures the pool's balance change of that token, adds any amount the guard returned itself, and transfers the total to the user (a **token leg**);
+- if the guard returned no `withdrawAsset` (its own transactions already paid the user), nothing more is forwarded (a **direct leg**).
+
+`portion` is a fraction (1e18 = 100%) of the position's value. In a plan the attester supplies it directly, or supplies a raw `fixedAmount` that the library converts to a portion against the guard's reported balance (capped at 100%).
+
+**Two ways to draw an allocation.**
+
+1. _Whole asset_ (`positionIds` empty): the guard is called exactly as in the normal path and applies the portion to everything it holds for that asset. Every guard supports this, including leveraged Aave V3 and Morpho positions (which unwind through a flash loan).
+2. _Chosen positions_ (`positionIds` non-empty): only for guards that fund several independent positions behind one asset and only while there is no debt there. The library calls `withdrawProcessingSubset(pool, asset, portion, to, ids)` on a subclass of the validated guard. The ids must be strictly ascending, at most 32, currently tracked, and the allocation may not also use a fixed amount, complex data or a reserved balance.
+
+**What each guard does in a plan.**
+
+| Guard (asset it serves)                                                              | Whole-asset leg                                                                                                                                    | Position selection                                                                                     |
+| ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| ERC20 (a token)                                                                      | Pays `(balance - reserved) x portion` of the token directly. Token leg.                                                                            | Not needed: choose the token as the asset.                                                             |
+| Morpho Vault V2, Aave V4 Tokenization (one vault each; one guard serves many vaults) | One `redeem` of the pool's shares (capped by idle or Hub liquidity) to the pool; the underlying is measured by balance change. Token leg.          | Not needed: each vault is its own asset, so a plan draws several vaults with one allocation per vault. |
+| Aave V4 Spoke (many reserves)                                                        | Per reserve: `Spoke.withdraw` then transfer to the user, capped by Hub liquidity (a shared ledger stops two reserves double-claiming). Direct leg. | By `reserveId`.                                                                                        |
+| Morpho Blue (many markets)                                                           | No debt: withdraw supply shares and collateral straight to the user. With debt: flash-loan unwind.                                                 | By market id, only while no tracked market has debt.                                                   |
+| Uniswap V3 (many NFTs)                                                               | Per NFT: `decreaseLiquidity` with TWAP-priced minimums, then `collect` to the user. Direct leg.                                                    | By `tokenId` (the subclass keeps only the selected NFTs of the validated plan).                        |
+| Aave V3 (many reserves, one shared account)                                          | No debt: `Pool.withdraw` then transfer, per reserve. With debt: flash-loan unwind that keeps the health factor.                                    | By reserve token address, only while the account has no debt at all.                                   |
+
+The four subclass guards inherit the validated guards unchanged and add one function; the validated sources are not edited. Where a subset guard sizes a liquidity ceiling, it uses the minimum over the _selected_ positions, so an illiquid position the plan did not pick cannot throttle one it did.
+
+**The guards' arithmetic is not the security boundary.** The library never relies on a guard having sized its legs correctly. It reads the pool's value through the validated valuation (`computeImmediateWithdrawPortion`, which reads each guard's balance, net-realizable value and deficit) before and after the allocations run. Whatever the guards did, the value that left must land in the band. A buggy or over-generous guard, or a plan that picks the wrong positions, simply reverts.
+
+#### A worked example
+
+A pool holds $1,000,000: $600,000 in an ERC20 (USDC) and $400,000 in an Aave V4 Spoke, where reserve 2 (WETH, $200,000) is nearly frozen. A user redeems 10,000 fUSD (no exit fee, solvent pool, surcharge 0).
+
+- A normal withdrawal would need 1% of every asset, including reserve 2, and would revert.
+- The attester signs a plan: USDC allocation with fixed amount 5,000 USDC, and the Spoke allocation for reserve 1 only (WBTC, liquid) at a portion worth $5,000.
+- On-chain: the guard for USDC returns the token amount (a token leg); the Spoke subclass returns a `withdraw` and a `transfer` for reserve 1 only (a direct leg). Reserve 2 is never touched.
+- NAV before $1,000,000, after $990,000: value out = $10,000 = target, inside the band. The receipt-side check sees the 5,000 USDC delivered as a token, well within bounds. The plan succeeds.
+
+If the attester had also included reserve 2, the frozen reserve would deliver less than requested, the value out would fall below the band, and the whole transaction would revert atomically.
+
+#### What can go wrong, and what catches it
+
+| Risk                                                     | Caught by                                                                                                   |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Plan tampered after signing, wrong user, replay, expired | EIP-712 signature over the whole plan, user binding, single-use nonce, deadline                             |
+| Guard swapped by governance after signing                | Guard binding (`GuardMismatch`)                                                                             |
+| Plan takes more than the entitlement                     | Upper bound on NAV outflow, and the receipt-side upper bound                                                |
+| User paid less than the entitlement                      | Lower bound on NAV outflow (tolerance capped at 1%), and the receipt-side lower bound when no leg is direct |
+| Compromised attester drains through many valid plans     | Pool-wide decaying volume cap; manager/`factoryOwner` kill switch; 24h delayed rotation                     |
+| Mid-plan deposit or mint through a callback              | fUSD supply must be unchanged across the allocations                                                        |
+| Plan starves a queued withdrawal                         | A plan cannot draw an asset with Pending queued requests                                                    |
+| Selecting positions with debt                            | Subset guards refuse selection while debt exists                                                            |
+| Anything unexpected in a guard's plan                    | The subset filters are fail-closed; any failed call reverts the whole transaction                           |
 
 ### Trust Model — why the attester, not the user, signs
 
@@ -555,6 +658,69 @@ target = fairFusd - surchargeAmount
 **Governance is deliberately asymmetric and, on both directions, kept away from whoever might benefit from moving it.** `maxSurchargeBps` is `factoryOwner`-only, mirroring `attesterRotationDelay`'s existing precedent — but unlike that parameter, the manager doesn't collect this money, so the risk isn't the manager raising it to extract more; it's the manager (or, in principle, `factoryOwner`) being able to quietly zero it out to make the feature look consequence-free, or set it unreasonably high with no real bound. The upward direction is closed the same way `minValueOutBps` already is: `WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING`, a hardcoded constant, clamps the real applied surcharge regardless of what `maxSurchargeBps` is ever set to (a hardcoded ceiling cannot stop a zero, and setting it to zero simply disables the surcharge, which is why the setter is `factoryOwner`-only), so `setMaxSurchargeBps()` itself needs no bound-check logic of its own — a deliberate, bytecode-motivated choice, not an oversight (see [Bytecode Size Budget](#implementation-note-bytecode-size-budget)). No floor is enforced on `maxSurchargeBps`, matching `maxAttestedWithdrawVolumePerWindow`'s own precedent: a value of `0` disables the surcharge cleanly and safely, it doesn't silently corrupt anything else the way an unfloored decay window would.
 
 **No threshold, no cliff.** `surchargeBps` ramps continuously with `pressure` — there is no fixed line a withdrawal crosses that suddenly activates a fee. This was a deliberate design constraint, not an accident: mechanisms that snap on at a threshold create an incentive for anyone watching the relevant state to race ahead of that threshold, which would work against the exact users this feature exists to help.
+
+### Surcharge: Justification, Numbers and Limits
+
+The section above explains the mechanism. This one explains **why** it exists, how big it is, who pays and who benefits, what it cannot do, and what was rejected.
+
+#### The problem it answers
+
+The normal pro-rata withdrawal has a property people rely on without noticing: **equal treatment**. Everyone who leaves gets the same slice of every asset, so it does not matter who leaves first. A plan-based withdrawal deliberately gives up that property: it lets a user leave with the assets that are easiest to exit and leaves the harder ones behind. That is exactly what the feature is for (route around the asset that is stuck), but it has a price: each such withdrawal shifts the pool's remaining mix toward the assets nobody wanted, and it hands an advantage to whoever uses the path first. If nothing prices that, the path is a free option, and heavy use of it looks like a slow run: the early users take the good assets at par and the late ones are left with what is stuck.
+
+#### What the surcharge is
+
+A small fraction of the user's entitlement is withheld and **stays in the pool**. The fraction rises with how heavily the path has been used recently:
+
+```
+pressure   = min( recent plan-withdrawal volume (including this one) / pool value, 100% )
+rate       = pressure x maxSurchargeBps          (maxSurchargeBps <= 1%, hard-capped in code)
+surcharge  = fairFusd x rate
+user gets  = fairFusd - surcharge                (the value bound is checked against this)
+```
+
+`recent volume` is the same decaying accumulator that drives the circuit breaker, so it fades with time and needs no new storage. The attester signs its own ceiling (`maxAcceptableSurchargeBps`); if the live rate exceeds it, the plan reverts `SurchargeTooHigh`. It is rounded down in the user's favour and ramps continuously (no cliff to race). With the governed maximum left at its default of 0, there is no surcharge at all.
+
+#### Numbers
+
+Pool value $1,000,000, no recent volume, `maxSurchargeBps` = 100 (the 1% ceiling):
+
+| Single withdrawal | Share of pool | Rate  | Surcharge |
+| ----------------- | ------------- | ----- | --------- |
+| $10,000           | 1%            | 0.01% | $1.00     |
+| $100,000          | 10%           | 0.10% | $100      |
+| $500,000          | 50%           | 0.50% | $2,500    |
+| $1,000,000        | 100%          | 1.00% | $10,000   |
+
+The same $100,000 taken as five $20,000 plans inside one window (pool value held constant for the illustration) pays $4 + $8 + $12 + $16 + $20 = **$60** instead of $100, because each plan only sees the volume so far. So the charge is roughly quadratic in size, small for ordinary use and meaningful only for a large or rapid exit.
+
+#### Who pays, who benefits, and how
+
+- **The withdrawing user pays**, from their own entitlement, and has agreed to it in advance through the attester-signed ceiling.
+- **The value stays in the pool as extra collateral.** The user burns fUSD worth `fairFusd` but takes out only `target`, so the pool holds more than the remaining claims require. It is **not** paid out to anyone and **not** recognised as yield (a yield event would also trigger the performance fee); the bookkeeping is arranged so `accountedAssets` keeps tracking the pool's value.
+- **Who benefits:** fUSD is redeemed at par while the pool is solvent, so extra collateral does not raise any redemption value. What it does is raise the pool's collateralization: a buffer that protects every remaining holder's principal against a solvency haircut if losses occur, and that can absorb the cost of restoring the pool's composition (trades, slippage). It protects the peg; it does not add yield.
+
+#### Why this shape and not another
+
+| Alternative                                                     | Why it was not chosen                                                                                                                                                                                      |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| No surcharge                                                    | Leaves the first-mover advantage unpriced; the path becomes a free option and a run route.                                                                                                                 |
+| A flat fee                                                      | Charges the same for a tiny withdrawal and a pool-draining one; does not scale with the harm and cannot deter concentrated use.                                                                            |
+| A composition-aware charge (price the actual skew of each plan) | More precise, but needs the plan compared against live per-asset weights: extra logic and reads that `PoolLogic`'s bytecode budget could not absorb. Usage pressure is a cheaper proxy for the same thing. |
+| Pay the surcharge out to stakers as yield                       | Would interact with the performance fee (the manager would collect on it) and change the reward accounting; not needed to protect principal.                                                               |
+| A threshold that switches the charge on                         | Creates a cliff people can race; a continuous ramp has none.                                                                                                                                               |
+
+The design borrows a standard tool from funds with redemption pressure: swing pricing or a dilution levy, where redemptions that would push the fund away from its target allocation pay an amount kept inside the fund.
+
+#### What it cannot do (stated plainly)
+
+- **It measures usage, not skew.** A plan that draws a pro-rata-like mix still pays; a small but very skewed plan pays little. This is an accepted imprecision, chosen for cost.
+- **It is small by design.** The ceiling is 1% and the typical charge is a fraction of a percent. It prices the externality and deters heavy use; it does not make the skew harmless, and it is not a substitute for the volume cap, the kill switch or manager rebalancing.
+- **It is not split-invariant.** Splitting a withdrawal into several plans pays less (see the numbers above). Each split needs its own attester signature and nonce, and the 1% cap bounds the saving.
+- **It is a price, not a guarantee.** It builds a buffer that is a fraction of the value moved; it cannot promise the remaining holders are made whole.
+
+#### Governance and calibration
+
+`maxSurchargeBps` is set by the `factoryOwner` (not the manager, who does not receive the money and could otherwise be tempted to zero it to make the feature look free), starts at 0, and cannot exceed the hardcoded 1% ceiling whatever it is set to. The attester's per-plan ceiling bounds drift between signing and execution. A sensible rollout is to launch with 0, observe real usage and the attester's compositions, and only then enable a small maximum. Because the rate is a fraction of the maximum, the effective cost for ordinary sizes stays far below it.
 
 ### Interaction with Existing Systems
 
