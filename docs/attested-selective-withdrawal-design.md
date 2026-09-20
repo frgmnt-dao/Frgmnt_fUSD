@@ -8,11 +8,130 @@ This document was iterated on twice: once before implementation (see [Design Ref
 
 **How this document is organized:**
 
+- **[Reviewer Guide](#reviewer-guide--changes-relative-to-the-certik-validated-baseline)**: exactly what this feature changes relative to the CertiK-validated baseline, why each change was required, and how to verify it.
 - **[Part 1 — Overview](#part-1--overview)**: what this feature is, the gap it closes, and its scope.
 - **[Part 2 — Design](#part-2--design)**: the trust model, the end-to-end flow, the on-chain data structures, the function itself, and the invariants that keep it safe.
 - **[Part 3 — Implementation](#part-3--implementation)**: how the design maps onto the actual contracts — the bytecode constraint that shaped the architecture, the upgrade path, and test coverage.
 - **[Part 4 — Review History](#part-4--review-history)**: every finding raised against this feature, before and after it was coded, and how each was resolved.
 - **[Open Questions](#open-questions)**: what's deliberately deferred past this version.
+
+## Reviewer Guide — Changes Relative to the CertiK-Validated Baseline
+
+This section is for external reviewers and auditors who already know the CertiK-validated code and need to see exactly what this feature changes in it, and why each change was unavoidable. Everything here is checkable with the commands in [How to verify independently](#how-to-verify-independently).
+
+### Baseline
+
+The validated baseline is commit **`4922f72`**, the tip of `feature/06-aave-v4` (the code CertiK reviewed). This feature branch is `feature/07-attested-selective-withdrawal`, cut from that commit. All comparisons below are against `4922f72`.
+
+### Summary: what did and did not change
+
+| Category                                                                                                                                                                                                                              | Status vs baseline                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Every existing asset guard and contract guard (`ERC20Guard`, `AaveLendingPoolAssetGuard`, `AaveV4SpokeAssetGuard`, `AaveV4TokenizationAssetGuard`, `MorphoBlueLendingPoolAssetGuard`, `MorphoVaultV2AssetGuard`, `UniswapV3AssetGuard`, all contract guards and managers) | **Unchanged** (byte-identical source)                                                                             |
+| `FundCalculationLibrary`, `MorphoCollectLib`, `MorphoMathLib`, `MorphoChecksLib`, `PoolTxExecutor`, `CallResultChecker`, `SlippageAccumulator`                                                                                        | **Unchanged**                                                                                                     |
+| `TokenLogic`, `PoolManagerLogic`, `AssetHandler`, `Governance`, `Timelock`, `Managed`                                                                                                                                                  | **Unchanged**                                                                                                     |
+| `PoolLogic.sol`                                                                                                                                                                                                                        | **Modified** — the only validated contract whose code changed (see [PoolLogic.sol](#poollogicsol))                 |
+| `interfaces/IPoolLogic.sol`                                                                                                                                                                                                            | Modified, **additions only** (no line removed)                                                                    |
+| `interfaces/IPoolManagerLogic.sol`                                                                                                                                                                                                     | Modified, **one function added** (`factoryOwner()`, already implemented by the unchanged `PoolManagerLogic`)       |
+| `utils/WithdrawalPlanLib.sol`                                                                                                                                                                                                          | **New**, not previously audited                                                                                   |
+| `interfaces/guards/ISubPositionGuard.sol`, `guards/assetGuards/AaveV4SpokeSelectiveAssetGuard.sol`, `guards/assetGuards/MorphoBlueLendingPoolSelectiveAssetGuard.sol`                                                                  | **New**, not previously audited (the two guards inherit the validated guards and only add one function each)      |
+| Mocks, tests, scripts, `hardhat.config.ts`                                                                                                                                                                                             | See [Non-contract changes](#non-contract-changes)                                                                 |
+
+The two things a reviewer must read are therefore (1) the `PoolLogic.sol` diff and (2) the new files. Nothing else that was validated has been edited.
+
+### PoolLogic.sol
+
+`git diff 4922f72 HEAD -- contracts/contracts/PoolLogic.sol` is large (341 lines added, 320 removed) because most of it is **code relocation**, not new logic. The change has three parts.
+
+**1. Code moved out of `PoolLogic` into `WithdrawalPlanLib` (pure relocation).** These internal functions and structs no longer exist in `PoolLogic`; their bodies live in the new library, called through `delegatecall`:
+
+| Removed from `PoolLogic`                                    | Now in `WithdrawalPlanLib`                                                  |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `_withdrawProcessing` (per-asset guard dispatch)            | `withdrawProcessing` (public, shared by both withdrawal paths)              |
+| `_withdrawOne`, `_withdrawProRataInternal`, `_withdrawProRata` | `executeProRataWithdrawal` (the same loop, fee/cooldown/burn ordering kept) |
+| `_checkCallResult`                                          | `_checkCallResult`                                                          |
+| `_withdrawableFundValue` (one-line wrapper)                 | direct calls to `FundCalculationLibrary.computeWithdrawableFundValue`        |
+| structs `WithdrawOutputs`, `WithdrawProcessingLocalVars`    | library-local equivalents                                                   |
+
+The public entry points `withdrawCashImmediate`, `withdrawCashImmediateTo`, `withdrawCashImmediateSafe` and `withdrawCashImmediateToSafe` keep their signatures, modifiers and access rules. `_withdrawCashImmediateToSafe` now checks the enabled flag and the zero amount, calls `WithdrawalPlanLib.executeProRataWithdrawal`, and then performs the same `accountedAssets` reduction (`computeAccountedAssetsReduction`, FNA-42) and emits the same two events as before. The order of operations inside the moved code is unchanged: enabled check, zero-amount check, manager bypass or cooldown, exit fee, fee transfer, burn, fund value, portion, per-asset processing and transfer, the upper value bound, then the accounting.
+
+**2. New feature code added to `PoolLogic`.**
+
+- Storage, appended after the last baseline variable (`pendingCashWithdrawCount`), never inserted: `withdrawalAttester`, `pendingWithdrawalAttester`, `pendingAttesterActivationTime`, `attesterRotationDelay`, `consumedPlanNonce`, `isAttestedWithdrawEnabled`, `attestedWithdrawVolume`, `attestedWithdrawDecayWindow`, `maxAttestedWithdrawVolumePerWindow`, `maxSurchargeBps`, `attestedWithdrawOwnerStopped` (slots 23–33; baseline slots 0–22 are unchanged in slot, offset and type).
+- `withdrawCashImmediateWithPlan` (the new entry point) and its governance functions: `proposeWithdrawalAttester`, `activateWithdrawalAttester`, `setAttestedWithdrawEnabled`, `setAttesterRotationDelay`, `setMaxAttestedWithdrawVolumePerWindow`, `setAttestedWithdrawDecayWindow`, `setMaxSurchargeBps`, and the migration initializer `initializeAttestedWithdrawal` (`reinitializer(3)`, mirroring the existing `initializeAutoCompounding` pattern).
+- Events and errors for the above.
+
+**3. Errors that moved to `IPoolLogic`.** Errors thrown from both `PoolLogic` and the library (for example `SlippageExceeded`, `InvalidFundValue`, `AssetNotSupported`) are now declared on `IPoolLogic` so the library can use them. Selectors are unchanged and every error still appears in `PoolLogic`'s ABI.
+
+**ABI compatibility.** Comparing the compiled ABI of `PoolLogic` at the baseline and at this branch: **no function, event or error was removed or changed**; the difference is additions only (the new functions, events and errors above). Existing integrations and decoders keep working.
+
+**Bytecode size.** `PoolLogic` deployed size went from 24,447 to 24,408 bytes (EIP-170 limit 24,576), i.e. headroom from 129 to 168 bytes, *after* adding the feature.
+
+### Why these changes were required
+
+**The size limit forced the relocation.** At the baseline, `PoolLogic` had only **129 bytes** of EIP-170 headroom. The new entry point, its governance functions, its events and errors and its storage are far larger than 129 bytes (even after the relocation, the feature's own additions to `PoolLogic` consumed about 350 bytes of the space that the relocation freed), so it cannot be added to `PoolLogic` without first freeing bytecode. The only structural options are to move existing code out of `PoolLogic`, or not to add the feature.
+
+**Why the code moved into a library rather than being copied.** The per-asset guard-dispatch logic (`_withdrawProcessing`) is needed by both the existing pro-rata path and the new plan path. Copying it into a second location would have duplicated roughly 3,400 bytes of validated logic and created two copies that must be kept in sync. Instead it was moved once and both paths call the single copy. This is also the smaller review surface: the moved code is byte-for-byte the same logic, and the new path reuses it rather than reimplementing it.
+
+**Why a library, and why `delegatecall`.** `PoolLogic` already links `FundCalculationLibrary` and `PoolTxExecutor` externally; `WithdrawalPlanLib` follows the same established pattern. Under `delegatecall` the library runs in `PoolLogic`'s own context, so `address(this)`, `msg.sender` semantics (`burnFrom` is called by the pool) and storage reads behave exactly as before. The library declares **no storage of its own** and never writes `PoolLogic`'s state: every `SSTORE` (nonce, volume accumulator, `accountedAssets`) is performed by `PoolLogic` itself after the library returns, which avoids the library-storage bug class behind the 2017 Parity multisig freeze.
+
+**Why the EIP-712 domain and signature check are hand-rolled.** Inheriting `EIP712Upgradeable` would add bytecode and cached storage to `PoolLogic`. The library computes the same domain separator inline (`address(this)` resolves to the pool under `delegatecall`), and verifies the signature with `ECDSA` plus a manual ERC-1271 `staticcall`, because OpenZeppelin's `SignatureChecker` (5.4.0) pulls in the `mcopy` opcode, which this repository's Paris target does not support.
+
+**Why position-level selection uses new subclass guards.** A plan must be able to name the guard and the individual positions behind guards that front many positions (Morpho Blue markets, Aave V4 Spoke reserves). Adding that to the validated guards would have meant editing CertiK-validated code. Instead `AaveV4SpokeSelectiveAssetGuard` and `MorphoBlueLendingPoolSelectiveAssetGuard` **inherit** the validated guards without overriding anything and add one function, `withdrawProcessingSubset`, that reuses the validated internal helpers. The validated sources stay untouched and the new review surface is two small files. Governance opts in per asset type by re-pointing the guard (see the upgrade notes); until then the validated guards run as before.
+
+**Why the two interface changes.** `IPoolLogic` gained the plan structs, the shared errors and the getters the library reads through self-calls. `IPoolManagerLogic` gained `factoryOwner()` (already implemented by the unchanged `PoolManagerLogic`) so `PoolLogic` can give the `factoryOwner` an independent emergency stop and gate the rotation delay, the same role that already gates the performance-fee delay.
+
+### What the moved code must preserve, and how that was checked
+
+The relocated code is meant to be behavior-identical. That claim has been checked in three independent ways, and reviewers can repeat each:
+
+1. **Line-by-line comparison** of the removed `PoolLogic` functions against `WithdrawalPlanLib.withdrawProcessing`, `executeProRataWithdrawal` and `_checkCallResult`: same checks, same order, same error selectors, same slippage baseline, same balance-delta handling and `externalProcessed` semantics. The one intentional difference is that `reservedAssetBalance(asset)` is read through a self-call instead of a direct mapping read (a mapping cannot cross a library function boundary); it returns the same value and costs a little extra gas per asset.
+2. **The unchanged existing test suite.** The tests of the validated contracts were not edited except to link the new library when deploying `PoolLogic`: the changes to `test/PoolLogic.test.ts`, `test/PoolLogicAutoCompounding.test.ts`, `test/TokenLogic.test.ts` and `test/FrgmntUserActions.test.ts` are **additions only** (deploy `WithdrawalPlanLib` and pass it in `libraries`); no assertion was changed or removed. The whole suite passes (1185 tests).
+3. **Bytecode and storage comparison.** Building the baseline and this branch and comparing compiled output shows: baseline storage slots 0–22 identical in slot, offset and type with new variables strictly appended; and, of the contract artifacts common to both builds, every one has identical runtime bytecode except `PoolLogic` (and one test mock). Contracts that merely import `IPoolLogic` or `IPoolManagerLogic` can differ in the trailing compiler metadata hash only, which matters if exact-match block-explorer verification of a freshly redeployed `FundCalculationLibrary` or `PoolTxExecutor` is required.
+
+An additional opt-in rehearsal (`test/UpgradeFromAudit.test.ts`) deploys the real `audit`-branch `PoolLogic` behind a transparent proxy, creates real staker state, upgrades to this branch, and checks that slots 0–22 are byte-identical, every getter is preserved, and a staker's pending reward survives the migration and harvests in full.
+
+### What is new and unvalidated
+
+Reviewers should treat these as new code needing a full audit, not as diffs against validated code:
+
+- `WithdrawalPlanLib.executeWithdrawalPlan` and its helpers (plan verification, value-conservation bounds, surcharge, circuit breaker, guard binding, position-level dispatch). The relocated pro-rata functions in the same file are the moved code described above.
+- The new `PoolLogic` entry point and governance functions (attester rotation, kill switch, latched `factoryOwner` stop, initializer).
+- `ISubPositionGuard`, `AaveV4SpokeSelectiveAssetGuard`, `MorphoBlueLendingPoolSelectiveAssetGuard`.
+
+Suggested review order: (1) the `PoolLogic.sol` diff, to confirm the relocation is behavior-preserving and storage is append-only; (2) `WithdrawalPlanLib.executeWithdrawalPlan` against [Value Conservation](#value-conservation-the-core-safety-invariant) and [Bounding a Compromised Attester Key](#bounding-a-compromised-attester-key); (3) the subclass guards against the validated guards they inherit.
+
+### Non-contract changes
+
+- **`hardhat.config.ts`**: compiler `overrides` for `WithdrawalPlanLib` (viaIR, optimizer runs 200) and for the Morpho subclass guard (the same viaIR settings the validated Morpho guard already needs, so the inherited code is generated under identical settings).
+- **Tests**: `AttestedWithdrawal.test.ts`, `SelectiveGuards.test.ts`, `SelectiveGuardDeploy.test.ts` and the opt-in `UpgradeFromAudit.test.ts` are new. The four existing test files listed above only gained library linking.
+- **Mocks** (test-only): `MockERC1271Signer`, `PoolLogicTransparentProxy`, `TestSubPositionAssetGuard` are new; `TestPoolManagerLogic` gained a `factoryOwner` field; `MockMorphoBlue` gained `withdraw` and `withdrawCollateral`.
+- **Scripts**: `upgrade_attested_withdrawal.ts`, `deploy_selective_guards.ts` and `utils/selectiveGuards.ts` are new; `deploy_core_contracts.ts` gained the deployment and linking of `WithdrawalPlanLib`; `upgrade_core_contracts.ts` was corrected to deploy and link `WithdrawalPlanLib` and to run the `onlyOwner` `initializeAutoCompounding()` as a separate owner-sent call in the same Safe batch, because inside `ProxyAdmin.upgradeAndCall` the sender is the ProxyAdmin and the initializer would revert. None of these scripts has been run against a live network.
+
+### How to verify independently
+
+```bash
+# 1. Which non-mock contracts differ from the validated baseline (expect the table above)
+git diff 4922f72 HEAD --name-status -- contracts/contracts ':!contracts/contracts/mocks'
+
+# 2. Validated guards and libraries: only the two new subclass guards appear
+git diff 4922f72 HEAD --name-status -- contracts/contracts/guards \
+  contracts/contracts/utils/MorphoCollectLib.sol contracts/contracts/utils/FundCalculationLibrary.sol
+
+# 3. The PoolLogic diff, and its size against the limit
+git diff 4922f72 HEAD -- contracts/contracts/PoolLogic.sol
+npm run check:contract-size
+
+# 4. Existing tests changed only by additions (expect zero deleted lines)
+git diff 4922f72 HEAD --numstat -- test/PoolLogic.test.ts test/PoolLogicAutoCompounding.test.ts \
+  test/TokenLogic.test.ts test/FrgmntUserActions.test.ts
+
+# 5. Full suite
+npm run test
+
+# 6. Upgrade rehearsal from the real audit-branch implementation (see the file header)
+AUDIT_ARTIFACTS=<path to compiled audit artifacts> npx hardhat test test/UpgradeFromAudit.test.ts
+```
 
 ## Part 1 — Overview
 
