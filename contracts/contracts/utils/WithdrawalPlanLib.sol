@@ -81,11 +81,16 @@ library WithdrawalPlanLib {
     uint256 private constant DUST_TOLERANCE = 1e15;
 
     /// @dev Smallest net fUSD (after the exit fee) an attested plan may redeem: $0.01. The dust
-    ///      tolerance above is absolute, so without a floor a plan could burn a few wei of fUSD
-    ///      and release up to DUST_TOLERANCE of real value per transaction, and the volume breaker
-    ///      (which meters netFusd) would barely register it. With this floor the burn is always at
-    ///      least 10x the most that the tolerance can release, so the trade is never profitable.
-    ///      Smaller redemptions remain possible through the pro-rata path.
+    ///      tolerance above is absolute (up to DUST_TOLERANCE of extra value per transaction), and
+    ///      the volume breaker meters netFusd. Without a floor a plan could burn a few wei of fUSD,
+    ///      release up to DUST_TOLERANCE of real value, and register almost nothing in the breaker,
+    ///      so the extraction would be effectively unmetered. With the floor every transaction
+    ///      registers at least $0.01 of volume, so the total extractable through the tolerance is
+    ///      bounded by (DUST_TOLERANCE / MIN_PLAN_NET_FUSD) = 10% of the metered volume, which the
+    ///      cap limits. It does NOT make the trade unprofitable per transaction (at most about
+    ///      $0.001 gained on a $0.01 burn); the protection is that each transaction needs an
+    ///      attester signature and gas. Smaller redemptions remain possible through the pro-rata
+    ///      path.
     uint256 private constant MIN_PLAN_NET_FUSD = 1e16;
 
     /// @dev Must stay numerically identical to PoolLogic.MAX_MIN_VALUE_OUT_BPS — duplicated here
@@ -95,6 +100,9 @@ library WithdrawalPlanLib {
 
     /// @dev Effective ceiling on attestedWithdrawDecayWindow; see _checkAndRecordVolume.
     uint256 private constant MAX_DECAY_WINDOW = 30 days;
+
+    /// @dev Longest lifetime a signed plan may have (plan.deadline - block.timestamp).
+    uint256 private constant MAX_PLAN_TTL = 7 days;
 
     /// @dev Protocol-level ceiling on the pool-usage surcharge (see the "Surcharge" section of
     ///      docs/attested-selective-withdrawal-design.md), independent of whatever
@@ -392,6 +400,9 @@ library WithdrawalPlanLib {
             revert IPoolLogic.InvalidAttesterSignature();
         }
         if (block.timestamp > plan.deadline) revert IPoolLogic.PlanDeadlineExpired();
+        // Bound the signature's lifetime: an unbounded deadline gives the holder a free option on
+        // when to execute and lets an old signature survive an off/on toggle of the feature.
+        if (plan.deadline > block.timestamp + MAX_PLAN_TTL) revert IPoolLogic.PlanDeadlineTooFar();
         if (input.nonceAlreadyConsumed) revert IPoolLogic.PlanNonceAlreadyUsed();
         if (plan.minValueOutBps > MAX_MIN_VALUE_OUT_BPS) revert IPoolLogic.MinValueOutBpsTooHigh();
         // Audit finding: _withdrawCashImmediateToSafe checks amount == 0 unconditionally, before
@@ -421,6 +432,8 @@ library WithdrawalPlanLib {
         result.newVolumeAccumulated = newVolume.accumulatedValueUsd;
 
         ITokenLogicMinimal(input.fusd).burnFrom(plan.user, result.netFusd);
+        // fUSD supply is fixed from here until the allocations finish (checked below).
+        uint256 supplyAfterBurn = IERC20(input.fusd).totalSupply();
 
         // VALUE MEASUREMENT. The value that leaves the fund is measured on the UNCAPPED,
         // net-realizable, deficit-adjusted, reserved-excluding NAV (`completeFundValue`), before and
@@ -488,6 +501,13 @@ library WithdrawalPlanLib {
             plan,
             complexAssetsData
         );
+
+        // A deposit made from a token or guard callback while the loop runs would be netted out of
+        // the value bound below (the refunded deposit offsets the withdrawal) yet still mint fUSD.
+        // Any mint changes total supply, so require it unchanged. This lives here, not in
+        // PoolLogic's validated deposit hooks, so those stay byte-identical to the baseline.
+        if (IERC20(input.fusd).totalSupply() != supplyAfterBurn)
+            revert IPoolLogic.FusdSupplyChanged();
 
         // Same call, same basis, after the loop. Also reverts IncompleteNAV if a position became
         // unvaluable mid-withdrawal, which is the safe direction.

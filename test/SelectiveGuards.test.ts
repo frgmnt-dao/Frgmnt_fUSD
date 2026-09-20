@@ -409,19 +409,40 @@ describe('MorphoBlueLendingPoolSelectiveAssetGuard', () => {
     ).to.be.revertedWithCustomError(f.guard, 'SubsetDebtUnsupported');
   });
 
-  it('leaves a debt-carrying market untouched when it is not selected', async () => {
+  it('is refused while ANY tracked market carries debt, even when the selected market is clean', async () => {
+    // The validated NAV deducts a modelled unwind cost across every leg once any market has debt,
+    // which a debt-free in-kind exit does not really incur, so the whole guard must be debt-free.
     const f = await deploy();
     const clean = await addMarket(f, 1n, 0n);
     const levered = await addMarket(f, 2n, 0n);
     await f.morpho.setPosition(levered.id, f.poolAddr, 500_000n, 1_000n, ethers.parseEther('1'));
+    await expect(
+      f.guard.withdrawProcessingSubset(f.poolAddr, ethers.ZeroAddress, ONE, f.other.address, [
+        clean.id,
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'SubsetDebtUnsupported');
+  });
+
+  it('two selected markets take the MINIMUM of their liquidity ceilings', async () => {
+    const f = await deploy();
+    const a = await addMarket(f, 1n, 700_000n); // 100_000 liquid of 250_000 position -> 40% ceiling
+    const b = await addMarket(f, 2n, 900_000n); // 100_000 liquid of 250_000 position -> 40%? tighter below
+    const c = await addMarket(f, 3n, 500_000n); // loosest
+    void c;
     const [, , sub] = await f.guard.withdrawProcessingSubset(
       f.poolAddr,
       ethers.ZeroAddress,
       ONE,
       f.other.address,
-      [clean.id],
+      [a.id, b.id].sort(),
     );
-    expect(sub.length).to.equal(2);
+    // Both selected supply legs use the same effective portion (the tighter ceiling of the two).
+    const supplies = sub
+      .filter((t: any) => t.txData.startsWith(morphoIface.getFunction('withdraw')!.selector))
+      .map((t: any) => morphoIface.decodeFunctionData('withdraw', t.txData)[2] as bigint);
+    expect(supplies.length).to.equal(2);
+    expect(supplies[0]).to.equal(supplies[1]);
+    expect(supplies[0]).to.be.gt(0n);
   });
 
   it('a delisted-but-still-tracked market remains selectable', async () => {
@@ -800,6 +821,7 @@ describe('AaveV3LendingPoolSelectiveAssetGuard', () => {
     await f.dataProvider.setReserveTokens(f.a.weth, f.a.aWeth, ethers.ZeroAddress, f.a.dWeth);
     await f.aavePool.setReserveTokens(f.a.weth, f.a.aWeth, f.a.dWeth);
     await f.dWeth.mint(f.a.pool, 1n * 10n ** 18n);
+    await f.aavePool.setTotalDebtBase(1n); // Aave's own whole-account view of the debt
     // Select only USDC, which itself has no debt: still refused (one shared account / health factor).
     await expect(
       f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, f.other.address, [
@@ -830,6 +852,16 @@ describe('AaveV3LendingPoolSelectiveAssetGuard', () => {
     expect(txs.length).to.equal(0);
   });
 
+  it('rejects an id whose LOW 160 bits are a supported reserve but whose high bits are set (no aliasing)', async () => {
+    const f = await deploy();
+    const aliased = ethers.zeroPadValue(ethers.toBeHex((1n << 200n) + BigInt(f.a.usdc)), 32);
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, f.other.address, [
+        aliased,
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'InvalidPositionId');
+  });
+
   it('an empty selection produces no transactions', async () => {
     const f = await deploy();
     const [, , txs] = await f.guard.withdrawProcessingSubset(
@@ -840,5 +872,194 @@ describe('AaveV3LendingPoolSelectiveAssetGuard', () => {
       [],
     );
     expect(txs.length).to.equal(0);
+  });
+});
+
+describe('UniswapV3SelectiveAssetGuard: harness checks and the REAL validated guard', () => {
+  const idOf = (n: bigint) => ethers.zeroPadValue(ethers.toBeHex(n), 32);
+  const SQRT_PRICE_1 = 79228162514264337593543950336n;
+  const nfpmIface = new ethers.Interface([
+    'function decreaseLiquidity((uint256 tokenId,uint128 liquidity,uint256 amount0Min,uint256 amount1Min,uint256 deadline))',
+    'function collect((uint256 tokenId,address recipient,uint128 amount0Max,uint128 amount1Max))',
+  ]);
+  const parse = (tx: any) => {
+    const name = nfpmIface.parseTransaction({ data: tx.txData })!.name;
+    return { name, args: nfpmIface.decodeFunctionData(name, tx.txData)[0] };
+  };
+
+  it('harness: the recipient and the portion reach the kept transactions unchanged', async () => {
+    const [, other] = await ethers.getSigners();
+    const poolAndFactory: any = await (
+      await ethers.getContractFactory('MockAssetHandlerAndPool')
+    ).deploy();
+    const nfpm: any = await (
+      await ethers.getContractFactory('MockUniV3PositionManagerExtended')
+    ).deploy(ethers.ZeroAddress);
+    const nftGuard: any = await (
+      await ethers.getContractFactory('MockUniswapV3PositionGuard')
+    ).deploy();
+    await poolAndFactory.setContractGuard(nfpm.target, nftGuard.target);
+    await nftGuard.setOwnedTokenIds(poolAndFactory.target, [1, 2]);
+    const guard: any = await (
+      await ethers.getContractFactory('TestUniswapV3SelectiveGuardHarness')
+    ).deploy();
+
+    const portion = ONE / 4n;
+    const [, , txs] = await guard.withdrawProcessingSubset(
+      poolAndFactory.target,
+      nfpm.target,
+      portion,
+      other.address,
+      [idOf(2n)],
+    );
+    const dec = parse(txs[0]);
+    const col = parse(txs[1]);
+    expect(dec.name).to.equal('decreaseLiquidity');
+    expect(dec.args.liquidity).to.equal(portion / 10n ** 12n);
+    expect(col.name).to.equal('collect');
+    expect(col.args.recipient).to.equal(other.address);
+  });
+
+  it('harness: a transaction that does not target the position manager reverts UnexpectedTransaction', async () => {
+    const [, other] = await ethers.getSigners();
+    const poolAndFactory: any = await (
+      await ethers.getContractFactory('MockAssetHandlerAndPool')
+    ).deploy();
+    const nfpm: any = await (
+      await ethers.getContractFactory('MockUniV3PositionManagerExtended')
+    ).deploy(ethers.ZeroAddress);
+    const nftGuard: any = await (
+      await ethers.getContractFactory('MockUniswapV3PositionGuard')
+    ).deploy();
+    await poolAndFactory.setContractGuard(nfpm.target, nftGuard.target);
+    await nftGuard.setOwnedTokenIds(poolAndFactory.target, [1]);
+    const guard: any = await (
+      await ethers.getContractFactory('TestUniswapV3SelectiveGuardHarness')
+    ).deploy();
+    await guard.setInjectWrongTarget(true);
+    await expect(
+      guard.withdrawProcessingSubset(poolAndFactory.target, nfpm.target, ONE, other.address, [
+        idOf(1n),
+      ]),
+    ).to.be.revertedWithCustomError(guard, 'UnexpectedTransaction');
+  });
+
+  async function realFixture() {
+    const [, user] = await ethers.getSigners();
+    const Token = await ethers.getContractFactory('MockERC20Custom');
+    const token0: any = await Token.deploy('T0', 'T0', 18);
+    const token1: any = await Token.deploy('T1', 'T1', 18);
+    const bad: any = await Token.deploy('BAD', 'BAD', 18);
+    const poolAndFactory: any = await (
+      await ethers.getContractFactory('MockAssetHandlerAndPool')
+    ).deploy();
+    await poolAndFactory.setAsset(await token0.getAddress(), true, ethers.parseUnits('1', 18));
+    await poolAndFactory.setAsset(await token1.getAddress(), true, ethers.parseUnits('1', 18));
+    const uniFactory: any = await (
+      await ethers.getContractFactory('MockUniswapV3Factory')
+    ).deploy();
+    const uniPool: any = await (
+      await ethers.getContractFactory('MockUniswapV3Pool')
+    ).deploy(await token0.getAddress(), await token1.getAddress(), SQRT_PRICE_1);
+    await uniFactory.setPool(
+      await token0.getAddress(),
+      await token1.getAddress(),
+      3000,
+      await uniPool.getAddress(),
+    );
+    const nfpm: any = await (
+      await ethers.getContractFactory('MockUniV3PositionManagerExtended')
+    ).deploy(await uniFactory.getAddress());
+    // NFT 1 and 3 are valid; NFT 2 uses an unsupported token, which the validated guard skips.
+    await nfpm.setFullPosition(
+      1,
+      await token0.getAddress(),
+      await token1.getAddress(),
+      3000,
+      -60,
+      60,
+      1_000_000n,
+      0,
+      0,
+    );
+    await nfpm.setFullPosition(
+      2,
+      await token0.getAddress(),
+      await bad.getAddress(),
+      3000,
+      -60,
+      60,
+      1_000_000n,
+      0,
+      0,
+    );
+    await nfpm.setFullPosition(
+      3,
+      await token0.getAddress(),
+      await token1.getAddress(),
+      3000,
+      -60,
+      60,
+      2_000_000n,
+      0,
+      0,
+    );
+    const posGuard: any = await (
+      await ethers.getContractFactory('MockUniswapV3PositionGuard')
+    ).deploy();
+    await posGuard.setOwnedTokenIds(await poolAndFactory.getAddress(), [1, 2, 3]);
+    await poolAndFactory.setContractGuard(await nfpm.getAddress(), await posGuard.getAddress());
+    const guard: any = await (
+      await ethers.getContractFactory('UniswapV3SelectiveAssetGuard')
+    ).deploy();
+    return { guard, user, pool: await poolAndFactory.getAddress(), asset: await nfpm.getAddress() };
+  }
+
+  it('REAL guard: a subset is exactly the validated plan restricted to the selected NFTs', async () => {
+    const f = await realFixture();
+    const portion = ONE / 2n;
+    const [, , full] = await f.guard.withdrawProcessing(f.pool, f.asset, portion, f.user.address);
+    const [, , sub] = await f.guard.withdrawProcessingSubset(
+      f.pool,
+      f.asset,
+      portion,
+      f.user.address,
+      [idOf(1n), idOf(3n)],
+    );
+    // Same transactions, same bytes, in the same order, for NFTs 1 and 3; nothing for NFT 2.
+    expect(sub.length).to.equal(full.length);
+    expect(sub.map((t: any) => t.txData)).to.deep.equal(full.map((t: any) => t.txData));
+    const decs = sub.map(parse).filter((t: any) => t.name === 'decreaseLiquidity');
+    expect(decs.map((d: any) => [d.args.tokenId, d.args.liquidity])).to.deep.equal([
+      [1n, 500_000n],
+      [3n, 1_000_000n],
+    ]);
+  });
+
+  it('REAL guard: selecting one NFT keeps only its pair, with the recipient on collect', async () => {
+    const f = await realFixture();
+    const [, , sub] = await f.guard.withdrawProcessingSubset(
+      f.pool,
+      f.asset,
+      ONE / 2n,
+      f.user.address,
+      [idOf(3n)],
+    );
+    const parsed = sub.map(parse);
+    expect(parsed.every((t: any) => t.args.tokenId === 3n)).to.equal(true);
+    const col = parsed.find((t: any) => t.name === 'collect');
+    if (col) expect(col.args.recipient).to.equal(f.user.address);
+  });
+
+  it('REAL guard: an NFT the validated guard skips (unsupported token) selects to nothing', async () => {
+    const f = await realFixture();
+    const [, , sub] = await f.guard.withdrawProcessingSubset(
+      f.pool,
+      f.asset,
+      ONE / 2n,
+      f.user.address,
+      [idOf(2n)],
+    );
+    expect(sub.length).to.equal(0);
   });
 });

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { ethers, upgrades } from 'hardhat';
+import { assertNoPendingWithdrawals } from './utils/upgradePreflight';
 
 // --------------------------------------------------
 // Upgrades the four upgradeable proxies on the live USD deployment (Base mainnet,
@@ -13,16 +14,21 @@ import { ethers, upgrades } from 'hardhat';
 // *** contracts being upgraded ship a real-money migration, not just new logic. ***
 //
 // STORAGE-LAYOUT VERIFICATION (manual diff, audit vs feature/06-aave-v4):
-//   - AssetHandler:      2 new vars, appended before the storage gap (50 -> 48). Safe.
+//   - AssetHandler:      3 new vars, appended before the storage gap (50 -> 47). Safe.
 //   - PoolManagerLogic:  zero new state variables. __gap unchanged. Safe.
-//   - PoolLogic:         3 new items, all strictly appended after every pre-existing
+//   - PoolLogic:         17 new state variables in total (slots 17-33: 6 from feature/06, 11 from
+//                         the attested-withdrawal feature), all strictly appended after every pre-existing
 //                         variable. No __gap exists on this contract at all (never
 //                         had one) — append-only ordering is what's relied on for
-//                         safety, confirmed by direct comparison. Bytecode: 328 bytes
-//                         of headroom on the current branch tip — fits, but tight.
+//                         safety, confirmed by direct comparison. Bytecode: 150 bytes
+//                         of EIP-170 headroom on the current branch tip — fits, but tight.
 //   - TokenLogic:        2 new vars, appended before the storage gap (40 -> 38). Safe.
-// Also re-validated automatically per-contract below via
-// @openzeppelin/hardhat-upgrades' forceImport + validateUpgrade.
+// NOTE on the automatic check below: `forceImport(proxy, NewFactory)` followed by
+// `validateUpgrade(proxy, NewFactory)` imports the proxy AS the new layout and then validates the new
+// layout against itself, so it passes vacuously and would NOT catch an incompatible change. The
+// authoritative evidence is the compiler-layout diff above and test/UpgradeFromAudit.test.ts (a real
+// `audit`-implementation proxy upgraded to this branch). To make the plugin check meaningful,
+// forceImport with a factory built from the `audit` branch instead.
 //
 // TWO MANDATORY POST-UPGRADE MIGRATION CALLS — MUST land atomically with their respective
 // proxy upgrade, not as a separate later transaction. TokenLogic's is bundled as
@@ -32,8 +38,11 @@ import { ethers, upgrades } from 'hardhat';
 // Safe MultiSend batch (atomic all the same). On this branch PoolLogic also links
 // WithdrawalPlanLib and carries the attested-withdrawal feature, which stays dormant (disabled,
 // no attester) until initializeAttestedWithdrawal() runs — see
-// scripts/upgrade_attested_withdrawal.ts. If this script is used to install the implementation,
-// that script's own upgrade step is redundant; run only its initializer step.
+// scripts/upgrade_attested_withdrawal.ts. If ATTESTER_ADDRESS is set, this script's DAO Safe batch
+// also includes initializeAttestedWithdrawal() (same parameters and defaults as that script), so the
+// full upgrade is ONE atomic batch; do NOT additionally run the attested script afterwards (it
+// always deploys and upgrades again). Leave ATTESTER_ADDRESS unset to install the implementation
+// only and enable the feature later.
 //
 //   1) PoolLogic.initializeAutoCompounding() (onlyOwner, reinitializer(2)). The new
 //      compoundedRewardIndex field starts at 0 on the live proxy (the audit-branch
@@ -131,7 +140,9 @@ import { ethers, upgrades } from 'hardhat';
 // SECURITY MODEL: same two-phase separation as the other remediation scripts. Phase 1
 // (permissionless) deploys and storage-validates every new implementation/library.
 // Phase 2 (owner-gated) is never sent directly by default — written to disk as review
-// artifacts. SEND=1 opts into direct broadcast (fork/testnet use only).
+// artifacts. (Phase 1 itself broadcasts deployments — libraries, implementations, the escrow —
+// from the local signer even without SEND=1; only the owner-gated calls are withheld.)
+// SEND=1 opts into direct broadcast of those too (fork/testnet use only).
 // --------------------------------------------------
 
 const GOVERNANCE_SAFE = '0xafb9B883637f72767ADf7193Bb3B8e59C02Ea05d';
@@ -182,6 +193,36 @@ async function main() {
     'Signer (gas payer, deploy only — not GOVERNANCE_SAFE or the DAO Safe):',
     signer.address,
   );
+
+  // -----------------------------------------------------------------------
+  // Preflight (read-only): refuse to build a batch against live state the upgrade cannot handle.
+  // -----------------------------------------------------------------------
+  console.log('\n=== Preflight ===');
+  // (a) A queued withdrawal still Pending at upgrade time can never be finalized afterwards
+  //     (pendingCashWithdrawCount starts at 0 for it) — see scripts/utils/upgradePreflight.ts.
+  await assertNoPendingWithdrawals(POOL_LOGIC_PROXY);
+  // (b) Custody. The constants above record who held each role when last checked; this script
+  //     and scripts/upgrade_attested_withdrawal.ts disagree about whether GOVERNANCE_SAFE is an EOA
+  //     or a Safe, so verify at run time instead of trusting either comment.
+  const ownableAbi = ['function owner() view returns (address)'];
+  const custody: [string, string, string][] = [
+    ['AssetHandler ProxyAdmin owner', ASSET_HANDLER_PROXY_ADMIN, GOVERNANCE_SAFE],
+    ['PoolManagerLogic ProxyAdmin owner', POOL_MANAGER_LOGIC_PROXY_ADMIN, GOVERNANCE_SAFE],
+    ['PoolLogic ProxyAdmin owner', POOL_LOGIC_PROXY_ADMIN, DAO_SAFE],
+    ['PoolLogic owner', POOL_LOGIC_PROXY, DAO_SAFE],
+  ];
+  for (const [label, target, expected] of custody) {
+    const actual: string = await new ethers.Contract(target, ownableAbi, signer).owner();
+    const ok = actual.toLowerCase() === expected.toLowerCase();
+    console.log(`  ${label}: ${actual} ${ok ? '(as expected)' : `(EXPECTED ${expected})`}`);
+    if (!ok && process.env.ALLOW_CUSTODY_MISMATCH !== '1') {
+      throw new Error(
+        `${label} is ${actual}, not the expected ${expected}. Custody has changed since these ` +
+          'constants were recorded; update them (and which Safe signs which batch) before ' +
+          'proceeding. ALLOW_CUSTODY_MISMATCH=1 overrides this check.',
+      );
+    }
+  }
 
   // -----------------------------------------------------------------------
   // Phase 1a: libraries.
@@ -344,6 +385,29 @@ async function main() {
     [withdrawalEscrowAddress],
   );
 
+  // FNA-40: AssetHandler.eurUsdModeLocked is a NEW slot and is false on the live proxy. Until
+  // clearEurUsdAggregator() runs once, the AssetHandler owner can still call setEurUsdAggregator()
+  // and re-base the whole pool's NAV/fee/withdrawal accounting to EUR. It must run AFTER the
+  // AssetHandler upgrade (the function does not exist on the current implementation), so it is
+  // ordered after the upgrade transaction below.
+  const clearEurUsdAggregatorCalldata =
+    assetHandler.interface.encodeFunctionData('clearEurUsdAggregator');
+
+  // Optional: the attested-withdrawal initializer, in the same atomic batch, when ATTESTER_ADDRESS
+  // is set (same parameters/defaults as scripts/upgrade_attested_withdrawal.ts). Must come AFTER
+  // initializeAutoCompounding() — see that script's MANDATORY MIGRATION SEQUENCE.
+  const attesterAddress = process.env.ATTESTER_ADDRESS;
+  const initializeAttestedWithdrawalCalldata =
+    attesterAddress && ethers.isAddress(attesterAddress) && attesterAddress !== ethers.ZeroAddress
+      ? poolLogic.interface.encodeFunctionData('initializeAttestedWithdrawal', [
+          attesterAddress,
+          BigInt(process.env.ATTESTER_ROTATION_DELAY_SECONDS ?? 24 * 60 * 60),
+          BigInt(process.env.ATTESTED_WITHDRAW_DECAY_WINDOW_SECONDS ?? 60 * 60),
+          ethers.parseUnits(process.env.MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW ?? '0', 18),
+          BigInt(process.env.MAX_SURCHARGE_BPS ?? 0),
+        ])
+      : undefined;
+
   // FNA-50: plain call on the AssetHandler proxy itself, NOT routed through
   // ASSET_HANDLER_PROXY_ADMIN — see the SEQUENCER_UPTIME_FEED comment above for why.
   const setSequencerUptimeFeedCalldata = assetHandler.interface.encodeFunctionData(
@@ -374,6 +438,15 @@ async function main() {
     // Owner-sent, immediately after the upgrade (see poolLogicUpgradeCalldata above).
     await (await poolLogic.initializeAutoCompounding()).wait();
     await (await poolLogic.initializeWithdrawalEscrow(withdrawalEscrowAddress)).wait();
+    if (initializeAttestedWithdrawalCalldata) {
+      await (
+        await signer.sendTransaction({
+          to: POOL_LOGIC_PROXY,
+          data: initializeAttestedWithdrawalCalldata,
+        })
+      ).wait();
+    }
+    await (await assetHandler.clearEurUsdAggregator()).wait();
     await (await assetHandler.setSequencerUptimeFeed(SEQUENCER_UPTIME_FEED)).wait();
     console.log('Done.');
     return;
@@ -390,7 +463,8 @@ async function main() {
   const eoaBatch = {
     signer: GOVERNANCE_SAFE,
     note:
-      'GOVERNANCE_SAFE is a single EOA, not a multisig — these three transactions must ' +
+      'GOVERNANCE_SAFE was recorded as a single EOA, not a multisig (re-verified at run time by the ' +
+      'preflight above) — these four transactions must ' +
       'be reviewed and signed directly by whoever holds that key, e.g. via a hardware ' +
       'wallet.',
     transactions: [
@@ -399,6 +473,15 @@ async function main() {
         to: ASSET_HANDLER_PROXY_ADMIN,
         value: '0',
         data: assetHandlerUpgradeCalldata,
+      },
+      {
+        // FNA-40: must come AFTER the AssetHandler upgrade above (the function is new).
+        description:
+          'AssetHandler: clearEurUsdAggregator() — permanently lock the valuation basis to USD ' +
+          '(FNA-40; the eurUsdModeLocked slot is false on the live proxy until this runs)',
+        to: ASSET_HANDLER_PROXY,
+        value: '0',
+        data: clearEurUsdAggregatorCalldata,
       },
       {
         description: 'PoolManagerLogic: upgrade ProxyAdmin to new implementation',
@@ -453,6 +536,9 @@ async function main() {
       { to: POOL_LOGIC_PROXY, value: '0', data: initializeAutoCompoundingCalldata },
       // FNA-03: wires the escrow; finalizeCashWithdraw() reverts EscrowNotSet() until this lands.
       { to: POOL_LOGIC_PROXY, value: '0', data: initializeWithdrawalEscrowCalldata },
+      ...(initializeAttestedWithdrawalCalldata
+        ? [{ to: POOL_LOGIC_PROXY, value: '0', data: initializeAttestedWithdrawalCalldata }]
+        : []),
       { to: TOKEN_LOGIC_PROXY, value: '0', data: tokenLogicUpgradeCalldata },
     ],
   };

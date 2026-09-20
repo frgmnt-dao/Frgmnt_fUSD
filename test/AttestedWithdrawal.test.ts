@@ -277,7 +277,9 @@ describe('PoolLogic — attested selective withdrawal', () => {
         },
       ],
       nonce: opts.nonce ?? 0n,
-      deadline: opts.deadline ?? BigInt(1_900_000_000),
+      // Six days ahead of wall-clock: the library rejects deadlines more than 7 days out
+      // (PlanDeadlineTooFar), and the hardhat clock starts at wall-clock time.
+      deadline: opts.deadline ?? BigInt(Math.floor(Date.now() / 1000)) + 6n * 86_400n,
       // Generous default (matches WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING exactly) so tests
       // that don't care about the surcharge mechanism never spuriously hit SurchargeTooHigh.
       maxAcceptableSurchargeBps: opts.maxAcceptableSurchargeBps ?? 100n,
@@ -1272,34 +1274,228 @@ describe('PoolLogic — attested selective withdrawal', () => {
 
     it('is refused while the pool has any Aave debt', async () => {
       const f = await setupAavePool();
-      const Token = await ethers.getContractFactory('MockERC20Custom');
-      const debt: any = await Token.deploy('dWETH', 'dWETH', 18);
-      const dataProvider: any = await ethers.getContractAt(
-        'MockAaveProtocolDataProvider',
-        await f.guard.aaveProtocolDataProvider(),
-      );
-      await dataProvider.setReserveTokens(
-        f.wethAddr,
-        await f.aWeth.getAddress(),
-        ethers.ZeroAddress,
-        await debt.getAddress(),
-      );
-      await f.aavePool.setReserveTokens(
-        f.wethAddr,
-        await f.aWeth.getAddress(),
-        await debt.getAddress(),
-      );
-      // With debt, valuing the position needs the guard's swap routes for the unwind.
-      const usdcAddr = await f.usdc.getAddress();
-      await f.guard.setUniV3Fee(f.wethAddr, usdcAddr, 500);
-      await f.guard.setUniV3Fee(usdcAddr, f.wethAddr, 500);
-      await debt.mint(f.poolAddr, 1n);
+      // Aave's own whole-account view reports debt (including debt the guard's supported-assets
+      // scan would not see); the subset path must refuse even though the selected reserve is clean.
+      await f.aavePool.setTotalDebtBase(1n);
       const plan = aavePlan(f, [f.wethAddr], ethers.parseUnits('0.1', 18));
       const sig = await signPlan(f, plan, f.attester);
       await expectRevert(
         f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
         'SubsetDebtUnsupported',
       );
+    });
+  });
+
+  describe('review-round coverage: bounds, metering, events, governance edges', () => {
+    async function ready() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      await fundPoolAndUser(fixture);
+      return {
+        ...fixture,
+        userAddress: await fixture.user.getAddress(),
+        assetAddress: await fixture.asset.getAddress(),
+      };
+    }
+    const fixedPlan = (f: any, over: any = {}) => {
+      const amt = over.fusdAmount ?? amount;
+      return buildPlan({
+        ...f,
+        minValueOutBps: 100n,
+        ...over,
+        allocations: [
+          {
+            asset: f.assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: over.fixedAmount ?? amt,
+          },
+        ],
+      });
+    };
+
+    it('rejects a deadline further than 7 days out (PlanDeadlineTooFar)', async () => {
+      const f = await ready();
+      const plan = fixedPlan(f, { deadline: BigInt(await time.latest()) + 8n * 86_400n });
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'PlanDeadlineTooFar',
+      );
+    });
+
+    it('reverts if fUSD supply changes while the allocations run (a mid-plan mint, e.g. a deposit from a callback)', async () => {
+      const f = await ready();
+      // The guard's planned transaction mints fUSD as the pool would see from a hook-driven deposit.
+      await f.assetGuard.setTransaction(
+        await f.fusd.getAddress(),
+        f.fusd.interface.encodeFunctionData('mint', [f.userAddress, 1n]),
+      );
+      const plan = fixedPlan(f);
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'FusdSupplyChanged',
+      );
+    });
+
+    it('rejects an ERC-1271 attester that answers with the wrong magic value', async () => {
+      const f = await ready();
+      const bad = await (await ethers.getContractFactory('MockBadERC1271Signer')).deploy();
+      await f.pool.connect(f.manager).proposeWithdrawalAttester(await bad.getAddress());
+      await time.increase(ONE_DAY + 1);
+      await f.pool.connect(f.other).activateWithdrawalAttester();
+      const plan = fixedPlan(f);
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'InvalidAttesterSignature',
+      );
+    });
+
+    it('meters the circuit breaker on the NET fUSD (after the exit fee), not the gross amount', async () => {
+      const f = await ready();
+      await f.poolManager.setFees(0n, 0n, 0n, 100n, 10_000n); // 1% exit fee
+      const net = ethers.parseUnits('99', 18);
+      const plan = fixedPlan(f, { fixedAmount: net });
+      const sig = await signPlan(f, plan, f.attester);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      const vol = await f.pool.attestedWithdrawVolume();
+      expect(vol.accumulatedValueUsd).to.equal(net);
+    });
+
+    it('decays the accumulated volume across the window (half the window leaves about half)', async () => {
+      const f = await ready();
+      const half = ethers.parseUnits('50', 18);
+      for (const [nonce, wait] of [
+        [0n, 0],
+        [1n, ONE_HOUR / 2],
+      ] as const) {
+        if (wait) await time.increase(wait);
+        const plan = fixedPlan(f, { fusdAmount: half, fixedAmount: half, nonce });
+        const sig = await signPlan(f, plan, f.attester);
+        await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      }
+      const vol = await f.pool.attestedWithdrawVolume();
+      // 50 decayed by half (~25) plus the new 50 (~75), within a few seconds of drift.
+      expect(vol.accumulatedValueUsd).to.be.closeTo(ethers.parseUnits('75', 18), 10n ** 17n);
+    });
+
+    it('the happy path emits the pro-rata event and the plan event with the exact amounts', async () => {
+      const f = await ready();
+      const plan = fixedPlan(f);
+      const sig = await signPlan(f, plan, f.attester);
+      const tx = f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      await expect(tx)
+        .to.emit(f.pool, 'CashWithdrawImmediateProRata')
+        .withArgs(f.userAddress, amount, amount, 0n, [f.assetAddress], [amount]);
+      await expect(tx)
+        .to.emit(f.pool, 'AttestedWithdrawPlanExecuted')
+        .withArgs(f.userAddress, 0n, 0n);
+    });
+
+    it('charges the surcharge on the entitlement and reports it exactly (10% pressure x 1% max = 10 bps of $100)', async () => {
+      const f = await ready();
+      await f.pool.connect(f.owner).setMaxSurchargeBps(100n);
+      // pressure = 100 of volume / 1000 of NAV = 10% -> 10 bps -> surcharge 0.1, target 99.9.
+      const target = ethers.parseUnits('99.9', 18);
+      const plan = fixedPlan(f, { fixedAmount: target, maxAcceptableSurchargeBps: 100n });
+      const sig = await signPlan(f, plan, f.attester);
+      await expect(f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []))
+        .to.emit(f.pool, 'AttestedWithdrawPlanExecuted')
+        .withArgs(f.userAddress, 0n, ethers.parseUnits('0.1', 18));
+    });
+
+    it('accepts exactly MIN_PLAN_NET_FUSD and rejects one wei less', async () => {
+      const f = await ready();
+      const min = 10n ** 16n;
+      let plan = fixedPlan(f, { fusdAmount: min - 1n, fixedAmount: min - 1n });
+      let sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'WithdrawAmountTooSmall',
+      );
+      plan = fixedPlan(f, { fusdAmount: min, fixedAmount: min, nonce: 1n });
+      sig = await signPlan(f, plan, f.attester);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+    });
+
+    it('a fixed amount above the asset balance is clamped to 100% and then fails the value bound', async () => {
+      const f = await ready();
+      const plan = fixedPlan(f, { fixedAmount: ethers.parseUnits('5000', 18) });
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+    });
+
+    async function subFixture(positionCount: number) {
+      const f = await ready();
+      const sub: any = await (
+        await ethers.getContractFactory('TestSubPositionAssetGuard')
+      ).deploy();
+      await sub.setTotalPositions(320n);
+      await f.poolManager.setAssetGuard(f.assetAddress, await sub.getAddress());
+      const ids = Array.from({ length: positionCount }, (_, i) =>
+        ethers.zeroPadValue(ethers.toBeHex(i + 1), 32),
+      );
+      const plan = buildPlan({
+        ...f,
+        allocations: [
+          {
+            asset: f.assetAddress,
+            guard: await sub.getAddress(),
+            positionIds: ids,
+            useFixedAmount: false,
+            portion: ethers.parseUnits('1', 18),
+            fixedAmount: 0n,
+          },
+        ],
+      });
+      return { f, sub, plan };
+    }
+
+    it('accepts exactly 32 position ids (32 of 320 positions at 100% = 10% of 1000 = the entitlement)', async () => {
+      const { f, plan } = await subFixture(32);
+      const sig = await signPlan(f, plan, f.attester);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      expect(await f.asset.balanceOf(f.userAddress)).to.equal(amount);
+    });
+
+    it('refuses a guard whose isSubPositionGuard() reports false', async () => {
+      const { f, sub, plan } = await subFixture(2);
+      await sub.setSubSupported(false);
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'SubsetNotSupported',
+      );
+    });
+
+    it('governance edges: a zero attester cannot be proposed, activation clears the pending slot, the initializer rejects a zero attester and stores maxSurchargeBps', async () => {
+      const f = await ready();
+      await expectRevert(
+        f.pool.connect(f.manager).proposeWithdrawalAttester(ethers.ZeroAddress),
+        'ZeroAddress',
+      );
+      await f.pool.connect(f.manager).proposeWithdrawalAttester(await f.other.getAddress());
+      await time.increase(ONE_DAY + 1);
+      await f.pool.connect(f.other).activateWithdrawalAttester();
+      expect(await f.pool.withdrawalAttester()).to.equal(await f.other.getAddress());
+      expect(await f.pool.pendingWithdrawalAttester()).to.equal(ethers.ZeroAddress);
+      await expectRevert(f.pool.connect(f.other).activateWithdrawalAttester(), 'NoRotationPending');
+
+      const u = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      await expectRevert(
+        u.pool
+          .connect(u.owner)
+          .initializeAttestedWithdrawal(ethers.ZeroAddress, ONE_DAY, ONE_HOUR, 1n, 0n),
+        'ZeroAddress',
+      );
+      await u.pool
+        .connect(u.owner)
+        .initializeAttestedWithdrawal(await u.attester.getAddress(), ONE_DAY, ONE_HOUR, 1n, 55n);
+      expect(await u.pool.maxSurchargeBps()).to.equal(55n);
     });
   });
 
@@ -1961,11 +2157,15 @@ describe('PoolLogic — attested selective withdrawal', () => {
         'AttestedWithdrawOwnerStopActive',
       );
 
-      // A colluding manager waits out a fresh rotation while disabled...
-      await pool.connect(manager).proposeWithdrawalAttester(await other.getAddress());
+      // A colluding manager cannot even START a rotation while the stop is latched, so nothing
+      // can mature during the stop and survive it...
+      await expectRevert(
+        pool.connect(manager).proposeWithdrawalAttester(await other.getAddress()),
+        'AttestedWithdrawOwnerStopActive',
+      );
       await time.increase(ONE_DAY + 1);
-      await pool.connect(other).activateWithdrawalAttester();
-      // ...but still cannot switch the feature back on.
+      await expectRevert(pool.connect(other).activateWithdrawalAttester(), 'NoRotationPending');
+      // ...and still cannot switch the feature back on.
       await expectRevert(
         pool.connect(manager).setAttestedWithdrawEnabled(true),
         'AttestedWithdrawOwnerStopActive',
@@ -2602,19 +2802,23 @@ describe('PoolLogic — live-upgrade migration sequence (transparent proxy, Prox
     );
   });
 
-  it('running the version-3 initializer before the version-2 one permanently bricks auto-compounding', async () => {
+  it('the version-3 initializer refuses to run before the version-2 one, so the order cannot brick auto-compounding', async () => {
     const { pool, owner, attester, proxyAdmin, proxyAddress, newImpl } =
       await loadFixture(deployLiveLikeProxy);
     await proxyAdmin.connect(owner).upgradeAndCall(proxyAddress, await newImpl.getAddress(), '0x');
 
-    await pool
-      .connect(owner)
-      .initializeAttestedWithdrawal(...initAttestedArgs(await attester.getAddress()));
-    // OpenZeppelin's InvalidInitialization(): Hardhat does not name it through a proxy, so match
-    // its selector.
-    await expectRevert(pool.connect(owner).initializeAutoCompounding(), '0xf92ee8a9');
-    // The index can never be set now, so stake/unstake/harvest (which require it) are dead.
+    // The version-3 initializer refuses to run first: it would consume version 3 and make the
+    // version-2 initializer revert InvalidInitialization forever (stake/unstake/harvest dead).
+    await expectRevert(
+      pool
+        .connect(owner)
+        .initializeAttestedWithdrawal(...initAttestedArgs(await attester.getAddress())),
+      'AutoCompoundingNotInitialized',
+    );
+    // Nothing was consumed: the version-2 initializer still works afterwards.
     expect(await pool.compoundedRewardIndex()).to.equal(0n);
+    await pool.connect(owner).initializeAutoCompounding();
+    expect(await pool.compoundedRewardIndex()).to.not.equal(0n);
   });
 
   it('the correct sequence works: empty-data upgrade, then initializeAutoCompounding, then initializeAttestedWithdrawal, all sent by the owner', async () => {

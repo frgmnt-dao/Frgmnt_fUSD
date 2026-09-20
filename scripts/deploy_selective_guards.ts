@@ -2,10 +2,16 @@ import fs from 'fs';
 import path from 'path';
 import { ethers } from 'hardhat';
 import {
+  assertGovernanceGuard,
+  assertMorphoCollectLib,
+  assertMorphoManagerCompatible,
   deployAaveV3SelectiveGuard,
   deployMorphoSelectiveGuard,
   deploySpokeSelectiveGuard,
   deployUniswapSelectiveGuard,
+  readAaveV3GuardConfig,
+  readMorphoGuardConfig,
+  readUniswapGuardConfig,
 } from './utils/selectiveGuards';
 
 // --------------------------------------------------
@@ -26,7 +32,8 @@ import {
 //
 // Environment:
 //   OLD_MORPHO_GUARD          address of the currently registered Morpho Blue asset guard
-//   MORPHO_COLLECT_LIB        address of the deployed MorphoCollectLib (unchanged, reused)
+//   MORPHO_COLLECT_LIB        address of a deployed MorphoCollectLib built from THIS repo's source
+//                             (checked against the current build; it changed since the `audit` build)
 //   MORPHO_ASSET_TYPE         Governance asset type registered to the Morpho guard
 //   OLD_MORPHO_FROM_BLOCK     first block to scan for the old guard's config events (default 0;
 //                             set to the guard's deployment block on a public RPC)
@@ -74,6 +81,53 @@ async function main() {
     throw new Error('Set UNISWAP_ASSET_TYPE to deploy the Uniswap V3 guard.');
   }
 
+  // Event-based key discovery starts at the *_FROM_BLOCK. A too-late block silently misses config
+  // keys (the verify loop only checks discovered keys), so require it explicitly on real networks.
+  const chainId = Number((await ethers.provider.getNetwork()).chainId);
+  const fromBlockFor = (name: string, enabled: boolean): number => {
+    if (!enabled) return 0;
+    const v = process.env[name];
+    if (v === undefined) {
+      if (chainId === 31337) return 0;
+      throw new Error(`Set ${name} to the block the old guard was deployed at (or earlier).`);
+    }
+    return Number(v);
+  };
+  const morphoFrom = fromBlockFor('OLD_MORPHO_FROM_BLOCK', Boolean(oldMorpho));
+  const aaveFrom = fromBlockFor('OLD_AAVE_V3_FROM_BLOCK', Boolean(oldAaveV3));
+  const uniFrom = fromBlockFor('OLD_UNISWAP_FROM_BLOCK', Boolean(oldUniswap));
+
+  // Read-only preflight. Governance.setAssetGuard is global per asset TYPE and every subclass
+  // installs the FULL validated guard (all post-audit changes), not only position selection.
+  if (oldMorpho) {
+    await assertGovernanceGuard(
+      governanceAddress,
+      BigInt(process.env.MORPHO_ASSET_TYPE!),
+      oldMorpho,
+    );
+    if (process.env.ALLOW_LIB_MISMATCH !== '1') {
+      await assertMorphoCollectLib(process.env.MORPHO_COLLECT_LIB!);
+    }
+    await assertMorphoManagerCompatible(oldMorpho);
+  }
+  if (oldSpoke) {
+    await assertGovernanceGuard(governanceAddress, BigInt(process.env.SPOKE_ASSET_TYPE!), oldSpoke);
+  }
+  if (oldAaveV3) {
+    await assertGovernanceGuard(
+      governanceAddress,
+      BigInt(process.env.AAVE_V3_ASSET_TYPE!),
+      oldAaveV3,
+    );
+  }
+  if (oldUniswap) {
+    await assertGovernanceGuard(
+      governanceAddress,
+      BigInt(process.env.UNISWAP_ASSET_TYPE!),
+      oldUniswap,
+    );
+  }
+
   const [signer] = await ethers.getSigners();
   console.log('Deployer:', signer.address);
   if (process.env.SEND !== '1') {
@@ -88,15 +142,13 @@ async function main() {
         .filter(Boolean)
         .join(', '),
     );
-    if (oldMorpho) {
-      const { readMorphoGuardConfig } = await import('./utils/selectiveGuards');
-      const cfg = await readMorphoGuardConfig(
-        oldMorpho,
-        Number(process.env.OLD_MORPHO_FROM_BLOCK ?? 0),
-      );
-      console.log('Morpho config that would be replayed from the old guard:');
+    const show = (label: string, cfg: unknown) => {
+      console.log(`${label} config that would be replayed from the old guard:`);
       console.log(JSON.stringify(cfg, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
-    }
+    };
+    if (oldMorpho) show('Morpho', await readMorphoGuardConfig(oldMorpho, morphoFrom));
+    if (oldAaveV3) show('Aave V3', await readAaveV3GuardConfig(oldAaveV3, aaveFrom));
+    if (oldUniswap) show('Uniswap V3', await readUniswapGuardConfig(oldUniswap, uniFrom));
     return;
   }
 
@@ -108,7 +160,7 @@ async function main() {
       signer,
       oldGuardAddress: oldMorpho,
       collectLibAddress: process.env.MORPHO_COLLECT_LIB!,
-      fromBlock: Number(process.env.OLD_MORPHO_FROM_BLOCK ?? 0),
+      fromBlock: morphoFrom,
     });
     transactions.push({
       description: `Governance.setAssetGuard(${process.env.MORPHO_ASSET_TYPE}, ${address}) — Morpho Blue selective guard`,
@@ -124,7 +176,7 @@ async function main() {
     const { address } = await deployAaveV3SelectiveGuard({
       signer,
       oldGuardAddress: oldAaveV3,
-      fromBlock: Number(process.env.OLD_AAVE_V3_FROM_BLOCK ?? 0),
+      fromBlock: aaveFrom,
     });
     transactions.push({
       description: `Governance.setAssetGuard(${process.env.AAVE_V3_ASSET_TYPE}, ${address}) — Aave V3 selective guard`,
@@ -140,7 +192,7 @@ async function main() {
     const { address } = await deployUniswapSelectiveGuard({
       signer,
       oldGuardAddress: oldUniswap,
-      fromBlock: Number(process.env.OLD_UNISWAP_FROM_BLOCK ?? 0),
+      fromBlock: uniFrom,
     });
     transactions.push({
       description: `Governance.setAssetGuard(${process.env.UNISWAP_ASSET_TYPE}, ${address}) — Uniswap V3 selective guard`,

@@ -1,6 +1,8 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import {
+  assertGovernanceGuard,
+  assertMorphoCollectLib,
   deployAaveV3SelectiveGuard,
   deployMorphoSelectiveGuard,
   deploySpokeSelectiveGuard,
@@ -199,5 +201,38 @@ describe('selective guard deployment helpers', () => {
     expect(await guard.requiresApproveReset(await old.USDT_BASE())).to.equal(false);
     expect(await guard.owner()).to.equal(timelock.address);
     expect(await guard.isSubPositionGuard()).to.equal(true);
+  });
+
+  it('preflight: the Governance asset type must currently resolve to the guard being replaced', async () => {
+    const [deployer] = await ethers.getSigners();
+    const governance: any = await (
+      await ethers.getContractFactory('Governance')
+    ).deploy(deployer.address);
+    const guardA = ethers.Wallet.createRandom().address;
+    const guardB = ethers.Wallet.createRandom().address;
+    await governance.setAssetGuard(1, guardA);
+    await assertGovernanceGuard(await governance.getAddress(), 1, guardA); // matches: no throw
+    let threw = false;
+    try {
+      await assertGovernanceGuard(await governance.getAddress(), 1, guardB);
+    } catch (e: any) {
+      threw = /not the guard being replaced/.test(String(e.message));
+    }
+    expect(threw).to.equal(true);
+  });
+
+  it("preflight: MORPHO_COLLECT_LIB must be this repo's MorphoCollectLib build", async () => {
+    const lib = await (await ethers.getContractFactory('MorphoCollectLib')).deploy();
+    await lib.waitForDeployment();
+    await assertMorphoCollectLib(await lib.getAddress()); // same build: no throw
+    const other = await (await ethers.getContractFactory('MockERC20Custom')).deploy('X', 'X', 18);
+    await other.waitForDeployment();
+    let threw = false;
+    try {
+      await assertMorphoCollectLib(await other.getAddress());
+    } catch (e: any) {
+      threw = /does not match/.test(String(e.message));
+    }
+    expect(threw).to.equal(true);
   });
 });

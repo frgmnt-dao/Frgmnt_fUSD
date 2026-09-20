@@ -76,8 +76,11 @@ contract AaveV3LendingPoolSelectiveAssetGuard is AaveV3LendingPoolAssetGuard, IS
         if (portion > ONE) revert SubsetBadPortion();
         if (to == address(0)) revert SubsetToZero();
 
-        (, uint256 debtAssets) = _collectDebtPlans(pool, ONE);
-        if (debtAssets != 0) revert SubsetDebtUnsupported();
+        // Aave's own whole-account view: covers debt in any reserve, including one that is no longer
+        // a supported asset and stable-rate debt, which the validated guard's supported-assets scan
+        // does not see. (Sub-1e-8-USD dust rounds to zero here; only the manager can create debt.)
+        (, uint256 totalDebtBase, , , , ) = IAaveV3Pool(aaveLendingPool).getUserAccountData(pool);
+        if (totalDebtBase != 0) revert SubsetDebtUnsupported();
 
         uint256 ceiling = _validateAndSizeCeiling(pool, positionIds);
         MultiTransaction[] memory all = _withdrawCollateralAndTransfer(

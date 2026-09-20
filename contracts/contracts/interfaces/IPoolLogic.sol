@@ -19,7 +19,8 @@ interface IPoolLogic {
         // execute against replacement guard code the attester never reviewed.
         address guard;
         // Optional position-level selection inside a guard that fronts several positions
-        // (Aave V4 Spoke reserveIds, Morpho Blue market ids). Empty = the whole asset, exactly as
+        // (Aave V4 Spoke reserveIds, Morpho Blue market ids, Uniswap V3 NFT tokenIds, Aave V3 reserve
+        // underlyings). Empty = the whole asset, exactly as
         // before. Non-empty = ONLY these positions, each drawn at `portion` of its own value;
         // requires the guard to implement ISubPositionGuard, strictly ascending ids, and
         // !useFixedAmount, no complex data and no reserved balance for the asset.
@@ -163,4 +164,9 @@ interface IPoolLogic {
     error PositionIdsNotAscending();
     /// @dev More positionIds than MAX_POSITION_IDS_PER_ALLOCATION.
     error TooManyPositionIds();
+    /// @dev plan.deadline is further in the future than MAX_PLAN_TTL allows.
+    error PlanDeadlineTooFar();
+    /// @dev fUSD total supply changed while the plan's allocations executed (a mid-plan mint, e.g. a
+    ///      deposit made from a token or guard callback, would be netted out of the value bound).
+    error FusdSupplyChanged();
 }

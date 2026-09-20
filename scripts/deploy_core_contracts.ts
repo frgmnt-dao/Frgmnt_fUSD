@@ -351,6 +351,22 @@ async function main() {
 
   console.log('TokenLogic linked to PoolLogic');
 
+  // FNA-03: finalizeCashWithdraw() reverts EscrowNotSet() until a WithdrawalEscrow bound to the pool
+  // is wired in. The escrow is immutable-bound to the pool PROXY, so deploy it now. Wiring it is
+  // onlyOwner and PoolLogic's owner is GOVERNANCE_SAFE (not this deployer), so that one call cannot
+  // be made here — it is printed as a REQUIRED follow-up for the owner.
+  const WithdrawalEscrowFactory = await ethers.getContractFactory('WithdrawalEscrow', signer);
+  const withdrawalEscrow = await WithdrawalEscrowFactory.deploy(poolLogicProxy, txOpts());
+  await withdrawalEscrow.waitForDeployment();
+  const withdrawalEscrowAddress = await withdrawalEscrow.getAddress();
+  nonce++;
+  console.log('WithdrawalEscrow deployed at:', withdrawalEscrowAddress);
+  console.log(
+    `REQUIRED FOLLOW-UP (owner ${GOVERNANCE_SAFE}): PoolLogic(${poolLogicProxy}).` +
+      `initializeWithdrawalEscrow(${withdrawalEscrowAddress}) — until it is called, ` +
+      'finalizeCashWithdraw() reverts EscrowNotSet().',
+  );
+
   // ============================================================
   // 🔍 IMPLEMENTATION & ADMIN ADDRESSES (EIP-1967)
   // ============================================================

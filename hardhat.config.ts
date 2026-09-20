@@ -86,6 +86,19 @@ const coverageOnlyOverrides = COVERAGE_BUILD
         version: '0.8.24',
         settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
       },
+      // Subclasses / harness of the guards above: same viaIR settings under coverage instrumentation.
+      'contracts/contracts/guards/assetGuards/UniswapV3SelectiveAssetGuard.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/mocks/TestUniswapV3SelectiveGuardHarness.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
+      'contracts/contracts/guards/assetGuards/AaveV4SpokeSelectiveAssetGuard.sol': {
+        version: '0.8.24',
+        settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },
+      },
       'contracts/contracts/mocks/TestUniswapV3AssetGuardHarness.sol': {
         version: '0.8.24',
         settings: { viaIR: true, optimizer: { enabled: true, runs: 1 } },

@@ -53,7 +53,14 @@ contract MockAaveV3Pool {
             uint256 healthFactor
         )
     {
-        return (0, 0, 0, 0, 0, _healthFactor);
+        return (0, _totalDebtBase, 0, 0, 0, _healthFactor);
+    }
+
+    uint256 private _totalDebtBase;
+
+    /// @dev Test-only: what getUserAccountData reports as the account's total debt.
+    function setTotalDebtBase(uint256 v) external {
+        _totalDebtBase = v;
     }
 
     function setHealthFactor(uint256 healthFactor) external {

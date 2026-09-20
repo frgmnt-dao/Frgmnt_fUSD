@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { ethers } from 'hardhat';
+import { assertNoPendingWithdrawals, withdrawalEscrowUnset } from './utils/upgradePreflight';
 
 // --------------------------------------------------
 // Upgrades the live PoolLogic proxy (Base mainnet, chainId 8453) to add the Attested
@@ -8,9 +9,10 @@ import { ethers } from 'hardhat';
 // full design and docs/upgradeable-contracts-notes.md's "Attested Selective Withdrawal
 // Upgrade" section for the migration checklist this script implements.
 //
-// *** REAL, ALREADY-STAKED USER FUNDS ARE LIVE IN THIS POOL. This script never sends a ***
-// *** transaction unless SEND=1 is explicitly set (fork/testnet use only) — the default ***
-// *** mode only deploys new implementations/libraries and writes review artifacts.     ***
+// *** REAL, ALREADY-STAKED USER FUNDS ARE LIVE IN THIS POOL. This script never sends an ***
+// *** OWNER-GATED transaction unless SEND=1 is explicitly set (fork/testnet use only). ***
+// *** The default mode still BROADCASTS its Phase-1 deployments (libraries, the new     ***
+// *** implementation, the escrow) from the local signer, and writes review artifacts.   ***
 //
 // POOL_LOGIC_PROXY, POOL_LOGIC_PROXY_ADMIN, and DAO_SAFE below are now independently
 // re-verified on-chain (direct eth_call reads against Base mainnet, not copied from another
@@ -66,13 +68,29 @@ import { ethers } from 'hardhat';
 //      initializeAttestedWithdrawal (reinitializer(3)) runs first, this one permanently reverts
 //      InvalidInitialization, compoundedRewardIndex stays 0, and stake/unstake/harvest are dead
 //      until another implementation upgrade. The script detects this at run time and includes it.
-//   3. PoolLogic.initializeAttestedWithdrawal(attester_, attesterRotationDelay_,
+//   3. PoolLogic.initializeWithdrawalEscrow(escrow)     — onlyOwner. ONLY IF withdrawalEscrow is
+//      still unset on the live pool (it is zero on the live `audit`-implementation proxy). The
+//      script deploys WithdrawalEscrow(proxy) and includes this call. Without it
+//      finalizeCashWithdraw() reverts EscrowNotSet() and queued withdrawals cannot be finalized.
+//   4. PoolLogic.initializeAttestedWithdrawal(attester_, attesterRotationDelay_,
 //      attestedWithdrawDecayWindow_, maxAttestedWithdrawVolumePerWindow_, maxSurchargeBps_)
 //      (onlyOwner, reinitializer(3)). Reverts RotationDelayTooShort/DecayWindowTooShort if either
 //      delay/window argument is below its floor (MIN_ATTESTER_ROTATION_DELAY = 24h,
 //      MIN_ATTESTED_WITHDRAW_DECAY_WINDOW = 1h). It deliberately leaves isAttestedWithdrawEnabled
 //      FALSE: the feature stays inert until the manager calls setAttestedWithdrawEnabled(true)
 //      after verifying the attester service.
+//
+// PRECONDITION (checked at run time, aborts otherwise): the live pool must have no Pending queued
+// withdrawal requests. pendingCashWithdrawCount (FNA-60) is zero on the live proxy for requests
+// that are already Pending, so finalizing them after the upgrade would revert and lock the
+// requesters' fUSD. Drain the queue on the current implementation first
+// (ALLOW_PENDING_WITHDRAWALS=1 overrides, at the operator's own risk).
+//
+// SCOPE: this script upgrades PoolLogic only. It does not upgrade PoolManagerLogic, AssetHandler
+// or TokenLogic and does not set the sequencer feed, the deposit cap, or lock the AssetHandler in
+// USD mode; scripts/upgrade_core_contracts.ts does those and (when ATTESTER_ADDRESS is set) also
+// includes the attested-withdrawal initializer, so when the core upgrade is being performed use
+// that script alone rather than running both.
 //
 // WITHDRAWAL ATTESTER ADDRESS: this is a real operational decision (the off-chain
 // attester backend service's signing address, or an ERC-1271 contract wrapping it) — not
@@ -197,6 +215,10 @@ async function main() {
   }
   console.log('Confirmed: both PoolLogic.owner() and the ProxyAdmin.owner() match DAO_SAFE.');
 
+  // A queued withdrawal that is still Pending at upgrade time can never be finalized afterwards
+  // (its per-asset pending counter starts at 0 on the live proxy), so refuse to proceed.
+  await assertNoPendingWithdrawals(POOL_LOGIC_PROXY);
+
   console.log('\nOperational parameters for this run:');
   console.log('  ATTESTER_ADDRESS                      :', ATTESTER_ADDRESS);
   console.log(
@@ -268,6 +290,22 @@ async function main() {
   const newPoolLogicImplAddress = await newPoolLogicImpl.getAddress();
   console.log('New implementation:', newPoolLogicImplAddress);
 
+  // WithdrawalEscrow (FNA-03): withdrawalEscrow is zero on the live proxy and finalizeCashWithdraw()
+  // reverts EscrowNotSet() until one bound to the pool is deployed and wired. Deployed here (the
+  // escrow is immutable-bound to the proxy address, stable across the upgrade) and wired in the
+  // same atomic Safe batch, after the upgrade and initializeAutoCompounding().
+  const escrowNeeded = await withdrawalEscrowUnset(POOL_LOGIC_PROXY);
+  let withdrawalEscrowAddress = ethers.ZeroAddress;
+  if (escrowNeeded) {
+    const WithdrawalEscrowFactory = await ethers.getContractFactory('WithdrawalEscrow', signer);
+    const escrow = await WithdrawalEscrowFactory.deploy(POOL_LOGIC_PROXY);
+    await escrow.waitForDeployment();
+    withdrawalEscrowAddress = await escrow.getAddress();
+    console.log('New WithdrawalEscrow (bound to the pool proxy):', withdrawalEscrowAddress);
+  } else {
+    console.log('WithdrawalEscrow already wired on the live pool — not deploying another.');
+  }
+
   // -----------------------------------------------------------------------
   // Phase 2: owner-gated calls, as one atomic Safe batch (see MANDATORY MIGRATION SEQUENCE in the
   // header). The initializers are onlyOwner and must be sent BY THE SAFE, not passed as
@@ -307,6 +345,10 @@ async function main() {
   const initializeAutoCompoundingCalldata = poolLogic.interface.encodeFunctionData(
     'initializeAutoCompounding',
   );
+  const initializeWithdrawalEscrowCalldata = poolLogic.interface.encodeFunctionData(
+    'initializeWithdrawalEscrow',
+    [withdrawalEscrowAddress],
+  );
   const initializeAttestedWithdrawalCalldata = poolLogic.interface.encodeFunctionData(
     'initializeAttestedWithdrawal',
     [
@@ -323,6 +365,9 @@ async function main() {
     ...(autoCompoundingInitialized
       ? []
       : [{ to: POOL_LOGIC_PROXY, value: '0', data: initializeAutoCompoundingCalldata }]),
+    ...(escrowNeeded
+      ? [{ to: POOL_LOGIC_PROXY, value: '0', data: initializeWithdrawalEscrowCalldata }]
+      : []),
     { to: POOL_LOGIC_PROXY, value: '0', data: initializeAttestedWithdrawalCalldata },
   ];
 
@@ -352,8 +397,9 @@ async function main() {
         `Upgrades PoolLogic to the new implementation (${newPoolLogicImplAddress}), linked ` +
         'against freshly-deployed FundCalculationLibrary, PoolTxExecutor, CallResultChecker, ' +
         'and the new WithdrawalPlanLib, as ONE atomic batch: (1) upgradeAndCall with empty data' +
-        (autoCompoundingInitialized ? '' : ', (2) initializeAutoCompounding()') +
-        `, then (${autoCompoundingInitialized ? '2' : '3'}) initializeAttestedWithdrawal(` +
+        (autoCompoundingInitialized ? '' : ', initializeAutoCompounding()') +
+        (escrowNeeded ? `, initializeWithdrawalEscrow(${withdrawalEscrowAddress})` : '') +
+        ', then initializeAttestedWithdrawal(' +
         `${ATTESTER_ADDRESS}, ${ATTESTER_ROTATION_DELAY_SECONDS}, ` +
         `${ATTESTED_WITHDRAW_DECAY_WINDOW_SECONDS}, ` +
         `${MAX_ATTESTED_WITHDRAW_VOLUME_PER_WINDOW}, ${MAX_SURCHARGE_BPS}). The feature is ` +

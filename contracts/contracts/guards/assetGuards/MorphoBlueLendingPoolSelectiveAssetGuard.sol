@@ -25,11 +25,12 @@ import { MorphoBlueLendingPoolAssetGuard } from "./MorphoBlueLendingPoolAssetGua
 ///      the liquidity ceiling over the SELECTED markets only, and (c) filtering the collector
 ///      output to the selected ids.
 ///
-///      Scope (v1): markets with an open borrow position are NOT selectable — the subset path
-///      reverts on them rather than attempting a partial flash-loan unwind. Morpho Blue markets
-///      are isolated, so withdrawing supply or collateral from a debt-free market cannot affect
-///      the health of a different market that carries debt; a debt-carrying market is simply left
-///      untouched (and stays in NAV). Unwinding leveraged markets remains the pro-rata path's job.
+///      Scope (v1): usable only while the pool has NO Morpho debt in any tracked market. Any open
+///      borrow reverts SubsetDebtUnsupported rather than attempting a partial flash-loan unwind.
+///      Markets are isolated, so the health of a debt-free market is never at risk from another
+///      market's debt, but the validated NAV deducts a modelled unwind cost across every leg when
+///      any market has debt, which a debt-free in-kind exit does not really incur (see the gate in
+///      withdrawProcessingSubset). Unwinding leveraged markets remains the whole-asset path's job.
 ///
 ///      Liquidity ceiling: the base guard clamps EVERY leg by the minimum liquidity ratio across
 ///      ALL tracked markets, so one near-fully-utilised market throttles the entire guard. Here
@@ -82,6 +83,15 @@ contract MorphoBlueLendingPoolSelectiveAssetGuard is
     ) external view override returns (address, uint256, IAssetGuard.MultiTransaction[] memory txs) {
         if (portion > MorphoMathLib.PORTION_DENOMINATOR) revert BadPortion();
         if (to == address(0)) revert ToZero();
+
+        // Whole-guard gate, not just the selected markets: while ANY tracked market carries debt
+        // the validated NAV (_netRealizableBalance) deducts a modelled swap-and-flash-loan unwind
+        // cost across every leg of every market. A debt-free selected market leaves in kind at no
+        // such cost, so NAV would drop by less than the value that really leaves (about the
+        // modelled cost rate, 0.75% at default settings). Requiring the whole guard debt-free
+        // removes that gap; leveraged positions use the whole-asset path.
+        (, bool hasDebt) = _collectDebts(pool, MorphoMathLib.PORTION_DENOMINATOR);
+        if (hasDebt) revert SubsetDebtUnsupported();
 
         uint256 ceiling = _validateAndSizeCeiling(pool, positionIds);
         uint256 effectivePortion = (portion * ceiling) / MorphoMathLib.PORTION_DENOMINATOR;

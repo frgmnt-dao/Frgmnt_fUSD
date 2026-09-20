@@ -1,4 +1,4 @@
-import { ethers } from 'hardhat';
+import { artifacts, ethers } from 'hardhat';
 
 // ---------------------------------------------------------------------------
 // Helpers for deploying the two position-selection guards as drop-in replacements
@@ -415,4 +415,79 @@ export async function deployAaveV3SelectiveGuard(opts: {
   }
   log('Configuration replayed and verified; ownership handed to', config.owner);
   return { address, config };
+}
+
+// ---------------------------------------------------------------------------
+// Preflight checks. Every helper here is read-only and throws with an explicit message.
+// ---------------------------------------------------------------------------
+
+/// Governance.assetGuards(type) is global per asset TYPE: setAssetGuard(type, newGuard) replaces
+/// the guard of every asset of that type in every pool. Refuse to prepare a swap unless the type
+/// currently resolves to the guard being replaced, so a mistyped type cannot swap an unrelated one.
+export async function assertGovernanceGuard(
+  governanceAddress: string,
+  assetType: number | bigint,
+  oldGuardAddress: string,
+): Promise<void> {
+  const governance = await ethers.getContractAt('Governance', governanceAddress);
+  const current: string = await governance.assetGuards(assetType);
+  if (current.toLowerCase() !== oldGuardAddress.toLowerCase()) {
+    throw new Error(
+      `Governance.assetGuards(${assetType}) is ${current}, not the guard being replaced ` +
+        `(${oldGuardAddress}). setAssetGuard is global per asset type: check the asset type.`,
+    );
+  }
+}
+
+/// Bytecode with the trailing CBOR metadata removed and, for an external library, the
+/// self-address that its constructor embeds after the leading PUSH20 zeroed, so two builds of the
+/// same source compare equal.
+function normalizeCode(code: string): string {
+  let c = code.toLowerCase();
+  if (c.length > 6) {
+    const metaLen = parseInt(c.slice(-4), 16);
+    if (Number.isFinite(metaLen) && metaLen * 2 + 4 < c.length)
+      c = c.slice(0, c.length - 4 - metaLen * 2);
+  }
+  if (c.startsWith('0x73')) c = '0x73' + '0'.repeat(40) + c.slice(44);
+  return c;
+}
+
+/// MorphoCollectLib runs by DELEGATECALL in the guard's context, so a wrong address would execute
+/// arbitrary code as the guard. Require the deployed code at `libAddress` to equal this repo's
+/// current MorphoCollectLib build. (The library changed between the `audit` and validated builds;
+/// a mismatch means it must be redeployed from the current source.)
+export async function assertMorphoCollectLib(libAddress: string): Promise<void> {
+  const deployed = await ethers.provider.getCode(libAddress);
+  if (deployed === '0x') throw new Error(`MORPHO_COLLECT_LIB ${libAddress} has no code.`);
+  const expected = (await artifacts.readArtifact('MorphoCollectLib')).deployedBytecode;
+  if (normalizeCode(deployed) !== normalizeCode(expected)) {
+    throw new Error(
+      `MORPHO_COLLECT_LIB ${libAddress} does not match this repo's MorphoCollectLib build. ` +
+        'Deploy it from the current source (ALLOW_LIB_MISMATCH=1 overrides, at your own risk).',
+    );
+  }
+}
+
+/// The validated Morpho guard (and this subclass) call morphoManager.getTrackedPoolMarkets, which
+/// the older `audit`-era MorphoBlueManager does not have. Probe it on the manager the old guard
+/// points at; if it reverts, the guard swap would break NAV for any pool holding Morpho until the
+/// manager is upgraded too.
+export async function assertMorphoManagerCompatible(oldGuardAddress: string): Promise<void> {
+  const old = await ethers.getContractAt('MorphoBlueLendingPoolAssetGuard', oldGuardAddress);
+  const managerAddress: string = await old.morphoManager();
+  const manager = new ethers.Contract(
+    managerAddress,
+    ['function getTrackedPoolMarkets(address) view returns (bytes32[])'],
+    ethers.provider,
+  );
+  try {
+    await manager.getTrackedPoolMarkets(ethers.ZeroAddress);
+  } catch {
+    throw new Error(
+      `MorphoBlueManager ${managerAddress} has no getTrackedPoolMarkets(): the validated guard ` +
+        'code this swap installs requires the upgraded manager. Deploy/upgrade the Morpho stack ' +
+        '(manager, contract guard, library) first; a guard swap ships every post-audit guard change.',
+    );
+  }
 }

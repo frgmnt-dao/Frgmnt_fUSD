@@ -12,13 +12,18 @@ import { TestAssetGuard } from "./TestAssetGuard.sol";
 ///         value conservation) without any lending-protocol mock.
 contract TestSubPositionAssetGuard is TestAssetGuard {
     uint256 public totalPositions = 4;
+    bool public subSupported = true;
+
+    function setSubSupported(bool v) external {
+        subSupported = v;
+    }
 
     function setTotalPositions(uint256 n) external {
         totalPositions = n;
     }
 
-    function isSubPositionGuard() external pure returns (bool) {
-        return true;
+    function isSubPositionGuard() external view returns (bool) {
+        return subSupported;
     }
 
     function withdrawProcessingSubset(

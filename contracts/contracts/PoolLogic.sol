@@ -201,8 +201,8 @@ contract PoolLogic is
         uint128 accumulatedValueUsd;
     }
 
-    /// @notice Active withdrawal-attester signer, verified via SignatureChecker (EOA or
-    ///         ERC-1271) against every WithdrawalPlan. Only ever changed via the asymmetric
+    /// @notice Active withdrawal-attester signer, verified (EOA via ECDSA, or ERC-1271 contract
+    ///         via a manual staticcall in WithdrawalPlanLib) against every WithdrawalPlan. Only ever changed via the asymmetric
     ///         propose/activate rotation below.
     address public withdrawalAttester;
 
@@ -487,6 +487,10 @@ contract PoolLogic is
         uint256 maxSurchargeBps_
     ) external onlyOwner reinitializer(3) {
         if (withdrawalAttester != address(0)) revert AttestedWithdrawalAlreadyInitialized();
+        // Order guard: on the live proxy compoundedRewardIndex is 0 until initializeAutoCompounding()
+        // (reinitializer(2)) has run. Running this reinitializer(3) first would consume version 3
+        // and make that one revert InvalidInitialization forever, killing stake/unstake/harvest.
+        if (compoundedRewardIndex == 0) revert AutoCompoundingNotInitialized();
         if (attester_ == address(0)) revert ZeroAddress();
         if (attesterRotationDelay_ < MIN_ATTESTER_ROTATION_DELAY) revert RotationDelayTooShort();
         if (attestedWithdrawDecayWindow_ < MIN_ATTESTED_WITHDRAW_DECAY_WINDOW) {
@@ -1096,6 +1100,9 @@ contract PoolLogic is
         if (msg.sender != _manager()) revert OnlyManager();
         if (candidate == address(0)) revert ZeroAddress();
         if (attesterRotationDelay == 0) revert AttestedWithdrawalNotInitialized();
+        // While the factoryOwner's stop is latched no rotation may be started: a proposal made
+        // during the stop would survive it and could be activated right after the stop is lifted.
+        if (attestedWithdrawOwnerStopped) revert AttestedWithdrawOwnerStopActive();
         pendingWithdrawalAttester = candidate;
         pendingAttesterActivationTime = block.timestamp + attesterRotationDelay;
         emit WithdrawalAttesterProposed(candidate, pendingAttesterActivationTime);

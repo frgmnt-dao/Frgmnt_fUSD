@@ -20,6 +20,11 @@ import {
 ///         re-tested here.
 contract TestUniswapV3SelectiveGuardHarness is UniswapV3SelectiveAssetGuard {
     bool public injectUnexpected;
+    bool public injectWrongTarget;
+
+    function setInjectWrongTarget(bool v) external {
+        injectWrongTarget = v;
+    }
 
     function setInjectUnexpected(bool v) external {
         injectUnexpected = v;
@@ -39,7 +44,7 @@ contract TestUniswapV3SelectiveGuardHarness is UniswapV3SelectiveAssetGuard {
         transactions = new MultiTransaction[](ids.length * 2 + (injectUnexpected ? 1 : 0));
         uint256 n;
         for (uint256 i; i < ids.length; ++i) {
-            transactions[n].to = asset;
+            transactions[n].to = injectWrongTarget ? address(0xdEaD) : asset;
             transactions[n++].txData = abi.encodeWithSelector(
                 INonfungiblePositionManager.decreaseLiquidity.selector,
                 INonfungiblePositionManager.DecreaseLiquidityParams(
