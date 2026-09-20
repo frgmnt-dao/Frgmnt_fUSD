@@ -88,6 +88,10 @@ interface IPoolLogic {
 
     function maxSurchargeBps() external view returns (uint256);
 
+    /// @dev Pending queued cash-withdraw requests per deposit asset (FNA-60); read by the plan path
+    ///      so a plan cannot draw an asset that queued requests are waiting on.
+    function pendingCashWithdrawCount(address asset) external view returns (uint256);
+
     /// @notice FNA-34: cumulative net yield ever routed into the staking reward index
     ///         (_accrueYield()'s appliedNetYield), regardless of whether any staker has
     ///         harvested it yet. Together with totalRewardHarvested below, the difference is
@@ -164,6 +168,8 @@ interface IPoolLogic {
     error PositionIdsNotAscending();
     /// @dev More positionIds than MAX_POSITION_IDS_PER_ALLOCATION.
     error TooManyPositionIds();
+    /// @dev The plan draws an asset that has Pending queued cash-withdraw requests.
+    error AssetHasPendingWithdrawRequests();
     /// @dev plan.deadline is further in the future than MAX_PLAN_TTL allows.
     error PlanDeadlineTooFar();
     /// @dev fUSD total supply changed while the plan's allocations executed (a mid-plan mint, e.g. a

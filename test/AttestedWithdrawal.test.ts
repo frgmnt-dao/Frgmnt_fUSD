@@ -1499,6 +1499,100 @@ describe('PoolLogic — attested selective withdrawal', () => {
     });
   });
 
+  describe('receipt-side checks and queued-request protection', () => {
+    async function ready() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      await fundPoolAndUser(fixture);
+      return {
+        ...fixture,
+        userAddress: await fixture.user.getAddress(),
+        assetAddress: await fixture.asset.getAddress(),
+      };
+    }
+
+    it('a last claimant cannot draw more real assets than the NAV entitlement when the pool carries a deficit', async () => {
+      const f = await ready();
+      // Pool: 1000 of the asset, a 600 deficit reported by its guard -> NAV 400, and the user holds
+      // ALL 400 fUSD of claims. Drawing 100% of the asset (1000) used to pass, because the floored
+      // NAV drop is only 400; the delivered-value check now rejects it.
+      const deficitGuard: any = await (
+        await ethers.getContractFactory('TestDeficitAssetGuard')
+      ).deploy();
+      await deficitGuard.setDeficit(ethers.parseUnits('600', 18));
+      await f.poolManager.setAssetGuard(f.assetAddress, await deficitGuard.getAddress());
+      await f.fusd.mint(f.userAddress, ethers.parseUnits('300', 18));
+      await f.fusd.connect(f.user).approve(await f.pool.getAddress(), ethers.MaxUint256);
+
+      const plan = buildPlan({
+        ...f,
+        fusdAmount: ethers.parseUnits('400', 18),
+        allocations: [
+          {
+            asset: f.assetAddress,
+            guard: await deficitGuard.getAddress(),
+            positionIds: [],
+            useFixedAmount: false,
+            portion: ethers.parseUnits('1', 18),
+            fixedAmount: 0n,
+          },
+        ],
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it("the user cannot be paid less than the entitlement when value is destroyed inside the guard's own transactions", async () => {
+      const f = await ready();
+      // The guard delivers 90% and its planned transaction sends another 10 of the asset to a dead
+      // address: NAV drops by exactly the entitlement (both NAV bounds pass) but the user receives 90.
+      await f.assetGuard.setWithdrawMode(false, false, 9_000);
+      await f.assetGuard.setTransaction(
+        f.assetAddress,
+        f.asset.interface.encodeFunctionData('transfer', [
+          '0x000000000000000000000000000000000000dEaD',
+          ethers.parseUnits('10', 18),
+        ]),
+      );
+      const plan = buildPlan({
+        ...f,
+        minValueOutBps: 100n,
+        allocations: [
+          { asset: f.assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: amount },
+        ],
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it('a plan cannot draw an asset that has Pending queued cash-withdraw requests', async () => {
+      const f = await ready();
+      await f.pool.connect(f.manager).setImmediateWithdrawEnabled(false); // queue mode
+      await f.pool.connect(f.user).requestCashWithdraw(ethers.parseUnits('50', 18), f.assetAddress);
+      expect(await f.pool.pendingCashWithdrawCount(f.assetAddress)).to.equal(1n);
+
+      const half = ethers.parseUnits('50', 18);
+      const plan = buildPlan({
+        ...f,
+        fusdAmount: half,
+        minValueOutBps: 100n,
+        allocations: [
+          { asset: f.assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: half },
+        ],
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'AssetHasPendingWithdrawRequests',
+      );
+    });
+  });
+
   it('an absurdly large decay window cannot overflow the accumulator and disable plan withdrawals', async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, manager, asset, user, attester } = fixture;

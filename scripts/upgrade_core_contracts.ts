@@ -120,6 +120,10 @@ import { assertNoPendingWithdrawals } from './utils/upgradePreflight';
 // here, WithdrawalPlanLib is new and deployed here (linked to the new FundCalculationLibrary);
 // CallResultChecker is unchanged (confirmed via diff) and reused.
 //
+// CUSTODY UPDATE: the notes below were confirmed on-chain on 2026-08-07, when GOVERNANCE_SAFE had no
+// contract code (a single EOA). The team has since confirmed that the deployed contracts are
+// controlled by the multisig; main() reads every owner on-chain at run time and reports whether
+// it is a contract, so treat the paragraph below as history, not as the current state.
 // CUSTODY (confirmed on-chain 2026-08-07 via direct eth_call against each contract —
 // re-verify before running, do not assume; an earlier draft of this comment incorrectly
 // assumed TokenLogic's admin role followed GOVERNANCE_SAFE, corrected here):
@@ -201,28 +205,47 @@ async function main() {
   // (a) A queued withdrawal still Pending at upgrade time can never be finalized afterwards
   //     (pendingCashWithdrawCount starts at 0 for it) — see scripts/utils/upgradePreflight.ts.
   await assertNoPendingWithdrawals(POOL_LOGIC_PROXY);
-  // (b) Custody. The constants above record who held each role when last checked; this script
-  //     and scripts/upgrade_attested_withdrawal.ts disagree about whether GOVERNANCE_SAFE is an EOA
-  //     or a Safe, so verify at run time instead of trusting either comment.
+  // (b) Custody. Older notes in this repo recorded GOVERNANCE_SAFE as a single EOA; the team has
+  //     since confirmed the deployed contracts are controlled by the multisig (the DAO Safe).
+  //     Neither the constants nor the comments are trusted: read the owners on-chain, require
+  //     each to be one of the two recorded addresses, and REPORT whether it is a contract. When
+  //     the AssetHandler and PoolManagerLogic roles sit under the DAO Safe, their transactions
+  //     are folded into the same Safe batch below instead of a separate single-key list.
   const ownableAbi = ['function owner() view returns (address)'];
-  const custody: [string, string, string][] = [
-    ['AssetHandler ProxyAdmin owner', ASSET_HANDLER_PROXY_ADMIN, GOVERNANCE_SAFE],
-    ['PoolManagerLogic ProxyAdmin owner', POOL_MANAGER_LOGIC_PROXY_ADMIN, GOVERNANCE_SAFE],
-    ['PoolLogic ProxyAdmin owner', POOL_LOGIC_PROXY_ADMIN, DAO_SAFE],
-    ['PoolLogic owner', POOL_LOGIC_PROXY, DAO_SAFE],
+  const isContract = async (a: string) => (await ethers.provider.getCode(a)) !== '0x';
+  const recorded = [GOVERNANCE_SAFE, DAO_SAFE].map((a) => a.toLowerCase());
+  const custody: [string, string, string[]][] = [
+    ['AssetHandler ProxyAdmin owner', ASSET_HANDLER_PROXY_ADMIN, recorded],
+    ['AssetHandler owner', ASSET_HANDLER_PROXY, recorded],
+    ['PoolManagerLogic ProxyAdmin owner', POOL_MANAGER_LOGIC_PROXY_ADMIN, recorded],
+    ['PoolLogic ProxyAdmin owner', POOL_LOGIC_PROXY_ADMIN, [DAO_SAFE.toLowerCase()]],
+    ['PoolLogic owner', POOL_LOGIC_PROXY, [DAO_SAFE.toLowerCase()]],
   ];
-  for (const [label, target, expected] of custody) {
+  const owners: Record<string, string> = {};
+  for (const [label, target, accepted] of custody) {
     const actual: string = await new ethers.Contract(target, ownableAbi, signer).owner();
-    const ok = actual.toLowerCase() === expected.toLowerCase();
-    console.log(`  ${label}: ${actual} ${ok ? '(as expected)' : `(EXPECTED ${expected})`}`);
+    owners[label] = actual.toLowerCase();
+    const ok = accepted.includes(actual.toLowerCase());
+    const kind = (await isContract(actual)) ? 'contract (multisig)' : 'EOA (single key)';
+    console.log(`  ${label}: ${actual} — ${kind} ${ok ? '' : '(UNEXPECTED)'}`);
     if (!ok && process.env.ALLOW_CUSTODY_MISMATCH !== '1') {
       throw new Error(
-        `${label} is ${actual}, not the expected ${expected}. Custody has changed since these ` +
-          'constants were recorded; update them (and which Safe signs which batch) before ' +
-          'proceeding. ALLOW_CUSTODY_MISMATCH=1 overrides this check.',
+        `${label} is ${actual}, not one of the recorded custody addresses ` +
+          `(${accepted.join(', ')}). Custody has changed since these constants were recorded; ` +
+          'update them before proceeding. ALLOW_CUSTODY_MISMATCH=1 overrides this check.',
       );
     }
   }
+  const governanceUnderDaoSafe = [
+    'AssetHandler ProxyAdmin owner',
+    'AssetHandler owner',
+    'PoolManagerLogic ProxyAdmin owner',
+  ].every((k) => owners[k] === DAO_SAFE.toLowerCase());
+  console.log(
+    governanceUnderDaoSafe
+      ? '  -> AssetHandler and PoolManagerLogic roles are held by the DAO Safe: ONE Safe batch.'
+      : '  -> AssetHandler / PoolManagerLogic roles are NOT all held by the DAO Safe: they stay in a separate list for their holder.',
+  );
 
   // -----------------------------------------------------------------------
   // Phase 1a: libraries.
@@ -456,55 +479,52 @@ async function main() {
   const dir = path.join(process.cwd(), 'deployments');
   fs.mkdirSync(dir, { recursive: true });
 
-  // GOVERNANCE_SAFE is an EOA — a Safe Transaction Builder JSON is not the right
-  // artifact for it. Write a plain, human-reviewable transaction list instead. Only
-  // AssetHandler and PoolManagerLogic belong here — TokenLogic's DEFAULT_ADMIN_ROLE is
-  // held by the DAO Safe, not GOVERNANCE_SAFE (confirmed on-chain, see CUSTODY above).
+  // AssetHandler and PoolManagerLogic transactions. If their roles are held by the DAO Safe they
+  // are folded into the DAO Safe batch below; otherwise they are written as a separate list for
+  // whoever holds those roles (TokenLogic's DEFAULT_ADMIN_ROLE and PoolLogic are the DAO Safe's).
+  const governanceTxs = [
+    {
+      description: 'AssetHandler: upgrade ProxyAdmin to new implementation',
+      to: ASSET_HANDLER_PROXY_ADMIN,
+      value: '0',
+      data: assetHandlerUpgradeCalldata,
+    },
+    {
+      // FNA-40: must come AFTER the AssetHandler upgrade above (the function is new).
+      description:
+        'AssetHandler: clearEurUsdAggregator() — permanently lock the valuation basis to USD ' +
+        '(FNA-40; the eurUsdModeLocked slot is false on the live proxy until this runs)',
+      to: ASSET_HANDLER_PROXY,
+      value: '0',
+      data: clearEurUsdAggregatorCalldata,
+    },
+    {
+      description: 'PoolManagerLogic: upgrade ProxyAdmin to new implementation',
+      to: POOL_MANAGER_LOGIC_PROXY_ADMIN,
+      value: '0',
+      data: poolManagerLogicUpgradeCalldata,
+    },
+    {
+      // FNA-50: a plain call directly on the AssetHandler PROXY (not its ProxyAdmin), by the
+      // AssetHandler's own Ownable owner. Order relative to the upgrade doesn't matter:
+      // setSequencerUptimeFeed() already exists on the currently-live implementation.
+      description:
+        'AssetHandler: set L2 sequencer uptime feed (FNA-50 — currently unset, disabling ' +
+        'the sequencer-down grace period entirely)',
+      to: ASSET_HANDLER_PROXY,
+      value: '0',
+      data: setSequencerUptimeFeedCalldata,
+    },
+  ];
   const eoaBatch = {
-    signer: GOVERNANCE_SAFE,
+    signer: 'the holder of the AssetHandler / PoolManagerLogic roles (see the preflight output)',
     note:
-      'GOVERNANCE_SAFE was recorded as a single EOA, not a multisig (re-verified at run time by the ' +
-      'preflight above) — these four transactions must ' +
-      'be reviewed and signed directly by whoever holds that key, e.g. via a hardware ' +
-      'wallet.',
-    transactions: [
-      {
-        description: 'AssetHandler: upgrade ProxyAdmin to new implementation',
-        to: ASSET_HANDLER_PROXY_ADMIN,
-        value: '0',
-        data: assetHandlerUpgradeCalldata,
-      },
-      {
-        // FNA-40: must come AFTER the AssetHandler upgrade above (the function is new).
-        description:
-          'AssetHandler: clearEurUsdAggregator() — permanently lock the valuation basis to USD ' +
-          '(FNA-40; the eurUsdModeLocked slot is false on the live proxy until this runs)',
-        to: ASSET_HANDLER_PROXY,
-        value: '0',
-        data: clearEurUsdAggregatorCalldata,
-      },
-      {
-        description: 'PoolManagerLogic: upgrade ProxyAdmin to new implementation',
-        to: POOL_MANAGER_LOGIC_PROXY_ADMIN,
-        value: '0',
-        data: poolManagerLogicUpgradeCalldata,
-      },
-      {
-        // FNA-50: a plain call directly on the AssetHandler PROXY (not its ProxyAdmin) —
-        // GOVERNANCE_SAFE is AssetHandler's own Ownable owner, confirmed on-chain. Order
-        // relative to the AssetHandler upgrade above doesn't matter: setSequencerUptimeFeed()
-        // already exists on the currently-live implementation.
-        description:
-          'AssetHandler: set L2 sequencer uptime feed (FNA-50 — currently unset, disabling ' +
-          'the sequencer-down grace period entirely)',
-        to: ASSET_HANDLER_PROXY,
-        value: '0',
-        data: setSequencerUptimeFeedCalldata,
-      },
-    ],
+      'Only written when those roles are NOT all held by the DAO Safe. Review and sign ' +
+      'these transactions with whoever holds them (a hardware wallet if it is a single key).',
+    transactions: governanceTxs,
   };
-  const eoaFile = path.join(dir, `core-upgrade-governance-safe-eoa-${chainId}.json`);
-  fs.writeFileSync(eoaFile, JSON.stringify(eoaBatch, null, 2));
+  const eoaFile = path.join(dir, `core-upgrade-governance-roles-${chainId}.json`);
+  if (!governanceUnderDaoSafe) fs.writeFileSync(eoaFile, JSON.stringify(eoaBatch, null, 2));
 
   // PoolLogic's ProxyAdmin/onlyOwner AND TokenLogic's DEFAULT_ADMIN_ROLE are both held
   // by the same genuine 3-of-4 Gnosis Safe — one Safe Transaction Builder batch covers
@@ -531,6 +551,11 @@ async function main() {
       txBuilderVersion: '1.16.5',
     },
     transactions: [
+      // When the DAO Safe also holds the AssetHandler / PoolManagerLogic roles their upgrade,
+      // the FNA-40 lock and the sequencer feed are part of this same atomic batch.
+      ...(governanceUnderDaoSafe
+        ? governanceTxs.map(({ to, value, data }) => ({ to, value, data }))
+        : []),
       { to: POOL_LOGIC_PROXY_ADMIN, value: '0', data: poolLogicUpgradeCalldata },
       // Sent by the Safe (PoolLogic's owner), in the same MultiSend batch as the upgrade above.
       { to: POOL_LOGIC_PROXY, value: '0', data: initializeAutoCompoundingCalldata },
@@ -545,11 +570,17 @@ async function main() {
   const safeFile = path.join(dir, `core-upgrade-dao-safe-${chainId}.json`);
   fs.writeFileSync(safeFile, JSON.stringify(safeBatch, null, 2));
 
-  console.log('\nNo transactions sent (default, safest mode). Wrote two review artifacts:');
-  console.log('  GOVERNANCE_SAFE (EOA) transaction list          :', eoaFile);
-  console.log('  DAO Safe (3-of-4 multisig) batch (PoolLogic + TokenLogic):', safeFile);
+  console.log(
+    '\nNo owner-gated transactions sent (default, safest mode). Wrote review artifact(s):',
+  );
+  if (!governanceUnderDaoSafe) {
+    console.log('  AssetHandler / PoolManagerLogic role holder list :', eoaFile);
+  }
+  console.log('  DAO Safe batch:', safeFile);
   console.log('\nImport the DAO Safe batch at https://app.safe.global under', DAO_SAFE);
-  console.log("The GOVERNANCE_SAFE list must be signed and sent directly by that key's holder.");
+  if (!governanceUnderDaoSafe) {
+    console.log('The separate role-holder list must be signed by whoever holds those roles.');
+  }
   console.log('Both TokenLogic and PoolLogic transactions bundle their mandatory migration');
   console.log('call atomically — see the script header for why, and for the PoolLogic reward');
   console.log("migration's verification status before executing against real staked funds.");

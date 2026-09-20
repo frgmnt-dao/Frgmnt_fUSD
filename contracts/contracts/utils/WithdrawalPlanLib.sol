@@ -349,7 +349,7 @@ library WithdrawalPlanLib {
         address to,
         uint256 portion,
         bytes32[] calldata positionIds
-    ) private returns (address withdrawAsset, uint256 withdrawAmount) {
+    ) private returns (address withdrawAsset, uint256 withdrawAmount, bool externalProcessed) {
         if (positionIds.length > MAX_POSITION_IDS_PER_ALLOCATION) {
             revert IPoolLogic.TooManyPositionIds();
         }
@@ -364,7 +364,11 @@ library WithdrawalPlanLib {
         IAssetGuard.MultiTransaction[] memory transactions;
         (withdrawAsset, withdrawAmount, transactions) = ISubPositionGuard(guard)
             .withdrawProcessingSubset(address(this), asset, portion, to, positionIds);
-        (withdrawAmount, ) = _runTransactions(transactions, withdrawAsset, withdrawAmount);
+        (withdrawAmount, externalProcessed) = _runTransactions(
+            transactions,
+            withdrawAsset,
+            withdrawAmount
+        );
     }
 
     /// @notice Verifies + executes an attester-signed WithdrawalPlan end-to-end: signature,
@@ -495,7 +499,8 @@ library WithdrawalPlanLib {
         result.surchargeAmount = (fairFusd * surchargeBpsX18) / (1e18 * 10_000);
         uint256 target = fairFusd - result.surchargeAmount;
 
-        (result.outAssets, result.outAmounts) = _processAllocations(
+        bool hasDirectLeg;
+        (result.outAssets, result.outAmounts, hasDirectLeg) = _processAllocations(
             input.poolManagerLogic,
             plan.user,
             plan,
@@ -523,6 +528,28 @@ library WithdrawalPlanLib {
         }
         uint256 minAllowed = target - (target * plan.minValueOutBps) / 10_000;
         if (result.valueDelta < minAllowed) revert IPoolLogic.ValueConservationViolated();
+
+        // RECEIPT-SIDE CHECK. The two bounds above measure value leaving the NAV. That is not the
+        // same as what the user received: (a) completeFundValue floors at zero, so when the pool
+        // carries a deficit the last claimant can draw more real assets than the floored drop
+        // records; (b) value destroyed inside a guard's own transactions (swap slippage, flash-loan
+        // premium on a leveraged unwind) leaves the NAV but never reaches the user. So also value
+        // what was actually delivered as a token (legs that report a withdrawAsset): it may not
+        // exceed the entitlement, and, when no leg is delivered directly by the guard's own
+        // transactions (whose value cannot be measured here), it may not fall short of it either.
+        {
+            uint256 delivered;
+            for (uint256 i = 0; i < result.outAssets.length; ++i) {
+                delivered += IPoolManagerLogic(input.poolManagerLogic).assetValue(
+                    result.outAssets[i],
+                    result.outAmounts[i]
+                );
+            }
+            if (delivered > target + DUST_TOLERANCE) revert IPoolLogic.ValueConservationViolated();
+            if (!hasDirectLeg && delivered + DUST_TOLERANCE < minAllowed) {
+                revert IPoolLogic.ValueConservationViolated();
+            }
+        }
 
         // See this event's own docs above for why it's emitted here rather than by PoolLogic.
         // Audit note: reuses CashWithdrawImmediateProRata's (asset[],amount[]) shape purely to
@@ -717,7 +744,7 @@ library WithdrawalPlanLib {
         address to,
         IPoolLogic.WithdrawalPlan calldata plan,
         IPoolLogic.ComplexAsset[] calldata complexAssetsData
-    ) private returns (address[] memory outAssets, uint256[] memory outAmounts) {
+    ) private returns (address[] memory outAssets, uint256[] memory outAmounts, bool hasDirectLeg) {
         uint256 n = plan.allocations.length;
         outAssets = new address[](n);
         outAmounts = new uint256[](n);
@@ -739,9 +766,16 @@ library WithdrawalPlanLib {
             if (guard == address(0)) revert IPoolLogic.InvalidGuard();
             if (guard != alloc.guard) revert IPoolLogic.GuardMismatch();
 
+            // A plan must not draw an asset that queued requests are waiting on: plans are the
+            // only immediate exit in queue mode, and nothing else earmarks liquidity for them.
+            if (IPoolLogic(address(this)).pendingCashWithdrawCount(asset) != 0) {
+                revert IPoolLogic.AssetHasPendingWithdrawRequests();
+            }
+
             uint256 portion;
             address withdrawAsset;
             uint256 withdrawAmount;
+            bool external_;
             if (alloc.positionIds.length > 0) {
                 // Position-level selection: only the listed positions, at a direct portion.
                 if (
@@ -751,7 +785,7 @@ library WithdrawalPlanLib {
                 ) revert IPoolLogic.InvalidSubsetAllocation();
                 portion = alloc.portion;
                 if (portion > 1e18) revert IPoolLogic.InvalidPortion();
-                (withdrawAsset, withdrawAmount) = _withdrawSubset(
+                (withdrawAsset, withdrawAmount, external_) = _withdrawSubset(
                     guard,
                     asset,
                     to,
@@ -774,7 +808,7 @@ library WithdrawalPlanLib {
                     if (portion > 1e18) revert IPoolLogic.InvalidPortion();
                 }
 
-                (withdrawAsset, withdrawAmount, ) = withdrawProcessing(
+                (withdrawAsset, withdrawAmount, external_) = withdrawProcessing(
                     poolManagerLogic,
                     asset,
                     to,
@@ -783,6 +817,10 @@ library WithdrawalPlanLib {
                     _matchComplexAsset(complexAssetsData, asset)
                 );
             }
+
+            // Value the guard delivered directly through its own transactions (no withdrawAsset)
+            // is not measurable here; remember that one exists.
+            if (withdrawAsset == address(0) && external_) hasDirectLeg = true;
 
             if (withdrawAsset != address(0) && withdrawAmount > 0) {
                 IERC20(withdrawAsset).safeTransfer(to, withdrawAmount);
