@@ -33,17 +33,18 @@ import { ethers } from 'hardhat';
 //   (see MANDATORY MIGRATION SEQUENCE below) rather than assuming it has run.
 //
 // STORAGE-LAYOUT VERIFICATION (empirically diffed with compiler storageLayout output, and by a
-// dynamic upgrade of an `audit`-implementation proxy — slots 0-44 byte-identical before/after):
+// upgrade rehearsal of a proxy running the real `audit` implementation, test/UpgradeFromAudit.test.ts —
+// slots 0-22 byte-identical before/after):
 //   - Slots 0-16 are identical in the live (`audit`) implementation, feature/06-aave-v4 and this
 //     branch.
 //   - feature/06-aave-v4 appended slots 17-22 (compoundedRewardIndex, autoCompoundStartRewardPerShare,
 //     rewardIndexInitialized, withdrawalEscrow, finalizedUnclaimedFusd, pendingCashWithdrawCount).
-//   - This branch appends 10 more strictly after pendingCashWithdrawCount, slots 23-32:
+//   - This branch appends 11 more strictly after pendingCashWithdrawCount, slots 23-33:
 //     withdrawalAttester, pendingWithdrawalAttester, pendingAttesterActivationTime,
 //     attesterRotationDelay, consumedPlanNonce, isAttestedWithdrawEnabled, attestedWithdrawVolume
 //     (uint64 + uint128 packed in one slot), attestedWithdrawDecayWindow,
-//     maxAttestedWithdrawVolumePerWindow, maxSurchargeBps. Live -> this branch is therefore 16
-//     appended variables in total. PoolLogic has no __gap — append-only ordering is what upgrade
+//     maxAttestedWithdrawVolumePerWindow, maxSurchargeBps, attestedWithdrawOwnerStopped. Live ->
+//     this branch is therefore 17 appended variables in total. PoolLogic has no __gap — append-only ordering is what upgrade
 //     safety relies on, same as every prior PoolLogic migration (see
 //     docs/upgradeable-contracts-notes.md).
 //   - _withdrawProcessing/_checkCallResult and the pro-rata orchestration
