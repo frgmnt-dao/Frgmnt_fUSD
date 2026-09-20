@@ -1593,6 +1593,238 @@ describe('PoolLogic — attested selective withdrawal', () => {
     });
   });
 
+  describe('plan path: guard-transaction and guard-resolution failure surfaces', () => {
+    async function ready() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      await fundPoolAndUser(fixture);
+      const assetAddress = await fixture.asset.getAddress();
+      const plan = buildPlan({
+        ...fixture,
+        userAddress: await fixture.user.getAddress(),
+        assetAddress,
+      });
+      const sig = await signPlan(fixture, plan, fixture.attester);
+      return { ...fixture, assetAddress, plan, sig };
+    }
+
+    it('a guard transaction that fails reverts the whole plan (TxFailed)', async () => {
+      const f = await ready();
+      await f.assetGuard.setTransaction(
+        f.assetAddress,
+        f.asset.interface.encodeFunctionData('transfer', [
+          await f.user.getAddress(),
+          ethers.parseUnits('999999', 18),
+        ]),
+      );
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(f.plan, f.sig, []),
+        'TxFailed',
+      );
+    });
+
+    it('a guard transaction with malformed calldata reverts the plan (InvalidCallData)', async () => {
+      const f = await ready();
+      const target = await (await ethers.getContractFactory('TestTarget')).deploy();
+      await f.assetGuard.setTransaction(await target.getAddress(), '0x12');
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(f.plan, f.sig, []),
+        'InvalidCallData',
+      );
+    });
+
+    it('value that flows INTO the pool during the loop is rejected (InvalidFundValue)', async () => {
+      const f = await ready();
+      // A second supported asset. The guard's planned transaction mints a large amount of IT into
+      // the pool while the plan withdraws the first asset, so the NAV after is above the NAV before
+      // (minted value in the withdrawal asset itself would be measured as delivered instead).
+      const Token = await ethers.getContractFactory('TestTokenLogic');
+      const other = await Token.deploy('Other', 'OTH', 18);
+      await other.waitForDeployment();
+      const plain = await (await ethers.getContractFactory('TestAssetGuard')).deploy();
+      await f.poolManager.setAssetGuard(await other.getAddress(), await plain.getAddress());
+      await f.poolManager.setSupportedAsset(
+        await other.getAddress(),
+        true,
+        ethers.parseUnits('1', 18),
+        18,
+      );
+      await f.assetGuard.setTransaction(
+        await other.getAddress(),
+        other.interface.encodeFunctionData('mint', [
+          await f.pool.getAddress(),
+          ethers.parseUnits('5000', 18),
+        ]),
+      );
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(f.plan, f.sig, []),
+        'InvalidFundValue',
+      );
+    });
+
+    it('minted value in the WITHDRAWAL asset itself counts as delivered and is rejected by the receipt-side check', async () => {
+      const f = await ready();
+      await f.assetGuard.setTransaction(
+        f.assetAddress,
+        f.asset.interface.encodeFunctionData('mint', [
+          await f.pool.getAddress(),
+          ethers.parseUnits('5000', 18),
+        ]),
+      );
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(f.plan, f.sig, []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it("an asset whose type resolves to no guard fails closed (the validated valuation rejects it before the plan's own InvalidGuard check)", async () => {
+      const f = await ready();
+      await f.poolManager.setAssetGuard(f.assetAddress, ethers.ZeroAddress);
+      let msg = '';
+      try {
+        await f.pool.connect(f.user).withdrawCashImmediateWithPlan(f.plan, f.sig, []);
+      } catch (e: any) {
+        msg = String(e.message);
+      }
+      // Never a success. (Which error names it depends on whether the validated NAV valuation or the
+      // plan's own guard-binding check sees the missing guard first.)
+      expect(msg).to.not.equal('');
+    });
+  });
+
+  describe('mutation-driven coverage: surcharge base and cap, value boundaries, reserved balances', () => {
+    const E18 = (v: string) => ethers.parseUnits(v, 18);
+    async function ready() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      await fundPoolAndUser(fixture);
+      return {
+        ...fixture,
+        userAddress: await fixture.user.getAddress(),
+        assetAddress: await fixture.asset.getAddress(),
+      };
+    }
+    // Claims 2000 vs NAV 1000: an underwater pool (fair = net / 2). The user holds `userFusd`.
+    async function underwater(f: any, userFusd: bigint) {
+      await f.fusd.mint(f.userAddress, userFusd - amount);
+      await f.fusd.connect(f.user).approve(await f.pool.getAddress(), ethers.MaxUint256);
+      await f.fusd.mint(await f.other.getAddress(), E18('2000') - userFusd);
+      await f.pool.connect(f.owner).setMaxSurchargeBps(100n);
+    }
+    const fixedPlan = (f: any, fusdAmount: bigint, fixedAmount: bigint, over: any = {}) =>
+      buildPlan({
+        ...f,
+        fusdAmount,
+        minValueOutBps: 100n,
+        ...over,
+        allocations: [{ asset: f.assetAddress, useFixedAmount: true, portion: 0n, fixedAmount }],
+      });
+
+    it('the surcharge is charged on the haircut-adjusted entitlement (fairFusd), not the nominal amount', async () => {
+      const f = await ready();
+      await underwater(f, amount); // user burns 100 of 2000 claims against 1000 NAV -> fair = 50
+      // pressure = 100 / 1000 = 10% -> 10 bps -> surcharge = 50 x 0.10% = 0.05 (0.10 if charged on 100).
+      const plan = fixedPlan(f, amount, E18('49.95'));
+      const sig = await signPlan(f, plan, f.attester);
+      await expect(f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []))
+        .to.emit(f.pool, 'AttestedWithdrawPlanExecuted')
+        .withArgs(f.userAddress, 0n, E18('0.05'));
+    });
+
+    it('pressure is capped at 100% of the pool: the rate never exceeds the governed maximum', async () => {
+      const f = await ready();
+      await underwater(f, E18('1500')); // 1500 of 2000 claims against 1000 NAV -> fair = 750
+      // Raw pressure = 1500 / 1000 = 150%, capped at 100% -> 1% rate -> surcharge 7.5 (11.25 uncapped).
+      const plan = fixedPlan(f, E18('1500'), E18('742.5'));
+      const sig = await signPlan(f, plan, f.attester);
+      await expect(f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []))
+        .to.emit(f.pool, 'AttestedWithdrawPlanExecuted')
+        .withArgs(f.userAddress, 0n, E18('7.5'));
+    });
+
+    // A guard that pays the user DIRECTLY through its own transaction (no withdrawAsset), so only
+    // the NAV bound (not the receipt-side check) sees the amount.
+    async function directPlan(f: any, fusdAmount: bigint, directAmount: bigint, over: any = {}) {
+      await f.assetGuard.setWithdrawMode(true, false, 10_000);
+      await f.assetGuard.setTransaction(
+        f.assetAddress,
+        f.asset.interface.encodeFunctionData('transfer', [f.userAddress, directAmount]),
+      );
+      const plan = fixedPlan(f, fusdAmount, fusdAmount, over);
+      return { plan, sig: await signPlan(f, plan, f.attester) };
+    }
+
+    it('the upper bound tolerates dust but not more: +5e14 passes, +1e16 reverts (direct-leg over-delivery)', async () => {
+      const f = await ready();
+      let { plan, sig } = await directPlan(f, amount, amount + 10n ** 16n);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+      ({ plan, sig } = await directPlan(f, amount, amount + 5n * 10n ** 14n));
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+    });
+
+    it('the lower bound rounds DOWN: one wei below the floor-rounded minimum reverts, the minimum itself passes', async () => {
+      const f = await ready();
+      const net = amount + 3n; // target = net; floor(net x 1 / 10000) = 1e16 exactly
+      await f.fusd.mint(f.userAddress, 3n);
+      await f.fusd.connect(f.user).approve(await f.pool.getAddress(), ethers.MaxUint256);
+      const minAllowed = net - 10n ** 16n;
+      let { plan, sig } = await directPlan(f, net, minAllowed - 1n, { minValueOutBps: 1n });
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+      ({ plan, sig } = await directPlan(f, net, minAllowed, { minValueOutBps: 1n }));
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+    });
+
+    // Legacy `reservedAssetBalance` can only be non-zero on a pool that finalized a request before
+    // the escrow was wired; a fixture cannot reach it through the public API, so write the mapping
+    // slot directly (found by probing, so the test does not hard-code the layout).
+    async function setReserved(f: any, value: bigint) {
+      const poolAddr = await f.pool.getAddress();
+      for (let slot = 0; slot < 80; slot++) {
+        const key = ethers.keccak256(
+          ethers.AbiCoder.defaultAbiCoder().encode(['address', 'uint256'], [f.assetAddress, slot]),
+        );
+        await ethers.provider.send('hardhat_setStorageAt', [
+          poolAddr,
+          key,
+          ethers.toBeHex(value, 32),
+        ]);
+        if ((await f.pool.reservedAssetBalance(f.assetAddress)) === value) return;
+      }
+      throw new Error('reservedAssetBalance slot not found');
+    }
+
+    it('a position-level allocation is refused while the asset has a reserved balance', async () => {
+      const f = await ready();
+      const sub: any = await (
+        await ethers.getContractFactory('TestSubPositionAssetGuard')
+      ).deploy();
+      await f.poolManager.setAssetGuard(f.assetAddress, await sub.getAddress());
+      await setReserved(f, 1n);
+      const plan = buildPlan({
+        ...f,
+        allocations: [
+          {
+            asset: f.assetAddress,
+            guard: await sub.getAddress(),
+            positionIds: [ethers.zeroPadValue('0x01', 32)],
+            useFixedAmount: false,
+            portion: E18('0.1'),
+            fixedAmount: 0n,
+          },
+        ],
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'InvalidSubsetAllocation',
+      );
+    });
+  });
+
   it('an absurdly large decay window cannot overflow the accumulator and disable plan withdrawals', async () => {
     const fixture = await loadFixture(deployAttestedWithdrawalFixture);
     const { pool, manager, asset, user, attester } = fixture;
