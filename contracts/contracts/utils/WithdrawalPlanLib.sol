@@ -740,6 +740,20 @@ library WithdrawalPlanLib {
             revert IPoolLogic.InvalidFundValue();
     }
 
+    /// @dev Running state of the allocation loop, kept in one memory struct so the per-allocation
+    ///      work can live in small functions: a single function holding every local of the loop
+    ///      (plan, complex data, output arrays, counters, the draw result) is deeper than the stack
+    ///      allows under the coverage instrumentation, which is what kept `npm run coverage` from
+    ///      compiling. Behaviour is identical to the previous single loop.
+    struct AllocationRun {
+        address poolManagerLogic;
+        address to;
+        address[] outAssets;
+        uint256[] outAmounts;
+        uint256 count;
+        bool hasDirectLeg;
+    }
+
     function _processAllocations(
         address poolManagerLogic,
         address to,
@@ -747,93 +761,140 @@ library WithdrawalPlanLib {
         IPoolLogic.ComplexAsset[] calldata complexAssetsData
     ) private returns (address[] memory outAssets, uint256[] memory outAmounts, bool hasDirectLeg) {
         uint256 n = plan.allocations.length;
-        outAssets = new address[](n);
-        outAmounts = new uint256[](n);
-        uint256 count;
+        AllocationRun memory run = AllocationRun({
+            poolManagerLogic: poolManagerLogic,
+            to: to,
+            outAssets: new address[](n),
+            outAmounts: new uint256[](n),
+            count: 0,
+            hasDirectLeg: false
+        });
 
         for (uint256 i = 0; i < n; ++i) {
-            IPoolLogic.AssetAllocation calldata alloc = plan.allocations[i];
-            address asset = alloc.asset;
-
-            if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset)) {
-                revert IPoolLogic.AssetNotSupported();
-            }
-            for (uint256 j = 0; j < i; ++j) {
-                if (plan.allocations[j].asset == asset) revert IPoolLogic.DuplicateAllocation();
-            }
-
-            // Guard binding (always): the attester signed the guard it validated for this asset.
-            address guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
-            if (guard == address(0)) revert IPoolLogic.InvalidGuard();
-            if (guard != alloc.guard) revert IPoolLogic.GuardMismatch();
-
-            // A plan must not draw an asset that queued requests are waiting on: plans are the
-            // only immediate exit in queue mode, and nothing else earmarks liquidity for them.
-            if (IPoolLogic(address(this)).pendingCashWithdrawCount(asset) != 0) {
-                revert IPoolLogic.AssetHasPendingWithdrawRequests();
-            }
-
-            uint256 portion;
-            address withdrawAsset;
-            uint256 withdrawAmount;
-            bool external_;
-            if (alloc.positionIds.length > 0) {
-                // Position-level selection: only the listed positions, at a direct portion.
-                if (
-                    alloc.useFixedAmount ||
-                    IPoolLogic(address(this)).reservedAssetBalance(asset) > 0 ||
-                    _matchComplexAsset(complexAssetsData, asset).supportedAsset != address(0)
-                ) revert IPoolLogic.InvalidSubsetAllocation();
-                portion = alloc.portion;
-                if (portion > 1e18) revert IPoolLogic.InvalidPortion();
-                (withdrawAsset, withdrawAmount, external_) = _withdrawSubset(
-                    guard,
-                    asset,
-                    to,
-                    portion,
-                    alloc.positionIds
-                );
-            } else {
-                if (alloc.useFixedAmount) {
-                    uint256 balance = IAssetGuard(guard).getBalance(address(this), asset);
-                    if (balance == 0) revert IPoolLogic.ZeroAssetBalance();
-                    portion = (alloc.fixedAmount * 1e18) / balance;
-                    if (portion > 1e18) portion = 1e18;
-                } else {
-                    // Audit finding: a direct attester-supplied portion had no on-chain upper
-                    // bound (unlike the fixed-amount branch, explicitly clamped, and the pro-rata
-                    // path, structurally <= 1e18). A portion above 1e18 is guard-implementation-
-                    // dependent, and the value-conservation check after the loop is not a
-                    // substitute for bounding the input itself. Reject outright instead.
-                    portion = alloc.portion;
-                    if (portion > 1e18) revert IPoolLogic.InvalidPortion();
-                }
-
-                (withdrawAsset, withdrawAmount, external_) = withdrawProcessing(
-                    poolManagerLogic,
-                    asset,
-                    to,
-                    portion,
-                    IPoolLogic(address(this)).reservedAssetBalance(asset),
-                    _matchComplexAsset(complexAssetsData, asset)
-                );
-            }
-
-            // Value the guard delivered directly through its own transactions (no withdrawAsset)
-            // is not measurable here; remember that one exists.
-            if (withdrawAsset == address(0) && external_) hasDirectLeg = true;
-
-            if (withdrawAsset != address(0) && withdrawAmount > 0) {
-                IERC20(withdrawAsset).safeTransfer(to, withdrawAmount);
-                outAssets[count] = withdrawAsset;
-                outAmounts[count] = withdrawAmount;
-                ++count;
-            }
+            _processAllocation(run, plan, i, complexAssetsData);
         }
 
+        outAssets = run.outAssets;
+        outAmounts = run.outAmounts;
+        hasDirectLeg = run.hasDirectLeg;
+        uint256 count = run.count;
         assembly {
             mstore(outAssets, count)
             mstore(outAmounts, count)
+        }
+    }
+
+    /// @dev One allocation: validate it, draw it, transfer what the guard reported to the user and
+    ///      record it. Order of checks and effects is exactly the previous loop body's.
+    function _processAllocation(
+        AllocationRun memory run,
+        IPoolLogic.WithdrawalPlan calldata plan,
+        uint256 i,
+        IPoolLogic.ComplexAsset[] calldata complexAssetsData
+    ) private {
+        IPoolLogic.AssetAllocation calldata alloc = plan.allocations[i];
+        address guard = _validateAllocation(run.poolManagerLogic, plan, i);
+
+        (address withdrawAsset, uint256 withdrawAmount, bool external_) = _drawAllocation(
+            run.poolManagerLogic,
+            run.to,
+            alloc,
+            guard,
+            complexAssetsData
+        );
+
+        // Value the guard delivered directly through its own transactions (no withdrawAsset)
+        // is not measurable here; remember that one exists.
+        if (withdrawAsset == address(0) && external_) run.hasDirectLeg = true;
+
+        if (withdrawAsset != address(0) && withdrawAmount > 0) {
+            IERC20(withdrawAsset).safeTransfer(run.to, withdrawAmount);
+            run.outAssets[run.count] = withdrawAsset;
+            run.outAmounts[run.count] = withdrawAmount;
+            ++run.count;
+        }
+    }
+
+    /// @dev Support, duplicate, guard-binding and pending-request checks for allocation `i`;
+    ///      returns the guard that is bound to the asset.
+    function _validateAllocation(
+        address poolManagerLogic,
+        IPoolLogic.WithdrawalPlan calldata plan,
+        uint256 i
+    ) private view returns (address guard) {
+        IPoolLogic.AssetAllocation calldata alloc = plan.allocations[i];
+        address asset = alloc.asset;
+
+        if (!IHasSupportedAsset(poolManagerLogic).isSupportedAsset(asset)) {
+            revert IPoolLogic.AssetNotSupported();
+        }
+        for (uint256 j = 0; j < i; ++j) {
+            if (plan.allocations[j].asset == asset) revert IPoolLogic.DuplicateAllocation();
+        }
+
+        // Guard binding (always): the attester signed the guard it validated for this asset.
+        guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
+        if (guard == address(0)) revert IPoolLogic.InvalidGuard();
+        if (guard != alloc.guard) revert IPoolLogic.GuardMismatch();
+
+        // A plan must not draw an asset that queued requests are waiting on: plans are the
+        // only immediate exit in queue mode, and nothing else earmarks liquidity for them.
+        if (IPoolLogic(address(this)).pendingCashWithdrawCount(asset) != 0) {
+            revert IPoolLogic.AssetHasPendingWithdrawRequests();
+        }
+    }
+
+    /// @dev Draws one allocation: position-level through the guard's subset entry point, or
+    ///      whole-asset through withdrawProcessing at the fixed-amount-derived or direct portion.
+    function _drawAllocation(
+        address poolManagerLogic,
+        address to,
+        IPoolLogic.AssetAllocation calldata alloc,
+        address guard,
+        IPoolLogic.ComplexAsset[] calldata complexAssetsData
+    ) private returns (address withdrawAsset, uint256 withdrawAmount, bool external_) {
+        address asset = alloc.asset;
+        uint256 portion;
+        if (alloc.positionIds.length > 0) {
+            // Position-level selection: only the listed positions, at a direct portion.
+            if (
+                alloc.useFixedAmount ||
+                IPoolLogic(address(this)).reservedAssetBalance(asset) > 0 ||
+                _matchComplexAsset(complexAssetsData, asset).supportedAsset != address(0)
+            ) revert IPoolLogic.InvalidSubsetAllocation();
+            portion = alloc.portion;
+            if (portion > 1e18) revert IPoolLogic.InvalidPortion();
+            (withdrawAsset, withdrawAmount, external_) = _withdrawSubset(
+                guard,
+                asset,
+                to,
+                portion,
+                alloc.positionIds
+            );
+        } else {
+            if (alloc.useFixedAmount) {
+                uint256 balance = IAssetGuard(guard).getBalance(address(this), asset);
+                if (balance == 0) revert IPoolLogic.ZeroAssetBalance();
+                portion = (alloc.fixedAmount * 1e18) / balance;
+                if (portion > 1e18) portion = 1e18;
+            } else {
+                // Audit finding: a direct attester-supplied portion had no on-chain upper
+                // bound (unlike the fixed-amount branch, explicitly clamped, and the pro-rata
+                // path, structurally <= 1e18). A portion above 1e18 is guard-implementation-
+                // dependent, and the value-conservation check after the loop is not a
+                // substitute for bounding the input itself. Reject outright instead.
+                portion = alloc.portion;
+                if (portion > 1e18) revert IPoolLogic.InvalidPortion();
+            }
+
+            (withdrawAsset, withdrawAmount, external_) = withdrawProcessing(
+                poolManagerLogic,
+                asset,
+                to,
+                portion,
+                IPoolLogic(address(this)).reservedAssetBalance(asset),
+                _matchComplexAsset(complexAssetsData, asset)
+            );
         }
     }
 

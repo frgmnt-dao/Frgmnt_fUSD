@@ -18,16 +18,17 @@ const COVERAGE_JSON = path.join(REPO_ROOT, 'coverage.json');
 const SUMMARY_JSON = path.join(REPO_ROOT, 'coverage', 'coverage-summary.json');
 const ISTANBUL_BIN = path.join(REPO_ROOT, 'node_modules', '.bin', 'istanbul');
 
-// Measured baseline on 2026-09-12 (full suite): 97.45 / 87.48 / 98.41 / 98.11.
-// Set a few points under that so routine work has margin before this gate
-// turns red — branches gets the widest buffer since new code tends to add
-// untested edge-case branches before it adds untested whole functions.
+// Measured on 2026-09-21 (full suite, including the attested withdrawal feature): 97.89 / 89.11 /
+// 98.57 / 98.49. The previous measurement, 2026-09-12 (before the feature), was 97.45 / 87.48 /
+// 98.41 / 98.11. Set a few points under the latest figures so routine work has margin before this
+// gate turns red — branches gets the widest buffer since new code tends to add untested edge-case
+// branches before it adds untested whole functions.
 // Raise these as real coverage grows; this should only ever go up.
 const THRESHOLDS = {
-  statements: 95,
-  branches: 82,
-  functions: 95,
-  lines: 95,
+  statements: 96,
+  branches: 86,
+  functions: 97,
+  lines: 97,
 };
 
 interface Metric {

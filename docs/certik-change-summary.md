@@ -36,7 +36,7 @@ What these show on this branch:
 - **Storage.** `PoolLogic` has 23 variables at the baseline; all 23 are unchanged in label, slot, offset and type. Eleven variables were appended in slots 23 to 33, none inserted. (Only the USD product is live, so this matters for the proxy upgrade.)
 - **ABI.** `PoolLogic` goes from 129 to 187 ABI entries: none removed or changed, 58 added (27 errors, 8 events, 23 functions).
 - **Size.** `PoolLogic` is 24,426 bytes against the 24,576 limit (150 bytes of headroom; 129 at the baseline). The baseline had no room for the feature, which is why code was moved out of it.
-- **Tests.** 1,290 pass, 1 opt-in upgrade rehearsal is skipped unless its inputs are supplied. Instrumented coverage of the new library was 99.4% of statements and 92.1% of branches (measured on a scratch build); the uncovered code is defensive and listed in the design doc.
+- **Tests.** 1,293 pass, 1 opt-in upgrade rehearsal is skipped unless its inputs are supplied. Repository coverage (`npm run coverage`, 0 failures) is 97.9% of statements and 89.1% of branches overall; the new library is at 100% of statements and 95.4% of branches. The uncovered code is defensive and listed in the design doc.
 
 ## 3. Where to look, in order
 

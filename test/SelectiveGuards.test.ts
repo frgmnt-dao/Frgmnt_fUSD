@@ -445,6 +445,69 @@ describe('MorphoBlueLendingPoolSelectiveAssetGuard', () => {
     expect(supplies[0]).to.be.gt(0n);
   });
 
+  it('the minimum ceiling wins whether the tighter market is processed first or last', async () => {
+    for (const tightLltv of [1n, 2n]) {
+      const f = await deploy();
+      const looseLltv = tightLltv === 1n ? 2n : 1n;
+      // Each position is worth 250_000 of supply (500_000 shares against the market's virtual
+      // shares). Tight market: 100_000 liquid, a 40% ceiling. Looser market: 200_000 liquid, an 80%
+      // ceiling. Both legs are drawn at the tighter 40%: 200_000 of the 500_000 shares each.
+      const tight = await addMarket(f, tightLltv, 900_000n);
+      const loose = await addMarket(f, looseLltv, 800_000n);
+      const [, , sub] = await f.guard.withdrawProcessingSubset(
+        f.poolAddr,
+        ethers.ZeroAddress,
+        ONE,
+        f.other.address,
+        [tight.id, loose.id].sort(),
+      );
+      const shares = sub
+        .filter((t: any) => t.txData.startsWith(morphoIface.getFunction('withdraw')!.selector))
+        .map((t: any) => morphoIface.decodeFunctionData('withdraw', t.txData)[2] as bigint);
+      expect(shares).to.deep.equal([200_000n, 200_000n]);
+    }
+  });
+
+  it('a market that is fully borrowed (or over-borrowed) has no liquidity: nothing is drawn from it', async () => {
+    const f = await deploy();
+    const a = await addMarket(f, 1n, 1_200_000n); // more borrowed than supplied
+    const [, , sub] = await f.guard.withdrawProcessingSubset(
+      f.poolAddr,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+      [a.id],
+    );
+    const supplies = sub
+      .filter((t: any) => t.txData.startsWith(morphoIface.getFunction('withdraw')!.selector))
+      .map((t: any) => morphoIface.decodeFunctionData('withdraw', t.txData)[2] as bigint);
+    for (const amount of supplies) expect(amount).to.equal(0n);
+  });
+
+  it('a position whose shares are worth no assets is skipped without reverting', async () => {
+    const f = await deploy();
+    const morpho: any = f.morpho;
+    const mp = [f.usdcAddr, f.wethAddr, ethers.ZeroAddress, ethers.ZeroAddress, 1n];
+    const id = await morpho.marketId(mp);
+    // 1 unit of assets spread over a million shares: 500_000 shares round down to zero assets.
+    await morpho.setMarket(mp, [1n, 1_000_000n, 0n, 0n, 0n, 0n]);
+    await f.morphoManager.setPoolMarkets(f.poolAddr, [id]);
+    await morpho.setPosition(id, f.poolAddr, 500_000n, 0n, 0n);
+    const [, , sub] = await f.guard.withdrawProcessingSubset(
+      f.poolAddr,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+      [id],
+    );
+    const supplies = sub
+      .filter((t: any) => t.txData.startsWith(morphoIface.getFunction('withdraw')!.selector))
+      .map((t: any) => morphoIface.decodeFunctionData('withdraw', t.txData)[2] as bigint);
+    // The leg withdraws all 500_000 shares (a zero-value position does not throttle the plan); they
+    // are worth no assets, so nothing of value is drawn and the call does not revert.
+    expect(supplies).to.deep.equal([500_000n]);
+  });
+
   it('a delisted-but-still-tracked market remains selectable', async () => {
     const f = await deploy();
     const a = await addMarket(f, 1n, 0n);

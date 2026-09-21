@@ -113,8 +113,16 @@ const coverageOnlyOverrides = COVERAGE_BUILD
 const config: HardhatUserConfig = {
   defaultNetwork: 'hardhat',
 
+  // Instrumented contracts run many times slower: one PoolManagerLogic test takes about 70 seconds
+  // here and has taken over ten minutes on a loaded machine. Coverage runs therefore get a long
+  // per-test timeout; ordinary runs keep Hardhat's 40 second default.
+  mocha: { timeout: COVERAGE_BUILD ? 1_800_000 : 40_000 },
+
   networks: {
-    hardhat: {},
+    // Hardhat's default hardfork (Osaka) caps a transaction at 2**24 gas (EIP-7825). Coverage
+    // instrumentation makes contracts large enough that deploying them needs more than that, so
+    // coverage runs use the previous fork; ordinary test runs are unaffected.
+    hardhat: COVERAGE_BUILD ? { hardfork: 'prague' } : {},
 
     localhost: {
       url: 'http://127.0.0.1:8545',
