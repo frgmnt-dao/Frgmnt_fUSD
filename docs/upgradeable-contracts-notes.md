@@ -289,7 +289,7 @@ Latest local verification for this feature (this branch):
 ```text
 npx hardhat compile: passed
 npx hardhat test test/AttestedWithdrawal.test.ts test/SelectiveGuards.test.ts test/SelectiveGuardDeploy.test.ts: 157 passing
-npm run test: 1239 passing (1 opt-in test pending)
+npm run test: 1240 passing (1 opt-in test pending)
 npm run check:contract-size: PoolLogic at 150 bytes of EIP-170 headroom
 ```
 

@@ -480,9 +480,10 @@ library WithdrawalPlanLib {
         // impose. See the design doc's "Surcharge" section. Computed
         // and checked here, before the allocations loop, so a plan that exceeds the attester's
         // signed tolerance fails cheaply instead of after paying for a full withdrawal.
-        uint256 pressure = Math.min(
-            (uint256(newVolume.accumulatedValueUsd) * 1e18) / completeBefore,
-            1e18
+        uint256 pressure = _averagePressure(
+            uint256(newVolume.accumulatedValueUsd) - result.netFusd,
+            uint256(newVolume.accumulatedValueUsd),
+            completeBefore
         );
         uint256 effectiveMaxSurchargeBps = input.maxSurchargeBps > MAX_SURCHARGE_BPS_CEILING
             ? MAX_SURCHARGE_BPS_CEILING
@@ -937,6 +938,28 @@ library WithdrawalPlanLib {
         );
 
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    /// @dev Average surcharge pressure over THIS withdrawal, i.e. the pressure integrated between
+    ///      the recent volume before it (`volumeBefore`, already decayed) and after it
+    ///      (`volumeAfter`, which includes it). The reference size is the fund as it stood before
+    ///      the recent withdrawals, `completeBefore + volumeBefore`, NOT the current (already
+    ///      shrunk) fund. With that constant base the charge is the area under a linear price
+    ///      curve, so splitting one withdrawal into several plans costs the same in total (up to
+    ///      decay, deposits and rounding); measuring against the shrinking current fund, or
+    ///      charging every unit at the end-of-withdrawal pressure, made the total depend on how the
+    ///      withdrawal was cut. Each side is capped at 100% so the rate never exceeds the governed
+    ///      maximum. `completeBefore` is nonzero (the caller reverts on a zero fair entitlement),
+    ///      so the base is nonzero.
+    function _averagePressure(
+        uint256 volumeBefore,
+        uint256 volumeAfter,
+        uint256 completeBefore
+    ) private pure returns (uint256) {
+        uint256 base = completeBefore + volumeBefore;
+        uint256 pressureBefore = Math.min((volumeBefore * 1e18) / base, 1e18);
+        uint256 pressureAfter = Math.min((volumeAfter * 1e18) / base, 1e18);
+        return (pressureBefore + pressureAfter) / 2;
     }
 
     /// @dev Continuously-decaying volume accumulator — identical math to

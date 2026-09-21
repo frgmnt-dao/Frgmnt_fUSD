@@ -1393,16 +1393,17 @@ describe('PoolLogic — attested selective withdrawal', () => {
         .withArgs(f.userAddress, 0n, 0n);
     });
 
-    it('charges the surcharge on the entitlement and reports it exactly (10% pressure x 1% max = 10 bps of $100)', async () => {
+    it('charges the surcharge on the entitlement and reports it exactly (average pressure 5% x 1% max = 5 bps of $100)', async () => {
       const f = await ready();
       await f.pool.connect(f.owner).setMaxSurchargeBps(100n);
-      // pressure = 100 of volume / 1000 of NAV = 10% -> 10 bps -> surcharge 0.1, target 99.9.
-      const target = ethers.parseUnits('99.9', 18);
+      // Pressure runs from 0 to 100/1000 = 10% across this withdrawal, average 5% -> 5 bps ->
+      // surcharge 0.05, target 99.95.
+      const target = ethers.parseUnits('99.95', 18);
       const plan = fixedPlan(f, { fixedAmount: target, maxAcceptableSurchargeBps: 100n });
       const sig = await signPlan(f, plan, f.attester);
       await expect(f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []))
         .to.emit(f.pool, 'AttestedWithdrawPlanExecuted')
-        .withArgs(f.userAddress, 0n, ethers.parseUnits('0.1', 18));
+        .withArgs(f.userAddress, 0n, ethers.parseUnits('0.05', 18));
     });
 
     it('accepts exactly MIN_PLAN_NET_FUSD and rejects one wei less', async () => {
@@ -1721,23 +1722,25 @@ describe('PoolLogic — attested selective withdrawal', () => {
     it('the surcharge is charged on the haircut-adjusted entitlement (fairFusd), not the nominal amount', async () => {
       const f = await ready();
       await underwater(f, amount); // user burns 100 of 2000 claims against 1000 NAV -> fair = 50
-      // pressure = 100 / 1000 = 10% -> 10 bps -> surcharge = 50 x 0.10% = 0.05 (0.10 if charged on 100).
-      const plan = fixedPlan(f, amount, E18('49.95'));
+      // pressure runs 0 -> 100 / 1000 = 10%, average 5% -> 5 bps -> surcharge = 50 x 0.05% = 0.025
+      // (0.05 if charged on 100).
+      const plan = fixedPlan(f, amount, E18('49.975'));
       const sig = await signPlan(f, plan, f.attester);
       await expect(f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []))
         .to.emit(f.pool, 'AttestedWithdrawPlanExecuted')
-        .withArgs(f.userAddress, 0n, E18('0.05'));
+        .withArgs(f.userAddress, 0n, E18('0.025'));
     });
 
     it('pressure is capped at 100% of the pool: the rate never exceeds the governed maximum', async () => {
       const f = await ready();
       await underwater(f, E18('1500')); // 1500 of 2000 claims against 1000 NAV -> fair = 750
-      // Raw pressure = 1500 / 1000 = 150%, capped at 100% -> 1% rate -> surcharge 7.5 (11.25 uncapped).
-      const plan = fixedPlan(f, E18('1500'), E18('742.5'));
+      // Pressure runs 0 -> 1500 / 1000 = 150%, the end capped at 100%, so the average is 50% ->
+      // 50 bps -> surcharge 3.75 (5.625 if the end were left uncapped, 75% average).
+      const plan = fixedPlan(f, E18('1500'), E18('746.25'));
       const sig = await signPlan(f, plan, f.attester);
       await expect(f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []))
         .to.emit(f.pool, 'AttestedWithdrawPlanExecuted')
-        .withArgs(f.userAddress, 0n, E18('7.5'));
+        .withArgs(f.userAddress, 0n, E18('3.75'));
     });
 
     // A guard that pays the user DIRECTLY through its own transaction (no withdrawAsset), so only
@@ -2645,9 +2648,10 @@ describe('PoolLogic — attested selective withdrawal', () => {
     // withdrawal (attestedWithdrawVolume's decayed accumulator already includes THIS withdrawal
     // by the time pressure is computed, so no prior volume is needed to see a nonzero surcharge).
     // With maxSurchargeBps set to WithdrawalPlanLib's own MAX_SURCHARGE_BPS_CEILING (100 = 1%),
-    // effectiveMaxSurchargeBps == 100 exactly, so: pressure = 100/1000 = 0.1 (10%),
-    // surchargeBps = 0.1 * 100 = 10 (0.10%), target = 100 * (1 - 10/10000) = 99.9,
-    // surchargeAmount = 0.1.
+    // effectiveMaxSurchargeBps == 100 exactly. The charged rate is the AVERAGE of the pressure
+    // before and after the withdrawal (0 -> 100/1000 = 10%), so pressure = 0.05 (5%),
+    // surchargeBps = 0.05 * 100 = 5 (0.05%), target = 100 * (1 - 5/10000) = 99.95,
+    // surchargeAmount = 0.05.
     const SURCHARGE_CEILING_BPS = 100n; // WithdrawalPlanLib.MAX_SURCHARGE_BPS_CEILING
 
     it('retains the surcharge in the fund without leaving accountedAssets above NAV', async () => {
@@ -2713,7 +2717,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
         },
       ];
 
-      // surchargeBps computes to exactly 10 (see the constant block above) — one below it must
+      // surchargeBps computes to exactly 5 (see the constant block above) — one below it must
       // revert, exact equality must succeed. Two separate nonces since a plan (and its
       // allocations) can't be replayed even on revert-then-retry.
       const tooTight = buildPlan({
@@ -2722,7 +2726,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
         allocations,
         minValueOutBps: 100n,
         nonce: 0n,
-        maxAcceptableSurchargeBps: 9n,
+        maxAcceptableSurchargeBps: 4n,
       });
       const tooTightSig = await signPlan(fixture, tooTight, attester);
       await expectRevert(
@@ -2736,7 +2740,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
         allocations,
         minValueOutBps: 100n,
         nonce: 1n,
-        maxAcceptableSurchargeBps: 10n,
+        maxAcceptableSurchargeBps: 5n,
       });
       const exactSig = await signPlan(fixture, exact, attester);
       await pool.connect(user).withdrawCashImmediateWithPlan(exact, exactSig, []);
@@ -2766,11 +2770,11 @@ describe('PoolLogic — attested selective withdrawal', () => {
           },
         ],
         minValueOutBps: 100n,
-        // If the ceiling clamp did NOT apply, pressure (10%) * 500 bps = 50 bps of surcharge —
-        // well above this signed ceiling, and the plan would revert SurchargeTooHigh. Success
-        // here proves the real applied surcharge was clamped down to the 10-bps figure the
-        // hardcoded 1% ceiling actually produces.
-        maxAcceptableSurchargeBps: 10n,
+        // If the ceiling clamp did NOT apply, average pressure (5%) * 500 bps = 25 bps of
+        // surcharge — well above this signed ceiling, and the plan would revert SurchargeTooHigh.
+        // Success here proves the real applied surcharge was clamped down to the 5-bps figure
+        // the hardcoded 1% ceiling actually produces.
+        maxAcceptableSurchargeBps: 5n,
       });
       const signature = await signPlan(fixture, plan, attester);
 
@@ -2887,7 +2891,8 @@ describe('PoolLogic — attested selective withdrawal', () => {
       });
       const firstSig = await signPlan(fixture, firstPlan, attester);
       await pool.connect(user).withdrawCashImmediateWithPlan(firstPlan, firstSig, []);
-      // pressure so far: 10/1000 = 1%; surchargeBps = 1% * 100 = 1 (0.01%) — comfortably under
+      // pressure so far: 0 -> 10/1000 = 1%, average 0.5%; surchargeBps = 0.5 (rounds up to 1 for
+      // the ceiling comparison) — comfortably under
       // any plan's default 100-bps maxAcceptableSurchargeBps, so this succeeds without needing
       // any special sizing.
 
@@ -2904,10 +2909,10 @@ describe('PoolLogic — attested selective withdrawal', () => {
         minValueOutBps: 100n,
         nonce: 0n,
         // A tight ceiling: if the accumulator did NOT carry forward the first withdrawal's
-        // volume, pressure would be identical to the first call's (1%) and surchargeBps would
-        // still be 1 — passing even a ceiling of 1. Requiring 2 here only passes if the second
-        // withdrawal's measured pressure is strictly higher than the first's, proving
-        // accumulation across calls, not just within one.
+        // volume, this one would see the same 0 -> 1% pressure as the first (average 0.5 bps,
+        // rounded up to 1) and pass even a ceiling of 1. It is charged on 1% -> 2% (average
+        // 1.5 bps, rounded up to 2), so it only reverts if the accumulator carried the volume
+        // forward across calls, not just within one.
         maxAcceptableSurchargeBps: 1n,
       });
       const secondSig = await signPlan(fixture, secondPlan, attester);
@@ -2917,16 +2922,66 @@ describe('PoolLogic — attested selective withdrawal', () => {
       );
     });
 
+    it('is split-invariant: one withdrawal and the same amount cut into five plans pay the same total surcharge', async () => {
+      const chunk = ethers.parseUnits('100', 18);
+      const total = chunk * 5n;
+      async function totalSurcharge(chunks: bigint): Promise<bigint> {
+        const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+        const { pool, fusd, asset, user, attester, owner } = fixture;
+        await fundPoolAndUser(fixture);
+        await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
+        const userAddress = await user.getAddress();
+        const assetAddress = await asset.getAddress();
+        await fusd.mint(userAddress, total - amount);
+        await fusd.connect(user).approve(await pool.getAddress(), total);
+        const size = total / chunks;
+        for (let i = 0n; i < chunks; i++) {
+          // Deliver a hair under the fair amount (inside the value band) so the fund keeps
+          // roughly the same size across chunks and only the surcharge differs.
+          const plan = buildPlan({
+            userAddress,
+            assetAddress,
+            fusdAmount: size,
+            allocations: [
+              {
+                asset: assetAddress,
+                useFixedAmount: true,
+                portion: 0n,
+                fixedAmount: (size * 995n) / 1000n,
+              },
+            ],
+            minValueOutBps: 100n,
+            nonce: i,
+          });
+          await pool
+            .connect(user)
+            .withdrawCashImmediateWithPlan(plan, await signPlan(fixture, plan, attester), []);
+        }
+        const events = await pool.queryFilter(pool.filters.AttestedWithdrawPlanExecuted());
+        return events.reduce((sum, e) => sum + e.args.surchargeAmount, 0n);
+      }
+
+      const single = await totalSurcharge(1n);
+      const five = await totalSurcharge(5n);
+      // 500 of 1000: average pressure 25% -> 25 bps of 500 = 1.25. Charging the end-of-withdrawal
+      // pressure on the whole amount (the previous model) gave 2.5 in one plan but only about 1.5
+      // cut in five. Decay, the retained surcharge and rounding leave a residue well under 2%.
+      expect(single).to.equal(ethers.parseUnits('1.25', 18));
+      const diff = single > five ? single - five : five - single;
+      expect(diff * 50n).to.be.lessThan(single);
+    });
+
     it('a single large withdrawal alone can trigger SurchargeTooHigh, with zero prior accumulated volume', async () => {
       const fixture = await loadFixture(deployAttestedWithdrawalFixture);
       const { pool, fusd, asset, user, attester, owner } = fixture;
       await fundPoolAndUser(fixture);
       await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
 
-      // 600 of a 1000-value fund in one shot (60% of the fund) — pressure = 0.6, surchargeBps =
-      // 0.6 * 100 = 60 (0.60%). This is the FIRST and ONLY attested withdrawal this pool has
-      // ever seen; the accumulator carries none of some earlier withdrawal's volume. A signed
-      // ceiling of 30 (below the 60 this single withdrawal alone produces) must still revert —
+      // 600 of a 1000-value fund in one shot (60% of the fund) — pressure runs 0 -> 0.6, average
+      // 0.3, surchargeBps = 0.3 * 100 = 30 (0.30%). This is the FIRST and ONLY attested withdrawal
+      // this pool has ever seen; the accumulator carries none of some earlier withdrawal's
+      // volume. A signed ceiling of 20 (below the 30 this single withdrawal alone produces) must
+      // still revert —
       // proving the mechanism doesn't require repeated usage to bite, exactly the "one big
       // withdrawal the first time" scenario this feature is meant to price.
       const userAddress = await user.getAddress();
@@ -2942,7 +2997,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
         fusdAmount: big,
         allocations: [{ asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: big }],
         minValueOutBps: 100n,
-        maxAcceptableSurchargeBps: 30n,
+        maxAcceptableSurchargeBps: 20n,
       });
       const signature = await signPlan(fixture, plan, attester);
 
@@ -2967,11 +3022,12 @@ describe('PoolLogic — attested selective withdrawal', () => {
       );
       await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
 
-      // valueBefore = 80, netFusd = 50 (no exit fee in this fixture) — pressure = 50/80 = 0.625
-      // (62.5%), so the surcharge is 62.5 bps (the amount is computed at full precision, not
-      // truncated to whole bps). fairFusd (haircut-adjusted, 80% collateralized) = 50 * 0.8 = 40 —
-      // NOT the raw 50 claim. surchargeAmount = 40 * 62.5 / 10000 = 0.25, target = 39.75.
-      // Delivering 39.5 (inside [target*(1-1%), target+DUST_TOLERANCE] = [39.3525, 39.751]) proves
+      // valueBefore = 80, netFusd = 50 (no exit fee in this fixture) — pressure runs 0 -> 50/80 =
+      // 0.625, average 0.3125 (31.25%), so the surcharge is 31.25 bps (the amount is computed at
+      // full precision, not truncated to whole bps). fairFusd (haircut-adjusted, 80%
+      // collateralized) = 50 * 0.8 = 40 — NOT the raw 50 claim. surchargeAmount = 40 * 31.25 /
+      // 10000 = 0.125, target = 39.875.
+      // Delivering 39.5 (inside [target*(1-1%), target+DUST_TOLERANCE] = [39.476, 39.876]) proves
       // the surcharge was computed against the haircut-adjusted 40, not the nominal 50 claim.
       const userAddress = await user.getAddress();
       const assetAddress = await asset.getAddress();
@@ -3006,8 +3062,9 @@ describe('PoolLogic — attested selective withdrawal', () => {
       await fundPoolAndUser(fixture);
       await pool.connect(owner).setMaxSurchargeBps(SURCHARGE_CEILING_BPS);
 
-      // 5 of a 1000-value fund = 0.5% pressure. With whole-bp truncation the surcharge used to be
-      // exactly 0 here; at full precision it is 0.5 bps, i.e. 5 * 0.5 / 10000 = 0.00025.
+      // 5 of a 1000-value fund: pressure runs 0 -> 0.5%, average 0.25%. With whole-bp truncation
+      // the surcharge used to be exactly 0 here; at full precision it is 0.25 bps, i.e.
+      // 5 * 0.25 / 10000 = 0.000125.
       const userAddress = await user.getAddress();
       const assetAddress = await asset.getAddress();
       const five = ethers.parseUnits('5', 18);
@@ -3015,7 +3072,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
         { asset: assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: five },
       ];
 
-      // 0.5 bps rounds UP to 1 for the ceiling comparison, so a signed ceiling of 0 must reject.
+      // 0.25 bps rounds UP to 1 for the ceiling comparison, so a signed ceiling of 0 must reject.
       const zeroCeiling = buildPlan({
         userAddress,
         assetAddress,
@@ -3049,7 +3106,7 @@ describe('PoolLogic — attested selective withdrawal', () => {
           .withdrawCashImmediateWithPlan(ok, await signPlan(fixture, ok, attester), []),
       )
         .to.emit(pool, 'AttestedWithdrawPlanExecuted')
-        .withArgs(userAddress, 1n, ethers.parseUnits('0.00025', 18));
+        .withArgs(userAddress, 1n, ethers.parseUnits('0.000125', 18));
     });
 
     it("emits AttestedWithdrawPlanExecuted and CashWithdrawImmediateProRata under the pool's own address, even though both are emitted from inside the delegatecalled WithdrawalPlanLib", async () => {
