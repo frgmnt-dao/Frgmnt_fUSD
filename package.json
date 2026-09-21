@@ -9,6 +9,7 @@
         "compile": "hardhat compile",
         "test": "hardhat test",
         "coverage": "COVERAGE_BUILD=true hardhat coverage",
+        "attester": "ts-node services/attester/src/index.ts",
         "deploy": "hardhat ignition deploy",
         "node": "hardhat node",
         "sol:format:check": "prettier --check --plugin=prettier-plugin-solidity 'contracts/**/*.sol'",

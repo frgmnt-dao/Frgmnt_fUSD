@@ -28,6 +28,10 @@ export const MAX_SURCHARGE_BPS_CEILING = 100n;
 export const DUST_TOLERANCE = 10n ** 15n;
 /// PoolLogic.MAX_MIN_VALUE_OUT_BPS
 export const MAX_MIN_VALUE_OUT_BPS = 100n;
+/// WithdrawalPlanLib.MIN_PLAN_NET_FUSD
+export const MIN_PLAN_NET_FUSD = 10n ** 16n;
+/// WithdrawalPlanLib.MAX_DECAY_WINDOW (30 days): a larger stored window behaves as this
+export const MAX_DECAY_WINDOW = 30n * 24n * 3600n;
 
 export interface AssetAllocationInput {
   asset: string;
@@ -144,4 +148,35 @@ export function composeFixedAmountAllocations(
       fixedAmount: min((wantedValue * l.balance) / l.balanceValue, l.balance),
     };
   });
+}
+
+/// Mirror of the exit-fee split in WithdrawalPlanLib._chargeWithdrawFee. The manager pays no fee
+/// and has no cooldown; everyone else pays `amount * exitFeeNumerator / feeDenominator`.
+export function netAfterExitFee(
+  amount: bigint,
+  isManager: boolean,
+  exitFeeNumerator: bigint,
+  feeDenominator: bigint,
+): { netFusd: bigint; feeFusd: bigint } {
+  if (isManager || exitFeeNumerator === 0n || amount === 0n)
+    return { netFusd: amount, feeFusd: 0n };
+  let feeFusd = (amount * exitFeeNumerator) / feeDenominator;
+  if (feeFusd > amount) feeFusd = amount;
+  return { netFusd: amount - feeFusd, feeFusd };
+}
+
+/// Mirror of the linear decay in WithdrawalPlanLib._checkAndRecordVolume: the accumulator as it
+/// stands `now`, before a new withdrawal is added. A window of 0 is treated by the contract as a
+/// hard refusal, so callers should check the window themselves.
+export function decayedVolume(
+  accumulated: bigint,
+  lastTimestamp: bigint,
+  now: bigint,
+  decayWindow: bigint,
+): bigint {
+  const window = decayWindow > MAX_DECAY_WINDOW ? MAX_DECAY_WINDOW : decayWindow;
+  if (accumulated === 0n || window === 0n) return 0n;
+  const elapsed = now > lastTimestamp ? now - lastTimestamp : 0n;
+  if (elapsed >= window) return 0n;
+  return (accumulated * (window - elapsed)) / window;
 }

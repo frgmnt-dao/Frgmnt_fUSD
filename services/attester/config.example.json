@@ -1,0 +1,14 @@
+{
+    "pool": "0x0000000000000000000000000000000000000001",
+    "fundCalculationLibrary": "0x0000000000000000000000000000000000000002",
+    "allowedAssets": ["0x0000000000000000000000000000000000000003"],
+    "minValueOutBps": "100",
+    "surchargeMarginBps": "1",
+    "planTtlSeconds": "600",
+    "minFusdAmount": "100000000000000000",
+    "maxFusdAmount": "10000000000000000000000",
+    "liquidityBufferBps": "500",
+    "maxOutstandingFusd": "50000000000000000000000",
+    "perUserCooldownSeconds": 60,
+    "volumeCapUsageBps": "8000"
+}
