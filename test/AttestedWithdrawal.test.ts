@@ -2417,6 +2417,55 @@ describe('PoolLogic — attested selective withdrawal', () => {
       expect(await pool.isAttestedWithdrawEnabled()).to.equal(true);
     });
 
+    it('initializeAttestedWithdrawal can run only once: a second call reverts and changes nothing', async () => {
+      const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      const { pool, owner, attester, other } = fixture;
+      const attesterAddress = await attester.getAddress();
+      await pool
+        .connect(owner)
+        .initializeAttestedWithdrawal(attesterAddress, ONE_DAY, ONE_HOUR, 1n, 10n);
+      // The version-3 reinitializer is consumed by the first call, so the second reverts in the
+      // modifier, before the function's own already-initialized check is ever reached.
+      let message = '';
+      try {
+        await pool
+          .connect(owner)
+          .initializeAttestedWithdrawal(await other.getAddress(), ONE_DAY, ONE_HOUR, 2n, 20n);
+      } catch (e: any) {
+        message = String(e.message);
+      }
+      // 0xf92ee8a9 is OpenZeppelin's InvalidInitialization() selector, which PoolLogic's ABI does
+      // not list, so the revert cannot be decoded by name.
+      expect(message).to.include(ethers.id('InvalidInitialization()').slice(0, 10));
+      expect(await pool.withdrawalAttester()).to.equal(attesterAddress);
+      expect(await pool.maxSurchargeBps()).to.equal(10n);
+    });
+
+    it('initializeWithdrawalEscrow rejects a zero escrow address before anything is wired', async () => {
+      const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      const { pool, owner } = fixture;
+      expect(await pool.withdrawalEscrow()).to.equal(ethers.ZeroAddress);
+      await expectRevert(
+        pool.connect(owner).initializeWithdrawalEscrow(ethers.ZeroAddress),
+        'ZeroAddress',
+      );
+      expect(await pool.withdrawalEscrow()).to.equal(ethers.ZeroAddress);
+    });
+
+    it('initializeWithdrawalEscrow rejects a second wiring and a non-owner caller', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, owner, other } = fixture;
+      const escrow = await pool.withdrawalEscrow();
+      expect(escrow).to.not.equal(ethers.ZeroAddress);
+      await expectRevert(
+        pool.connect(owner).initializeWithdrawalEscrow(await other.getAddress()),
+        'EscrowAlreadySet',
+      );
+      await expect(pool.connect(other).initializeWithdrawalEscrow(await other.getAddress())).to.be
+        .reverted;
+      expect(await pool.withdrawalEscrow()).to.equal(escrow);
+    });
+
     it('initializeAttestedWithdrawal itself enforces both floors, even on a fresh migration', async () => {
       const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
       const { pool, owner, attester } = fixture;
@@ -2645,6 +2694,217 @@ describe('PoolLogic — attested selective withdrawal', () => {
         pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
         'AttestedWithdrawVolumeCapExceeded',
       );
+    });
+  });
+
+  describe('multi-asset plans and the remaining plan-path branches', () => {
+    const E18 = (v: string) => ethers.parseUnits(v, 18);
+    async function ready() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      await fundPoolAndUser(fixture);
+      return {
+        ...fixture,
+        userAddress: await fixture.user.getAddress(),
+        assetAddress: await fixture.asset.getAddress(),
+        guardAddress: await fixture.assetGuard.getAddress(),
+        poolAddress: await fixture.pool.getAddress(),
+      };
+    }
+    // A second supported asset priced at 2 fUSD, with 500 units (value 1000) in the pool, so the
+    // fund is 1000 of asset A plus 1000 of asset B.
+    async function withSecondAsset(f: any) {
+      const token = await (
+        await ethers.getContractFactory('TestTokenLogic')
+      ).deploy('Second Asset', 'SA', 18);
+      await token.waitForDeployment();
+      await f.poolManager.setAssetGuard(await token.getAddress(), f.guardAddress);
+      await f.poolManager.setSupportedAsset(await token.getAddress(), true, E18('2'), 18);
+      await token.mint(f.poolAddress, E18('500'));
+      await f.fusd.triggerIncrementAccountedAssets(f.poolAddress, E18('1000'));
+      return { ...f, second: token, secondAddress: await token.getAddress() };
+    }
+    const leg = (asset: string, guard: string, fixedAmount: bigint) => ({
+      asset,
+      guard,
+      positionIds: [],
+      useFixedAmount: true,
+      portion: 0n,
+      fixedAmount,
+    });
+
+    it('delivers a two-asset plan exactly: 40 of A (value 40) plus 30 of B (value 60) for 100 fUSD', async () => {
+      const f = await withSecondAsset(await ready());
+      const plan = buildPlan({
+        ...f,
+        allocations: [
+          leg(f.assetAddress, f.guardAddress, E18('40')),
+          leg(f.secondAddress, f.guardAddress, E18('30')),
+        ],
+        minValueOutBps: 100n,
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      const a0 = await f.asset.balanceOf(f.poolAddress);
+      const b0 = await f.second.balanceOf(f.poolAddress);
+      await expect(f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []))
+        .to.emit(f.pool, 'CashWithdrawImmediateProRata')
+        .withArgs(
+          f.userAddress,
+          amount,
+          amount,
+          0n,
+          [f.assetAddress, f.secondAddress],
+          [E18('40'), E18('30')],
+        );
+      expect(a0 - (await f.asset.balanceOf(f.poolAddress))).to.equal(E18('40'));
+      expect(b0 - (await f.second.balanceOf(f.poolAddress))).to.equal(E18('30'));
+      expect(await f.asset.balanceOf(f.userAddress)).to.equal(E18('40'));
+      expect(await f.second.balanceOf(f.userAddress)).to.equal(E18('30'));
+      // accountedAssets fell by the 100 of value that left, so it still equals NAV (1900).
+      expect(await f.pool.accountedAssets()).to.equal(E18('1900'));
+    });
+
+    it('a plan may draw only one of two assets, leaving the other untouched (the point of the feature)', async () => {
+      const f = await withSecondAsset(await ready());
+      // 100 fUSD entirely from B: 50 units at price 2.
+      const plan = buildPlan({
+        ...f,
+        allocations: [leg(f.secondAddress, f.guardAddress, E18('50'))],
+        minValueOutBps: 100n,
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      expect(await f.second.balanceOf(f.userAddress)).to.equal(E18('50'));
+      expect(await f.asset.balanceOf(f.poolAddress)).to.equal(poolAsset);
+    });
+
+    it('a plan that under-delivers (only the 40 leg) fails the lower bound, and one that over-delivers (40 + 70) fails the upper bound', async () => {
+      const f = await withSecondAsset(await ready());
+      let plan = buildPlan({
+        ...f,
+        allocations: [leg(f.assetAddress, f.guardAddress, E18('40'))],
+        minValueOutBps: 100n,
+      });
+      await expectRevert(
+        f.pool
+          .connect(f.user)
+          .withdrawCashImmediateWithPlan(plan, await signPlan(f, plan, f.attester), []),
+        'ValueConservationViolated',
+      );
+      plan = buildPlan({
+        ...f,
+        allocations: [
+          leg(f.assetAddress, f.guardAddress, E18('40')),
+          leg(f.secondAddress, f.guardAddress, E18('35')),
+        ],
+        minValueOutBps: 100n,
+        nonce: 1n,
+      });
+      await expectRevert(
+        f.pool
+          .connect(f.user)
+          .withdrawCashImmediateWithPlan(plan, await signPlan(f, plan, f.attester), []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it('an asset whose guard was removed fails the whole plan closed', async () => {
+      const f = await withSecondAsset(await ready());
+      await f.poolManager.setAssetGuard(f.secondAddress, ethers.ZeroAddress);
+      const plan = buildPlan({
+        ...f,
+        allocations: [
+          leg(f.assetAddress, f.guardAddress, E18('40')),
+          leg(f.secondAddress, ethers.ZeroAddress, E18('30')),
+        ],
+        minValueOutBps: 100n,
+      });
+      // The NAV valuation reads every supported asset's guard before the allocation loop runs, so a
+      // guard-less asset fails closed there (a call to the zero address) and the loop's own
+      // InvalidGuard check is a second line of defence behind it.
+      await expect(
+        f.pool
+          .connect(f.user)
+          .withdrawCashImmediateWithPlan(plan, await signPlan(f, plan, f.attester), []),
+      ).to.be.reverted;
+    });
+
+    it('a fixed amount so small it rounds to a zero portion delivers nothing and fails the value bound', async () => {
+      const f = await ready();
+      const plan = buildPlan({
+        ...f,
+        allocations: [leg(f.assetAddress, f.guardAddress, 1n)],
+        minValueOutBps: 100n,
+      });
+      await expectRevert(
+        f.pool
+          .connect(f.user)
+          .withdrawCashImmediateWithPlan(plan, await signPlan(f, plan, f.attester), []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it('a manager plan is exempt from the exit fee and the cooldown, exactly like the pro-rata path', async () => {
+      const f = await ready();
+      await f.poolManager.setFees(0n, 0n, 0n, 100n, 10_000n); // 1% exit fee for everyone else
+      const managerAddress = await f.manager.getAddress();
+      await f.fusd.mint(managerAddress, amount);
+      await f.fusd.connect(f.manager).approve(f.poolAddress, amount);
+      await f.fusd.setExitCooldown(managerAddress, 1000n);
+      const plan = buildPlan({
+        ...f,
+        userAddress: managerAddress,
+        allocations: [leg(f.assetAddress, f.guardAddress, amount)],
+        minValueOutBps: 100n,
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await f.pool.connect(f.manager).withdrawCashImmediateWithPlan(plan, sig, []);
+      // No fee taken (a regular user would net 99) and the cooldown did not block.
+      expect(await f.asset.balanceOf(managerAddress)).to.equal(amount);
+    });
+
+    it('a plan that would eat into a reserved balance reverts instead of paying it out', async () => {
+      const f = await ready();
+      // The user needs 900 fUSD for a 900-value exit of the 900 unreserved units.
+      await f.fusd.mint(f.userAddress, E18('800'));
+      await f.fusd.connect(f.user).approve(f.poolAddress, E18('900'));
+      const poolAddr = f.poolAddress;
+      let found = false;
+      for (let slot = 0; slot < 80 && !found; slot++) {
+        const key = ethers.keccak256(
+          ethers.AbiCoder.defaultAbiCoder().encode(['address', 'uint256'], [f.assetAddress, slot]),
+        );
+        // Probe by writing, and put the slot back when it was not the reserved mapping, so a
+        // probe never leaves another mapping keyed by the same asset corrupted.
+        const previous = await ethers.provider.getStorage(poolAddr, key);
+        await ethers.provider.send('hardhat_setStorageAt', [
+          poolAddr,
+          key,
+          ethers.toBeHex(E18('100'), 32),
+        ]);
+        found = (await f.pool.reservedAssetBalance(f.assetAddress)) === E18('100');
+        if (!found) {
+          await ethers.provider.send('hardhat_setStorageAt', [poolAddr, key, previous]);
+        }
+      }
+      expect(found).to.equal(true);
+      const plan = buildPlan({
+        ...f,
+        fusdAmount: E18('900'),
+        allocations: [
+          { asset: f.assetAddress, useFixedAmount: false, portion: E18('1'), fixedAmount: 0n },
+        ],
+        minValueOutBps: 100n,
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      // The mock guard is not reserved-aware and offers the whole 1000, so a 100% draw would leave
+      // less than the 100 reserved for finalized claims; the post-withdrawal valuation refuses it.
+      // (The production ERC20Guard subtracts the reserved balance itself, so a 100% draw there
+      // takes only the 900.)
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'InvalidReservedBalance',
+      );
+      expect(await f.asset.balanceOf(poolAddr)).to.equal(poolAsset);
     });
   });
 

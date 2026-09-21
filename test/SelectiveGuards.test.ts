@@ -788,6 +788,69 @@ describe('AaveV3LendingPoolSelectiveAssetGuard', () => {
     );
   });
 
+  it('two selected reserves take the MINIMUM liquidity ceiling whichever is processed first', async () => {
+    for (const tightFirst of [true, false]) {
+      const f = await deploy();
+      const [lo, hi] = [f.a.usdc, f.a.weth].sort((x, y) => (BigInt(x) < BigInt(y) ? -1 : 1));
+      // Ids are processed in ascending order. Leave one reserve at 10% liquidity and the other
+      // at 50%, in both orders, so the running minimum both replaces and keeps its value.
+      const drain = async (reserve: string, keepPercent: bigint) => {
+        const isUsdc = reserve === f.a.usdc;
+        const token = isUsdc ? f.usdc : f.weth;
+        const aToken = isUsdc ? f.a.aUsdc : f.a.aWeth;
+        const unit = isUsdc ? 10n ** 6n : 10n ** 18n;
+        await token.burn(aToken, (100n - keepPercent) * 10n * unit);
+      };
+      await drain(lo, tightFirst ? 10n : 50n);
+      await drain(hi, tightFirst ? 50n : 10n);
+      const [, , txs] = await f.guard.withdrawProcessingSubset(
+        f.a.pool,
+        ethers.ZeroAddress,
+        ONE,
+        f.other.address,
+        [idOf(lo), idOf(hi)],
+      );
+      const amounts = txs
+        .filter((t: any) => t.txData.startsWith(aaveIface.getFunction('withdraw')!.selector))
+        .map((t: any) => aaveIface.decodeFunctionData('withdraw', t.txData))
+        .map((d: any) => ({ asset: d[0], amount: d[1] }));
+      expect(amounts.length).to.equal(2);
+      // Both reserves are drawn at the 10% ceiling: 100 of 1000 in each.
+      for (const a of amounts) {
+        const unit = a.asset === f.a.usdc ? 10n ** 6n : 10n ** 18n;
+        expect(a.amount).to.equal(100n * unit);
+      }
+    }
+  });
+
+  it('a selected reserve the pool holds no position in contributes nothing and does not throttle the rest', async () => {
+    const f = await deploy();
+    await f.aUsdc.burn(f.a.pool, 1000n * 10n ** 6n);
+    const [lo, hi] = [f.a.usdc, f.a.weth].sort((x, y) => (BigInt(x) < BigInt(y) ? -1 : 1));
+    const [, , txs] = await f.guard.withdrawProcessingSubset(
+      f.a.pool,
+      ethers.ZeroAddress,
+      ONE,
+      f.other.address,
+      [idOf(lo), idOf(hi)],
+    );
+    const weth = txs
+      .filter((t: any) => t.txData.startsWith(aaveIface.getFunction('withdraw')!.selector))
+      .map((t: any) => aaveIface.decodeFunctionData('withdraw', t.txData))
+      .find((d: any) => d[0] === f.a.weth);
+    expect(weth[1]).to.equal(1000n * 10n ** 18n);
+  });
+
+  it('a supported reserve that has no aToken configured is rejected as an invalid position', async () => {
+    const f = await deploy();
+    await f.aavePool.setReserveTokens(f.a.weth, ethers.ZeroAddress, ethers.ZeroAddress);
+    await expect(
+      f.guard.withdrawProcessingSubset(f.a.pool, ethers.ZeroAddress, ONE, f.other.address, [
+        idOf(f.a.weth),
+      ]),
+    ).to.be.revertedWithCustomError(f.guard, 'InvalidPositionId');
+  });
+
   it('rejects ids that are not supported reserves, unsorted ids, duplicates and ids with high bits', async () => {
     const f = await deploy();
     const stranger = ethers.Wallet.createRandom().address;
