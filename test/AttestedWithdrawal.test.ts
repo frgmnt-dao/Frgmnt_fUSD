@@ -1,6 +1,12 @@
 import { expect } from 'chai';
 import { ethers } from 'hardhat';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import {
+  aimValue,
+  composeFixedAmountAllocations,
+  driftRoom,
+  quoteSurcharge,
+} from '../scripts/utils/withdrawalPlanBuilder';
 
 const ONE_DAY = 24 * 60 * 60;
 const ONE_HOUR = 60 * 60;
@@ -2639,6 +2645,161 @@ describe('PoolLogic — attested selective withdrawal', () => {
         pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []),
         'AttestedWithdrawVolumeCapExceeded',
       );
+    });
+  });
+
+  describe('plan composition: portion plans are fragile, builder plans are not', () => {
+    const E18 = (v: string) => ethers.parseUnits(v, 18);
+    async function ready() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      await fundPoolAndUser(fixture);
+      return {
+        ...fixture,
+        userAddress: await fixture.user.getAddress(),
+        assetAddress: await fixture.asset.getAddress(),
+        guardAddress: await fixture.assetGuard.getAddress(),
+        poolAddress: await fixture.pool.getAddress(),
+      };
+    }
+
+    it('a portion plan aimed exactly at the target reverts when the asset balance rises before execution', async () => {
+      const f = await ready();
+      // 100 of a 1000 fund at 10%: exactly the target (no surcharge configured).
+      const plan = buildPlan({
+        userAddress: f.userAddress,
+        assetAddress: f.assetAddress,
+        allocations: [
+          { asset: f.assetAddress, useFixedAmount: false, portion: E18('0.1'), fixedAmount: 0n },
+        ],
+        minValueOutBps: 100n,
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      // A donation between signing and execution: the same 10% portion now draws 105.
+      await f.asset.mint(f.poolAddress, E18('50'));
+      await expectRevert(
+        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+    });
+
+    it('a plan composed by the builder (fixed amount, aimed mid-band) survives the same donation', async () => {
+      const f = await ready();
+      const quote = quoteSurcharge({
+        fairFusd: amount,
+        netFusd: amount,
+        volumeBefore: 0n,
+        completeBefore: poolAsset,
+        maxSurchargeBps: 0n,
+      });
+      expect(quote.target).to.equal(amount);
+      const aim = aimValue(quote.target, 100n);
+      expect(aim).to.equal(E18('99.5'));
+      const allocations = composeFixedAmountAllocations(
+        [
+          {
+            asset: f.assetAddress,
+            guard: f.guardAddress,
+            balance: poolAsset,
+            balanceValue: poolAsset,
+            weight: 1n,
+          },
+        ],
+        aim,
+      );
+      expect(allocations[0].fixedAmount).to.equal(E18('99.5'));
+      // The plan tolerates 0.5 more and 0.5 less than the aim.
+      const room = driftRoom(quote.target, 100n, aim);
+      expect(room.up).to.equal(E18('0.5') + 10n ** 15n);
+      expect(room.down).to.equal(E18('0.5'));
+
+      const plan = buildPlan({
+        userAddress: f.userAddress,
+        assetAddress: f.assetAddress,
+        allocations,
+        minValueOutBps: 100n,
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await f.asset.mint(f.poolAddress, E18('50'));
+      const before = await f.asset.balanceOf(f.userAddress);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      // The fixed amount is converted to a portion of the balance at execution, so the draw is
+      // the fixed amount up to the rounding of that division (about 1e3 wei here), not 105 x 9.95%.
+      const received = (await f.asset.balanceOf(f.userAddress)) - before;
+      expect(received).to.be.at.most(E18('99.5'));
+      expect(received).to.be.at.least(E18('99.5') - 10n ** 6n);
+    });
+
+    it('a portion plan aimed inside the band absorbs a small rise instead of reverting', async () => {
+      const f = await ready();
+      // Aim 99.5 of 100 with a portion (9.95% of 1000); a donation of 2 lifts the draw by 0.199.
+      const plan = buildPlan({
+        userAddress: f.userAddress,
+        assetAddress: f.assetAddress,
+        allocations: [
+          { asset: f.assetAddress, useFixedAmount: false, portion: E18('0.0995'), fixedAmount: 0n },
+        ],
+        minValueOutBps: 100n,
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await f.asset.mint(f.poolAddress, E18('2'));
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+    });
+
+    it('quoteSurcharge matches the contract exactly (500 of 1,000 at the 1% maximum)', async () => {
+      const f = await ready();
+      await f.fusd.mint(f.userAddress, E18('400'));
+      await f.fusd.connect(f.user).approve(f.poolAddress, E18('500'));
+      await f.pool.connect(f.owner).setMaxSurchargeBps(100n);
+      const quote = quoteSurcharge({
+        fairFusd: E18('500'),
+        netFusd: E18('500'),
+        volumeBefore: 0n,
+        completeBefore: poolAsset,
+        maxSurchargeBps: 100n,
+      });
+      expect(quote.surchargeAmount).to.equal(E18('1.25'));
+      expect(quote.surchargeBpsCeil).to.equal(25n);
+      const allocations = composeFixedAmountAllocations(
+        [
+          {
+            asset: f.assetAddress,
+            guard: f.guardAddress,
+            balance: poolAsset,
+            balanceValue: poolAsset,
+            weight: 1n,
+          },
+        ],
+        aimValue(quote.target, 100n),
+      );
+      const plan = buildPlan({
+        userAddress: f.userAddress,
+        assetAddress: f.assetAddress,
+        fusdAmount: E18('500'),
+        allocations,
+        minValueOutBps: 100n,
+        maxAcceptableSurchargeBps: quote.surchargeBpsCeil,
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await expect(f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []))
+        .to.emit(f.pool, 'AttestedWithdrawPlanExecuted')
+        .withArgs(f.userAddress, 0n, quote.surchargeAmount);
+    });
+
+    it('the builder refuses a band of zero, a band above the protocol cap, and a leg that cannot supply its share', async () => {
+      expect(() => aimValue(amount, 0n)).to.throw('minValueOutBps');
+      expect(() => aimValue(amount, 101n)).to.throw('minValueOutBps');
+      const leg = { asset: '0x01', guard: '0x02', balance: 10n, balanceValue: 10n, weight: 1n };
+      expect(() => composeFixedAmountAllocations([leg], 11n)).to.throw('cannot supply');
+      expect(() => composeFixedAmountAllocations([{ ...leg, balance: 0n }], 5n)).to.throw('empty');
+      const two = composeFixedAmountAllocations(
+        [
+          { ...leg, balance: 1000n, balanceValue: 1000n, weight: 1n },
+          { ...leg, balance: 500n, balanceValue: 1000n, weight: 3n },
+        ],
+        400n,
+      );
+      // 100 of value from the first leg (1:1), 300 of value from the second (0.5 units per value).
+      expect(two.map((a) => a.fixedAmount)).to.deep.equal([100n, 150n]);
     });
   });
 
