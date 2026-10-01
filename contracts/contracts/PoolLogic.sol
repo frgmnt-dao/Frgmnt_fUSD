@@ -376,7 +376,8 @@ contract PoolLogic is
     ///         user/amounts/assets shape as the existing pro-rata path) purely to additionally
     ///         record which signed plan nonce this attested withdrawal consumed — avoids
     ///         compiling a second, near-identical event with its own dynamic-array encoding.
-    /// @param surchargeAmount The USD-denominated slice of this withdrawal's entitlement withheld
+    /// @param surchargeAmount The slice of this withdrawal's entitlement, in the pool's accounting
+    ///        unit (fUSD or fEURO), withheld
     ///        and retained in the fund (see maxSurchargeBps) — emitted explicitly so off-chain
     ///        monitoring can distinguish surcharge-driven under-delivery from ordinary
     ///        minValueOutBps slack or rounding, and correlate a maxSurchargeBps governance change

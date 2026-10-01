@@ -32,8 +32,8 @@ interface IPoolLogic {
         // whose getBalance() reports a divisible, fungible-style raw balance (e.g. a plain
         // ERC20 held directly or an interest-bearing wrapper). For indivisible or
         // NFT-backed positions (e.g. a Uniswap V3 LP position, where guard.getBalance()
-        // typically reports a USD-denominated value rather than a raw redeemable unit
-        // count), useFixedAmount produces a portion the attester did not intend — use direct
+        // typically reports a value in the pool's accounting unit rather than a raw redeemable
+        // unit count), useFixedAmount produces a portion the attester did not intend — use direct
         // portion (0 to 1e18) for those asset types instead.
         uint256 fixedAmount;
     }
