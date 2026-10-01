@@ -425,6 +425,24 @@ async function main() {
       'finalizeCashWithdraw() reverts EscrowNotSet().',
   );
 
+  // Attested selective withdrawal (withdrawCashImmediateWithPlan) is likewise onlyOwner /
+  // reinitializer(3) and so cannot be called from this script either. On a fresh proxy
+  // compoundedRewardIndex is already 1e18 from initialize() above, so the AutoCompoundingNotInitialized
+  // order guard (relevant only to the live, pre-auto-compounding USD proxy) never blocks it here —
+  // initializeAttestedWithdrawal can run any time after this deploy. The feature stays disabled
+  // (isAttestedWithdrawEnabled = false) until the manager separately calls
+  // setAttestedWithdrawEnabled(true), by design — see docs/attested-selective-withdrawal-design.md.
+  console.log(
+    `REQUIRED FOLLOW-UP (owner ${GOVERNANCE_SAFE}): PoolLogic(${poolLogicProxy}).` +
+      'initializeAttestedWithdrawal(attester, attesterRotationDelay, attestedWithdrawDecayWindow, ' +
+      'maxAttestedWithdrawVolumePerWindow, maxSurchargeBps) — until it is called, ' +
+      'withdrawCashImmediateWithPlan() and every attester-rotation function revert. Floors: ' +
+      'attesterRotationDelay >= 24h (MIN_ATTESTER_ROTATION_DELAY), attestedWithdrawDecayWindow >= ' +
+      '1h (MIN_ATTESTED_WITHDRAW_DECAY_WINDOW). maxSurchargeBps = 0 is the safe default (surcharge ' +
+      'off); it can be set later via setMaxSurchargeBps() regardless. The attester address is a ' +
+      'deployment-time decision made separately, not derived by this script.',
+  );
+
   // ============================================================
   // 🔍 IMPLEMENTATION & ADMIN ADDRESSES (EIP-1967)
   // ============================================================
