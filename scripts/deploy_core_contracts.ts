@@ -258,11 +258,20 @@ async function main() {
   // 5) PoolManagerLogic (proxy + initialize with poolLogic = 0)
   // ============================================================
 
+  // PoolManagerLogic.setPoolLogic() below is onlyFactoryOwner (`require(msg.sender ==
+  // factoryOwner)`), and can only run AFTER PoolLogic exists — which needs poolManagerProxy's own
+  // address as a constructor-style init param, so PoolManagerLogic must deploy first, with
+  // poolLogic unset, and be linked afterward. Passing GOVERNANCE_SAFE as _factoryOwner here
+  // directly would make that later call impossible: this deployer is never GOVERNANCE_SAFE, so it
+  // could never satisfy onlyFactoryOwner to perform the linking itself, and GOVERNANCE_SAFE (a
+  // Safe) cannot sign a script-driven transaction. So factoryOwner starts as this deployer, the
+  // same transitional-ownership shape already used for AssetHandler above, and is handed to
+  // GOVERNANCE_SAFE via setFactoryOwner() once setPoolLogic() has run — see step 8 below.
   const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic', signer);
   const poolManagerLogic = await upgrades.deployProxy(
     PoolManagerLogic,
     [
-      GOVERNANCE_SAFE,
+      await signer.getAddress(),
       POOL_MANAGER_ADDRESS,
       POOL_MANAGER_NAME,
       ethers.ZeroAddress,
@@ -282,11 +291,14 @@ async function main() {
   // 6) TokenLogic / {TOKEN_SYMBOL} (UUPS proxy + initialize with poolLogic = 0)
   // ============================================================
 
+  // Same reasoning as PoolManagerLogic just above: setPoolLogic() below is onlyRole
+  // (DEFAULT_ADMIN_ROLE), and this deployer must hold that role to call it. `admin` starts as the
+  // deployer and DEFAULT_ADMIN_ROLE moves to GOVERNANCE_SAFE afterward (step 8).
   const TokenLogic = await ethers.getContractFactory('TokenLogic', signer);
   const tokenLogic = await upgrades.deployProxy(
     TokenLogic,
     [
-      GOVERNANCE_SAFE,
+      await signer.getAddress(),
       EMERGENCY_ADDRESS,
       ethers.ZeroAddress,
       poolManagerProxy,
@@ -318,7 +330,25 @@ async function main() {
   const poolLogic = await upgrades.deployProxy(
     PoolLogic,
     [fusdProxy, poolManagerProxy, GOVERNANCE_SAFE, SHARE_TOKEN_NAME, SHARE_TOKEN_SYMBOL],
-    { initializer: 'initialize', unsafeAllowLinkedLibraries: true, ...txOpts() },
+    {
+      initializer: 'initialize',
+      unsafeAllowLinkedLibraries: true,
+      // initializeAutoCompounding() (reinitializer(2)) and initializeAttestedWithdrawal()
+      // (reinitializer(3)) are both annotated @custom:oz-upgrades-validate-as-initializer so the
+      // plugin checks them, and both correctly flag as "missing" calls to __ERC20_init /
+      // __Ownable_init / __ReentrancyGuard_init — calls that MUST NOT be repeated there, since
+      // the real initialize() above (reinitializer(1)) already ran them; re-running would revert
+      // under OpenZeppelin's Initializable guard. This is the documented false-positive case
+      // 'missing-initializer-call' exists for: a later reinitializer that only touches its own,
+      // narrower slice of state. Confirmed by rehearsing a fresh deployProxy of this exact
+      // PoolLogic (this script, both PRODUCT values) locally — this check had never actually run
+      // against this version before: the live USD proxy only ever goes through
+      // upgrade_core_contracts.ts, which deliberately bypasses upgrades.* for PoolLogic over the
+      // linked-library limitation noted there, so this validator path was never exercised until
+      // a fresh EUR (or hypothetical fresh USD) deploy was rehearsed.
+      unsafeAllow: ['missing-initializer-call'],
+      ...txOpts(),
+    },
   );
 
   await poolLogic.waitForDeployment();
@@ -343,6 +373,16 @@ async function main() {
 
   console.log('PoolManagerLogic linked to PoolLogic');
 
+  // Hand factoryOwner to GOVERNANCE_SAFE now that the deployer-only linking call above is done —
+  // same transitional-ownership close as AssetHandler.transferOwnership() earlier in this script.
+  await sendTxWithRetry(
+    () => pm.setFactoryOwner(GOVERNANCE_SAFE, txOpts()),
+    'PoolManagerLogic.setFactoryOwner',
+  );
+  nonce++;
+
+  console.log('PoolManagerLogic factoryOwner transferred to GOVERNANCE_SAFE');
+
   await sendTxWithRetry(
     () => fusd.setPoolLogic(poolLogicProxy, txOpts()),
     'TokenLogic.setPoolLogic',
@@ -350,6 +390,24 @@ async function main() {
   nonce++;
 
   console.log('TokenLogic linked to PoolLogic');
+
+  // Same close for TokenLogic's AccessControl admin: grant it to GOVERNANCE_SAFE, then this
+  // deployer renounces its own temporary grant. Two separate calls (grant, then self-renounce) —
+  // AccessControl has no single-call "transfer" the way Ownable does.
+  const tokenAdminRole = await fusd.DEFAULT_ADMIN_ROLE();
+  const deployerAddress = await signer.getAddress();
+  await sendTxWithRetry(
+    () => fusd.grantRole(tokenAdminRole, GOVERNANCE_SAFE, txOpts()),
+    'TokenLogic.grantRole(DEFAULT_ADMIN_ROLE, GOVERNANCE_SAFE)',
+  );
+  nonce++;
+  await sendTxWithRetry(
+    () => fusd.renounceRole(tokenAdminRole, deployerAddress, txOpts()),
+    'TokenLogic.renounceRole(DEFAULT_ADMIN_ROLE, deployer)',
+  );
+  nonce++;
+
+  console.log('TokenLogic DEFAULT_ADMIN_ROLE transferred to GOVERNANCE_SAFE');
 
   // FNA-03: finalizeCashWithdraw() reverts EscrowNotSet() until a WithdrawalEscrow bound to the pool
   // is wired in. The escrow is immutable-bound to the pool PROXY, so deploy it now. Wiring it is
