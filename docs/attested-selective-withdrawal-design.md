@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented on `feature/07-attested-selective-withdrawal` and not yet deployed to any live pool. The upgrade script is `scripts/upgrade_attested_withdrawal.ts`, the runbook is in `docs/upgradeable-contracts-notes.md`, and a short change list for CertiK is in `docs/certik-change-summary.md`.
+Implemented on `feature/07-attested-selective-withdrawal` and not yet deployed to any live pool. The upgrade script is `scripts/upgrade_attested_withdrawal.ts`, the runbook is in `docs/upgradeable-contracts-notes.md`, and a short change list for CertiK is in `docs/certik-change-summary.md`. This branch now covers both the USD product (live, upgrade path) and the EUR product (never deployed, fresh-deploy path); see `docs/dual-product-branch.md`.
 
 Verification so far: the full suite passes (1,293 tests; one opt-in upgrade rehearsal is skipped unless `AUDIT_ARTIFACTS` is set), repository coverage runs clean (97.9% of statements and 89.1% of branches), and the new code has been through internal review, mutation testing and an upgrade rehearsal. It has not been audited externally, and nothing has been run against a fork of the live chain.
 

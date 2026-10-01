@@ -3,6 +3,7 @@
 **Baseline:** commit `4922f72` (tip of `feature/06-aave-v4`, the code CertiK validated).
 **This change:** branch `feature/07-attested-selective-withdrawal`, cut from that commit.
 **Full design and rationale:** [attested-selective-withdrawal-design.md](attested-selective-withdrawal-design.md) (section 5, "Changes from the validated baseline", explains why each change was needed).
+**Scope note:** this branch is now the single branch for both the USD product (the baseline above) and the EUR product, which has never been deployed — see [dual-product-branch.md](dual-product-branch.md) for what that covers and what was verified.
 
 This page is the short list: what differs from the validated code, the evidence, where to look first, and what is not covered.
 

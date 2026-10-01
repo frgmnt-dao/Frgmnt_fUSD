@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Guards against feature/03-euro-pegged-stablecoin and feature/06-aave-v4 silently
-# drifting: both branches back a distinct, permanent product (EUR-pegged vs
-# USD-pegged/Aave-V4), but must otherwise share one codebase. Product differences
-# belong in scripts/deploy_core_contracts.ts config (token branding, whether the
-# optional EUR/USD feed is configured), never in contracts/contracts/ itself.
+# Historical guard against feature/03-euro-pegged-stablecoin and feature/06-aave-v4 silently
+# drifting from each other. As of feature/07-attested-selective-withdrawal, both products are
+# developed on a single branch instead (see docs/dual-product-branch.md): product differences
+# belong in scripts/deploy_core_contracts.ts config (token branding, whether the optional
+# EUR/USD feed is configured), never in contracts/contracts/ itself — the same rule this script
+# enforced across two branches now holds within one. The two branches below are kept, unchanged,
+# as a read-only historical record (feature/06-aave-v4's tip, 4922f72, is the CertiK-validated
+# baseline cited throughout docs/certik-change-summary.md); this script still runs in their CI
+# and still no-ops everywhere else, including on feature/07 and its descendants.
 #
 # Usage: scripts/check-branch-parity.sh
 # No-ops (exit 0) unless running on one of the two paired branches.
