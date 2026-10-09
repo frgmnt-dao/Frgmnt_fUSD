@@ -157,7 +157,14 @@ library WithdrawalPlanLib {
         uint256 feeFusd;
         uint256 valueDelta;
         uint256 totalClaims;
-        uint256 completeFundValue;
+        // SoftStack L-02: PoolLogic.accountedAssets() must be reduced by this exact amount — not
+        // by a value PoolLogic recomputes itself. Computed entirely in this library (see
+        // executeWithdrawalPlan's own docs below) against the GROSS active NAV that
+        // PoolLogic._accrueYield() actually ratchets accountedAssets up to, which is NOT the
+        // net-realizable `completeFundValue` this struct used to expose for PoolLogic to feed into
+        // FundCalculationLibrary.computeAccountedAssetsReduction() itself — that extra external
+        // call from PoolLogic is also gone now, recovering its bytecode.
+        uint256 accountedAssetsReduction;
         uint64 newVolumeTimestamp;
         uint128 newVolumeAccumulated;
         // fairFusd - target (see executeWithdrawalPlan): the deliberately-undelivered slice of
@@ -383,8 +390,11 @@ library WithdrawalPlanLib {
     ///      the fee transfer, and the fUSD burn, none of which touch PoolLogic's OWN storage
     ///      (they're all external calls or memory-only math); PoolLogic itself performs only the
     ///      three genuine SSTOREs this struct's outputs feed (consumedPlanNonce,
-    ///      attestedWithdrawVolume, accountedAssets) plus the accountedAssets reduction call,
-    ///      which must stay caller-side since it reads/writes accountedAssets directly.
+    ///      attestedWithdrawVolume, accountedAssets) — including, as of SoftStack L-02, the
+    ///      accountedAssets reduction amount itself: only the SSTORE (and its underflow check)
+    ///      stay caller-side, since they read/write accountedAssets directly; the amount to
+    ///      subtract is fully computed here (see `accountedAssetsBefore` param and
+    ///      `result.accountedAssetsReduction` below).
     /// @dev computeImmediateWithdrawPortion (called below for totalClaims/completeFundValue)
     ///      reconstructs the pre-burn claims baseline by adding netFusd back onto the
     ///      already-burn-reduced totalSupply — burning before that call, exactly mirroring
@@ -393,10 +403,15 @@ library WithdrawalPlanLib {
     /// @dev Every check below reverts the whole external call; PoolLogic performs no storage
     ///      writes from this function's outputs until it returns successfully, so a revert here
     ///      leaves consumedPlanNonce/attestedWithdrawVolume/accountedAssets untouched.
+    /// @param accountedAssetsBefore PoolLogic.accountedAssets() as of the start of this call —
+    ///        passed in rather than read via an IPoolLogic.accountedAssets() call-to-self, since
+    ///        PoolLogic already holds it in a single SLOAD and passing it is cheaper than adding a
+    ///        new external getter purely for this.
     function executeWithdrawalPlan(
         IPoolLogic.WithdrawalPlan calldata plan,
         bytes calldata attesterSignature,
-        IPoolLogic.ComplexAsset[] calldata complexAssetsData
+        IPoolLogic.ComplexAsset[] calldata complexAssetsData,
+        uint256 accountedAssetsBefore
     ) external returns (PlanExecutionResult memory result) {
         ExecutePlanInput memory input = _loadPlanInput(plan.user, plan.nonce);
         bytes32 digest = _hashPlan(plan);
@@ -440,7 +455,7 @@ library WithdrawalPlanLib {
         uint256 supplyAfterBurn = IERC20(input.fusd).totalSupply();
 
         // VALUE MEASUREMENT. The value that leaves the fund is measured on the UNCAPPED,
-        // net-realizable, deficit-adjusted, reserved-excluding NAV (`completeFundValue`), before and
+        // net-realizable, deficit-adjusted, reserved-excluding NAV (`completeBefore`), before and
         // after — not on the liquidity-capped NAV the pro-rata path sizes its portion against.
         // The capped NAV is the wrong yardstick for a plan whose allocations are chosen freely:
         // a guard whose ceiling is a MINIMUM across several positions (Morpho Blue, Aave V3)
@@ -449,11 +464,10 @@ library WithdrawalPlanLib {
         // lower bound revert legitimate plans and, worse, weaken the UPPER bound by the inverse of
         // the binding liquidity ratio (a plan could extract many times `target` while the capped
         // reading still looked like `target`). The uncapped figure is the real, oracle-priced
-        // position change, so the bounds below hold no matter which positions are drawn, and it is
-        // also the correct basis for computeAccountedAssetsReduction (it already receives
-        // completeFundValue as its "valueBefore"). It is read from the already-validated
-        // computeImmediateWithdrawPortion(): passing 1 for its capped-NAV argument avoids its
-        // zero early-return, and only its `completeFundValue` output is used.
+        // position change, so the bounds below hold no matter which positions are drawn. It is
+        // read from the already-validated computeImmediateWithdrawPortion(): passing 1 for its
+        // capped-NAV argument avoids its zero early-return, and only its `completeFundValue`
+        // output is used.
         (, uint256 totalClaims_, uint256 completeBefore) = FundCalculationLibrary
             .computeImmediateWithdrawPortion(address(this), result.netFusd, 1);
         // fairFusd is derived from that function's own outputs via the already-validated
@@ -465,7 +479,19 @@ library WithdrawalPlanLib {
             totalClaims_
         );
         result.totalClaims = totalClaims_;
-        result.completeFundValue = completeBefore;
+        // SoftStack L-02: separately from `completeBefore` above (net-realizable, used only for
+        // the value-conservation bounds below), accountedAssetsReduction must be sized against the
+        // GROSS active NAV — the same figure PoolLogic._accrueYield() ratchets accountedAssets up
+        // to (activeTotalValueWithCompleteness(), which is NOT net of any guard's unwind cost,
+        // only of genuine deficits — see IUnwindCostAwareGuard vs IDeficitReportingGuard). Using
+        // the net-realizable completeBefore here instead (the pre-fix behavior) read a static
+        // unwind cost sitting in some OTHER, untouched guard as "unrecognized loss" even when
+        // accountedAssets was never actually above the gross NAV, reducing accountedAssets too far
+        // and letting the next accrual mint a performance fee and staker rewards against nothing.
+        (uint256 grossNavBefore, ) = FundCalculationLibrary.activeTotalValueWithCompleteness(
+            address(this),
+            input.poolManagerLogic
+        );
         // A zero fair entitlement (extreme insolvency or an empty pool) would satisfy the lower
         // bound below trivially and let a real burn through for $0 — revert, as the pro-rata path
         // does for the same condition. completeBefore == 0 implies fairFusd == 0, so this also
@@ -529,6 +555,24 @@ library WithdrawalPlanLib {
         }
         uint256 minAllowed = target - (target * plan.minValueOutBps) / 10_000;
         if (result.valueDelta < minAllowed) revert IPoolLogic.ValueConservationViolated();
+
+        // SoftStack L-02: accountedAssetsReduction, on the gross basis — see the docs where
+        // grossNavBefore was read above. Reuses computeAccountedAssetsReduction() (the same
+        // formula the pro-rata path already uses, unchanged there) with the gross drop and the
+        // gross-basis overhang in place of the net-realizable ones, rather than duplicating its
+        // floor-at-zero-then-pro-rate-the-overhang arithmetic here.
+        (uint256 grossNavAfter, ) = FundCalculationLibrary.activeTotalValueWithCompleteness(
+            address(this),
+            input.poolManagerLogic
+        );
+        uint256 grossDrop = grossNavBefore > grossNavAfter ? grossNavBefore - grossNavAfter : 0;
+        result.accountedAssetsReduction = FundCalculationLibrary.computeAccountedAssetsReduction(
+            result.netFusd,
+            result.totalClaims,
+            accountedAssetsBefore,
+            grossNavBefore,
+            grossDrop
+        );
 
         // RECEIPT-SIDE CHECK. The two bounds above measure value leaving the NAV. That is not the
         // same as what the user received: (a) completeFundValue floors at zero, so when the pool

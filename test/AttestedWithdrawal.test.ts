@@ -85,10 +85,21 @@ async function deployAttestedWithdrawalFixture() {
 
   const pool = PoolLogic.attach(await poolProxy.getAddress()) as any;
 
+  // SoftStack L-02: both the plan path (WithdrawalPlanLib.executeWithdrawalPlan) and the queued
+  // finalize path (FundCalculationLibrary.finalizeReserveAndUpdateBaseline) now read the pool's
+  // gross active NAV — the same figure PoolLogic._accrueYield() ratchets accountedAssets up to —
+  // to size accountedAssetsReduction correctly. TestPoolManagerLogic's default totalFundValue()
+  // is a flat, manually-set number (see its own docs on dynamicTotalFundValue); no test in this
+  // file ever calls setTotalFundValue(), so there is nothing to preserve by leaving it off, and
+  // every asset/guard combination used throughout this file reports its balance dynamically
+  // (TestAssetGuard reads real ERC20 balances; the real selective guards used further down read
+  // real on-chain position state), so dynamic mode is exact everywhere in this file.
   const WithdrawalEscrow = await ethers.getContractFactory('WithdrawalEscrow');
   const withdrawalEscrow = await WithdrawalEscrow.deploy(await pool.getAddress());
   await withdrawalEscrow.waitForDeployment();
   await pool.connect(owner).initializeWithdrawalEscrow(await withdrawalEscrow.getAddress());
+  await poolManager.setPool(await pool.getAddress());
+  await poolManager.setDynamicTotalFundValue(true);
 
   const asset = await TestTokenLogic.deploy('Mock Asset', 'MA', 18);
   await asset.waitForDeployment();
@@ -3547,6 +3558,102 @@ describe('PoolLogic — attested selective withdrawal', () => {
         .to.emit(pool, 'AttestedWithdrawPlanExecuted')
         .withArgs(userAddress, plan.nonce, 0n)
         .and.to.emit(pool, 'CashWithdrawImmediateProRata');
+    });
+  });
+
+  describe('SoftStack L-02: accountedAssetsReduction must match the gross active NAV accrual compares against', () => {
+    // A leveraged position whose gross equity (100) exceeds its net-realizable value (99, a 1%
+    // modelled unwind cost — see IUnwindCostAwareGuard) sits alongside the fixture's plain asset,
+    // never touched by any plan or request below. PoolLogic._accrueYield() ratchets
+    // accountedAssets up to the GROSS NAV (poolManager.totalFundValue(), which sums
+    // guard.getBalance() and is not net of unwind cost — only of a genuine
+    // IDeficitReportingGuard deficit, which this position does not have). Before this fix, the
+    // withdrawal paths measured their "unrecognized overhang" share against the NET-REALIZABLE
+    // NAV instead, so a plan or request that never touches this leveraged position still read its
+    // static 1 fUSD unwind cost as overhang and over-reduced accountedAssets by the exiting
+    // claim's share of it — leaving accountedAssets below the post-withdrawal gross NAV and
+    // letting the next accrual mint a performance fee and staker rewards against nothing.
+    async function withLeveragedPosition() {
+      const f = await loadFixture(deployAttestedWithdrawalFixture);
+      const { poolManager, pool, fusd } = f;
+      const poolAddress = await pool.getAddress();
+
+      // deployAttestedWithdrawalFixture already enables dynamicTotalFundValue (see its own docs:
+      // it reads the gross NAV twice inside a single executeWithdrawalPlan() call, which the
+      // default flat totalFundValue() cannot reflect). Only the fee override is specific to this
+      // suite: 20% performance fee (matching the audit's own PoC) so a phantom NAV gap would be
+      // visible as a nonzero calculateAvailableManagerFee(), not just silently absorbed by the
+      // fixture's default 0 numerator.
+      await poolManager.setFees(2000n, 0n, 0n, 0n, 10_000n);
+
+      const lev = await (
+        await ethers.getContractFactory('TestTokenLogic')
+      ).deploy('Leveraged Position', 'LEV', 18);
+      await lev.waitForDeployment();
+      const levGuard = await (await ethers.getContractFactory('MockAssetGuard')).deploy(18);
+      await levGuard.waitForDeployment();
+      await levGuard.setBalance(ethers.parseUnits('100', 18));
+      await levGuard.setUnwindCostAwareGuard(true);
+      await levGuard.setNetRealizableBalance(ethers.parseUnits('99', 18));
+      await poolManager.setAssetGuard(await lev.getAddress(), await levGuard.getAddress());
+      await poolManager.setSupportedAsset(
+        await lev.getAddress(),
+        true,
+        ethers.parseUnits('1', 18),
+        18,
+      );
+
+      await fundPoolAndUser(f); // plain asset: 1000 to the pool, accountedAssets += 1000
+      // accountedAssets' own share of the leveraged position's gross value (100), so the fixture
+      // starts with no pre-existing overhang on the gross basis: accountedAssets == gross NAV.
+      await fusd.triggerIncrementAccountedAssets(poolAddress, ethers.parseUnits('100', 18));
+
+      return { ...f, lev, levGuard };
+    }
+
+    it('baseline: accountedAssets starts exactly equal to the gross NAV (plain + leveraged), with no fee pending', async () => {
+      const f = await withLeveragedPosition();
+      const { pool, poolManager } = f;
+      const grossNav = ethers.parseUnits('1100', 18); // 1000 plain + 100 leveraged (gross)
+      expect(await poolManager.totalFundValue()).to.equal(grossNav);
+      expect(await pool.accountedAssets()).to.equal(grossNav);
+      expect(await pool.calculateAvailableManagerFee()).to.equal(0n);
+    });
+
+    it('a token-only plan leaves accountedAssets exactly equal to the post-withdrawal gross NAV — no phantom manager fee', async () => {
+      const f = await withLeveragedPosition();
+      const { pool, poolManager, asset, user, attester } = f;
+      const userAddress = await user.getAddress();
+      const assetAddress = await asset.getAddress();
+
+      const plan = buildPlan({ userAddress, assetAddress }); // fixed 100, plain asset only
+      const signature = await signPlan(f, plan, attester);
+      await pool.connect(user).withdrawCashImmediateWithPlan(plan, signature, []);
+
+      // The leveraged position was never touched: gross NAV fell by exactly the 100 of plain
+      // asset paid out (1100 - 100 = 1000), and accountedAssets must track it exactly — not the
+      // pre-fix 999 (which read the leveraged position's static 1 fUSD unwind cost as overhang).
+      const grossNavAfter = ethers.parseUnits('1000', 18);
+      expect(await poolManager.totalFundValue()).to.equal(grossNavAfter);
+      expect(await pool.accountedAssets()).to.equal(grossNavAfter);
+      expect(await pool.calculateAvailableManagerFee()).to.equal(0n);
+    });
+
+    it('the queued finalize path (finalizeCashWithdraw) is fixed identically: no phantom manager fee after a token-only finalize', async () => {
+      const f = await withLeveragedPosition();
+      const { pool, poolManager, asset, user, manager } = f;
+      const assetAddress = await asset.getAddress();
+
+      await pool.connect(manager).setImmediateWithdrawEnabled(false); // queue mode
+      // fundPoolAndUser (inside withLeveragedPosition) already minted and approved `amount` of
+      // fUSD for `user` — no extra funding needed.
+      await pool.connect(user).requestCashWithdraw(amount, assetAddress);
+      await pool.connect(manager).finalizeCashWithdraw(1);
+
+      const grossNavAfter = ethers.parseUnits('1000', 18);
+      expect(await poolManager.totalFundValue()).to.equal(grossNavAfter);
+      expect(await pool.accountedAssets()).to.equal(grossNavAfter);
+      expect(await pool.calculateAvailableManagerFee()).to.equal(0n);
     });
   });
 });

@@ -1177,7 +1177,7 @@ contract PoolLogic is
         _updateFeesAndRewardsFor(plan.user);
 
         WithdrawalPlanLib.PlanExecutionResult memory result = WithdrawalPlanLib
-            .executeWithdrawalPlan(plan, attesterSignature, complexAssetsData);
+            .executeWithdrawalPlan(plan, attesterSignature, complexAssetsData, accountedAssets);
 
         consumedPlanNonce[plan.user][plan.nonce] = true;
         attestedWithdrawVolume = AttestedWithdrawVolume(
@@ -1185,21 +1185,12 @@ contract PoolLogic is
             result.newVolumeAccumulated
         );
 
-        uint256 reduction = FundCalculationLibrary.computeAccountedAssetsReduction(
-            result.netFusd,
-            result.totalClaims,
-            accountedAssets,
-            result.completeFundValue,
-            result.valueDelta
-        );
-        // The surcharge needs no adjustment here. valueDelta is the real value that left the fund
-        // and the user receives only `target`, so the withheld slice is already retained by the
-        // smaller NAV drop; reducing accountedAssets by valueDelta (plus the FNA-42 loss share)
-        // keeps it equal to NAV — no overhang and no yield gap, so nothing is skimmed as
-        // performance fee. Subtracting surchargeAmount again would leave accountedAssets above
-        // NAV and swallow the next genuine yield.
-        if (accountedAssets < reduction) revert InvalidFundValue();
-        accountedAssets -= reduction;
+        // SoftStack L-02: result.accountedAssetsReduction is computed entirely inside
+        // executeWithdrawalPlan(), against the gross active NAV accrual itself compares
+        // accountedAssets against — see that library's own docs. Only the write (and its
+        // underflow check) stay here, since they touch accountedAssets directly.
+        if (accountedAssets < result.accountedAssetsReduction) revert InvalidFundValue();
+        accountedAssets -= result.accountedAssetsReduction;
 
         outAssets = result.outAssets;
         outAmounts = result.outAmounts;
@@ -1284,15 +1275,8 @@ contract PoolLogic is
         // see FundCalculationLibrary.computeFinalizeAssetAmount and FNA-05. FUSD backing this
         // request is transferred-not-burned until claimCashWithdraw, so totalSupply() already
         // reflects outstanding claims as of this finalization.
-        (
-            uint256 assetAmount,
-            uint256 totalClaims,
-            uint256 completeFundValue
-        ) = FundCalculationLibrary.computeFinalizeAssetAmount(
-                address(this),
-                asset,
-                fusdNetForAsset
-            );
+        (uint256 assetAmount, uint256 totalClaims, ) = FundCalculationLibrary
+            .computeFinalizeAssetAmount(address(this), asset, fusdNetForAsset);
         if (assetAmount == 0) revert ZeroAmount();
 
         // Finalization does not transfer assets to the user; assets remain on the contract until claim.
@@ -1323,10 +1307,12 @@ contract PoolLogic is
         // that function's docs for why that was wrong). Delegated entirely to
         // FundCalculationLibrary purely to keep this call site's own bytecode under the
         // EIP-170 size limit.
-        // FNA-42: also feeds this request's own netFusd/totalClaims/completeFundValue through so
-        // the baseline reduction accounts for this claim's own share of any pre-existing
-        // unrecognized loss, not just the dollars physically moved to escrow — see
-        // _computeAccountedAssetsReduction's own docs.
+        // FNA-42: also feeds this request's own netFusd/totalClaims through so the baseline
+        // reduction accounts for this claim's own share of any pre-existing unrecognized loss,
+        // not just the dollars physically moved to escrow — see _computeAccountedAssetsReduction's
+        // own docs. SoftStack L-02: the library reads the gross active NAV itself now, rather than
+        // being passed computeFinalizeAssetAmount's net-realizable completeFundValue — see
+        // finalizeReserveAndUpdateBaseline's own docs.
         accountedAssets = FundCalculationLibrary.finalizeReserveAndUpdateBaseline(
             poolManagerLogic,
             withdrawalEscrow,
@@ -1334,7 +1320,6 @@ contract PoolLogic is
             assetAmount,
             fusdNetForAsset,
             totalClaims,
-            completeFundValue,
             accountedAssets
         );
 

@@ -116,10 +116,14 @@ library FundCalculationLibrary {
     ///      `IPoolManagerLogic.totalFundValue()`'s real implementation actually returns (e.g. any
     ///      override or non-strictly-per-asset-guard computation), where this function must
     ///      match it exactly except for the reserved subtraction.
+    /// @dev public (not external): SoftStack L-02's finalizeReserveAndUpdateBaseline() below also
+    ///      calls this by bare name from within this same library — same reasoning as
+    ///      totalValueWithCompleteness()'s own doc comment above (an `external` function cannot be
+    ///      invoked internally by name under delegatecall without incorrectly rebinding `this`).
     function activeTotalValueWithCompleteness(
         address pool,
         address poolManagerLogic
-    ) external view returns (uint256 total, bool complete) {
+    ) public view returns (uint256 total, bool complete) {
         (total, complete) = totalValueWithCompleteness(poolManagerLogic);
 
         IHasSupportedAsset.Asset[] memory assets = IHasSupportedAsset(poolManagerLogic)
@@ -756,10 +760,23 @@ library FundCalculationLibrary {
     ///      overhang-blind gap as the immediate path (see _computeAccountedAssetsReduction's own
     ///      docs) — reducing the baseline by only the dollars reserved, not by this request's own
     ///      share of any pre-existing unrecognized loss, overstated the baseline for whichever
-    ///      claims remained. `netFusd`/`totalClaims`/`valueBefore` must come from the same
-    ///      finalize call's own computeFinalizeAssetAmount() output (`fusdNetForAsset`,
-    ///      `totalClaims`, `completeFundValue` respectively) so the overhang is measured against
-    ///      the exact NAV the haircut itself was just computed from.
+    ///      claims remained. `netFusd`/`totalClaims` must come from the same finalize call's own
+    ///      computeFinalizeAssetAmount() output (`fusdNetForAsset`, `totalClaims` respectively) so
+    ///      the share is measured against the exact claims the haircut itself was just computed
+    ///      from.
+    /// @dev SoftStack L-02: the overhang term above must be `accountedAssetsBefore` versus the
+    ///      GROSS active NAV that `_accrueYield()` actually ratchets `accountedAssets` up to
+    ///      (`activeTotalValueWithCompleteness()`, read fresh below) — not
+    ///      `computeFinalizeAssetAmount()`'s own `completeFundValue`, which is net of every
+    ///      guard's unwind cost (see IUnwindCostAwareGuard). A finalize always moves a single
+    ///      plain deposit asset (requestCashWithdraw() requires isDepositAsset()), so `valueDelta`
+    ///      below already prices that leg on the same gross, no-unwind-cost basis; it was only the
+    ///      overhang term that read the wrong basis. Previously this let a finalize of a
+    ///      deficit-free asset retire more of `accountedAssets` than its real share whenever ANY
+    ///      OTHER guard in the pool carried an unwind cost, because that guard's static cost was
+    ///      misread as "unrecognized loss" even when accountedAssets was never actually above the
+    ///      gross NAV the next accrual compares against — see WithdrawalPlanLib.executeWithdrawalPlan's
+    ///      identical fix on the plan path for the full reasoning and a worked example.
     function finalizeReserveAndUpdateBaseline(
         address poolManagerLogic,
         address escrow,
@@ -767,11 +784,14 @@ library FundCalculationLibrary {
         uint256 assetAmount,
         uint256 netFusd,
         uint256 totalClaims,
-        uint256 valueBefore,
         uint256 accountedAssetsBefore
     ) external returns (uint256 newAccountedAssets) {
         if (escrow == address(0)) revert EscrowNotSet();
 
+        (uint256 grossNavBefore, ) = activeTotalValueWithCompleteness(
+            address(this),
+            poolManagerLogic
+        );
         uint256 valueDelta = IPoolManagerLogic(poolManagerLogic).assetValue(asset, assetAmount);
 
         IERC20(asset).forceApprove(escrow, assetAmount);
@@ -781,7 +801,7 @@ library FundCalculationLibrary {
             netFusd,
             totalClaims,
             accountedAssetsBefore,
-            valueBefore,
+            grossNavBefore,
             valueDelta
         );
         newAccountedAssets = accountedAssetsBefore > reduction

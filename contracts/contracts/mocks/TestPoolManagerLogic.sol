@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
 
 interface IMintManagerFeePool {
     function mintManagerFee() external;
@@ -93,8 +94,36 @@ contract TestPoolManagerLogic {
 
     // ---- Fund value ----
 
+    // SoftStack L-02: by default totalFundValue()/totalFundValueWithCompleteness() return the
+    // flat, manually-set _totalFundValue below — fine for tests that only need a fixed NAV, but
+    // it cannot reflect a real before/after NAV drop measured atomically within a single
+    // transaction (as WithdrawalPlanLib.executeWithdrawalPlan's gross-NAV accounting fix does).
+    // Opt-in dynamic mode instead sums each supported asset's own guard.getBalance() at current
+    // price, exactly mirroring the real PoolManagerLogic.totalFundValue()'s computation (gross,
+    // i.e. NOT net of any guard's own unwind cost — see IUnwindCostAwareGuard). Defaults to false
+    // so every existing test that relies on setTotalFundValue() is unaffected.
+    bool public dynamicTotalFundValue;
+
+    function setDynamicTotalFundValue(bool enabled) external {
+        dynamicTotalFundValue = enabled;
+    }
+
+    function _dynamicTotalFundValue() private view returns (uint256 total) {
+        for (uint256 i = 0; i < _assetList.length; i++) {
+            address asset = _assetList[i];
+            if (!supportedAssets[asset]) continue;
+            address guard = assetGuard[asset];
+            if (guard == address(0)) continue;
+            uint256 balance = IAssetGuard(guard).getBalance(pool, asset);
+            uint256 price = assetPrice[asset];
+            uint8 dec = assetDecimals[asset];
+            if (price == 0 || balance == 0) continue;
+            total += (balance * price) / (10 ** dec);
+        }
+    }
+
     function totalFundValue() external view returns (uint256) {
-        return _totalFundValue;
+        return dynamicTotalFundValue ? _dynamicTotalFundValue() : _totalFundValue;
     }
 
     // FNA-04: PoolLogic._accrueYield() consumes this (via FundCalculationLibrary's low-level-call
@@ -109,7 +138,7 @@ contract TestPoolManagerLogic {
     }
 
     function totalFundValueWithCompleteness() external view returns (uint256, bool) {
-        return (_totalFundValue, valuationComplete);
+        return (dynamicTotalFundValue ? _dynamicTotalFundValue() : _totalFundValue, valuationComplete);
     }
 
     function factory() external view returns (address) {
