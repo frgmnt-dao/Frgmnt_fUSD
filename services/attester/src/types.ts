@@ -44,8 +44,10 @@ export interface PlanRequest {
   user: string;
   /// fUSD to redeem, 18 decimals.
   fusdAmount: bigint;
-  /// Optional: draw only from these assets (must be in `allowedAssets`).
-  assets?: string[];
+  // SoftStack L-01: deliberately no assets field. The asset mix is chosen by the attester from
+  // ServiceConfig.allowedAssets alone (see composer.ts) — letting the requester steer it would
+  // let them take the healthiest/most liquid asset and leave the rest for remaining holders
+  // (design doc section 3.1, adverse selection).
 }
 
 export interface AssetSnapshot {
@@ -106,7 +108,6 @@ export type RefusalCode =
   | 'ATTESTER_MISMATCH'
   | 'COOLDOWN_ACTIVE'
   | 'AMOUNT_OUT_OF_RANGE'
-  | 'ASSET_NOT_ALLOWED'
   | 'INSUFFICIENT_LIQUIDITY'
   | 'VOLUME_CAP'
   | 'OUTSTANDING_CAP'

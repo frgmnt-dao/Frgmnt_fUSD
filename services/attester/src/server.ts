@@ -1,6 +1,6 @@
 // Minimal HTTP front for the attester service, on Node's built-in http module (no new packages).
 //
-//   POST /v1/withdrawal-plan   { "user": "0x..", "fusdAmount": "<wei as decimal string>", "assets": ["0x.."]? }
+//   POST /v1/withdrawal-plan   { "user": "0x..", "fusdAmount": "<wei as decimal string>" }
 //   GET  /healthz
 //
 // Every request must carry `Authorization: Bearer <API key>`. Bind to a private interface and put a
@@ -15,7 +15,6 @@ import type { AttesterService } from './service';
 import { RefusalError, type PlanRequest, type SignedPlan } from './types';
 
 const MAX_BODY_BYTES = 4096;
-const MAX_ASSETS = 50;
 
 export interface ServerOptions {
   apiKey: string;
@@ -74,19 +73,10 @@ export function parseRequest(raw: string): PlanRequest {
   if (typeof body.fusdAmount !== 'string' || !/^[1-9][0-9]{0,40}$/.test(body.fusdAmount)) {
     throw new HttpError(400, 'INVALID_AMOUNT');
   }
-  let assets: string[] | undefined;
-  if (body.assets !== undefined) {
-    if (
-      !Array.isArray(body.assets) ||
-      body.assets.length === 0 ||
-      body.assets.length > MAX_ASSETS ||
-      !body.assets.every((a: unknown) => typeof a === 'string' && isAddress(a))
-    ) {
-      throw new HttpError(400, 'INVALID_ASSETS');
-    }
-    assets = body.assets.map((a: string) => getAddress(a));
-  }
-  return { user: getAddress(body.user), fusdAmount: BigInt(body.fusdAmount), assets };
+  // SoftStack L-01: an `assets` field in the request body, if a caller sends one, is
+  // deliberately never read — PlanRequest has no such field (see types.ts). Composition draws
+  // only from ServiceConfig.allowedAssets.
+  return { user: getAddress(body.user), fusdAmount: BigInt(body.fusdAmount) };
 }
 
 export function serialiseSigned(signed: SignedPlan): unknown {

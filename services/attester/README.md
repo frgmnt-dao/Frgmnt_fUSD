@@ -46,24 +46,27 @@ on a private network; the API key only stops casual callers.
 `POST /v1/withdrawal-plan` with `Authorization: Bearer <API key>`:
 
 ```json
-{ "user": "0x…", "fusdAmount": "100000000000000000000", "assets": ["0x…"] }
+{ "user": "0x…", "fusdAmount": "100000000000000000000" }
 ```
 
-`fusdAmount` is a decimal string in wei; `assets` is optional. On success (200) the response holds
-`plan`, `signature`, `expiresAt`, `expectedValue` and `surchargeAmount` (all numbers as decimal
-strings). The user then calls `withdrawCashImmediateWithPlan(plan, signature, [])` from their own
-address (after approving the pool to burn their fUSD).
+`fusdAmount` is a decimal string in wei. There is deliberately no way to request specific assets:
+the composed mix is always chosen by the service from its own configured `allowedAssets`, never
+by the caller — see "What it does and does not protect" below. An `assets` field in the body, if
+sent, is silently ignored. On success (200) the response holds `plan`, `signature`, `expiresAt`,
+`expectedValue` and `surchargeAmount` (all numbers as decimal strings). The user then calls
+`withdrawCashImmediateWithPlan(plan, signature, [])` from their own address (after approving the
+pool to burn their fUSD).
 
-| Status | Meaning                                                                                |
-| ------ | -------------------------------------------------------------------------------------- |
-| 400    | Malformed body (`INVALID_JSON`, `INVALID_USER`, `INVALID_AMOUNT`, `INVALID_ASSETS`, …) |
-| 401    | Missing or wrong API key                                                               |
-| 409    | A deliberate refusal; the body has a machine-readable `error` code and a `message`     |
-| 413    | Body over 4 KiB                                                                        |
-| 500    | Unexpected error; no detail in the response, the operator's log has it                 |
+| Status | Meaning                                                                    |
+| ------ | --------------------------------------------------------------------------- |
+| 400    | Malformed body (`INVALID_JSON`, `INVALID_USER`, `INVALID_AMOUNT`, …)        |
+| 401    | Missing or wrong API key                                                   |
+| 409    | A deliberate refusal; the body has a machine-readable `error` code and a `message` |
+| 413    | Body over 4 KiB                                                            |
+| 500    | Unexpected error; no detail in the response, the operator's log has it     |
 
 Refusal codes: `FEATURE_DISABLED`, `ATTESTER_MISMATCH`, `COOLDOWN_ACTIVE`, `AMOUNT_OUT_OF_RANGE`,
-`ASSET_NOT_ALLOWED`, `INSUFFICIENT_LIQUIDITY`, `VOLUME_CAP`, `OUTSTANDING_CAP`, `RATE_LIMITED`,
+`INSUFFICIENT_LIQUIDITY`, `VOLUME_CAP`, `OUTSTANDING_CAP`, `RATE_LIMITED`,
 `SURCHARGE_TOO_HIGH`, `SIMULATION_FAILED` (the message names the pool's revert, for example a
 missing fUSD allowance), `NOT_SOLVENT_FOR_PLAN`, `CHAIN_STATE_UNAVAILABLE`.
 

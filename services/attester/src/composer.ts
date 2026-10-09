@@ -78,19 +78,13 @@ export function composePlan(
   if (!snap.userIsManager && snap.userCooldownRemaining > 0n) {
     throw new RefusalError('COOLDOWN_ACTIVE', 'the user is still inside the exit cooldown');
   }
+  // SoftStack L-01: the asset set a plan may draw from comes only from server configuration
+  // (cfg.allowedAssets), never from the request. Design doc section 3.1 reserves this choice
+  // for the attester: a requester who can choose takes the healthiest/most liquid asset and
+  // leaves the rest for whoever exits later (adverse selection). PlanRequest has no assets
+  // field (see types.ts), so an in-process caller cannot even construct one; a raw HTTP caller
+  // sending one is simply ignored (see server.ts's parseRequest).
   const allowed = new Set(cfg.allowedAssets.map((a) => getAddress(a)));
-  const requested = request.assets?.map((a) => getAddress(a));
-  if (requested) {
-    if (requested.length === 0 || new Set(requested).size !== requested.length) {
-      throw new RefusalError(
-        'ASSET_NOT_ALLOWED',
-        'assets must be a non-empty list without repeats',
-      );
-    }
-    for (const a of requested) {
-      if (!allowed.has(a)) throw new RefusalError('ASSET_NOT_ALLOWED', `asset ${a} is not allowed`);
-    }
-  }
   if (snap.fairFusd === 0n) {
     throw new RefusalError('NOT_SOLVENT_FOR_PLAN', 'the pool reports a zero fair entitlement');
   }
@@ -134,10 +128,9 @@ export function composePlan(
   // 5. Choose legs: pro rata by what each allowed asset can pay out now, skipping any asset the
   //    pool cannot serve through a whole-asset draw.
   const aim = aimValue(quote.target, cfg.minValueOutBps);
-  const pick = requested ? new Set(requested) : allowed;
   const eligible = snap.assets.filter(
     (a) =>
-      pick.has(a.asset) &&
+      allowed.has(a.asset) &&
       a.pendingRequests === 0n &&
       a.reservedBalance === 0n &&
       a.balance > 0n &&

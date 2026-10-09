@@ -120,20 +120,29 @@ describe('Attester service', () => {
       expect(await second.balanceOf(f.userAddress)).to.be.greaterThan(E18('24.8'));
     });
 
-    it('draws only from the assets the request names', async () => {
+    it('SoftStack L-01: an assets field in the request is ignored — composition always comes from allowedAssets, never the caller', async () => {
       const f = await ready();
       const second = await addSecondAsset(f);
       const secondAddress = await second.getAddress();
       const service = f.service({ allowedAssets: [f.assetAddress, secondAddress] });
+      // A caller cannot express "draw only from secondAddress" through the typed API at all
+      // (PlanRequest has no assets field). This simulates a raw/legacy caller that still sends
+      // one anyway (e.g. over HTTP, bypassing TypeScript): it must be silently ignored, not
+      // honored, so the attester — not the requester — always controls the mix (design doc 3.1).
       const signed = await service.issue({
         user: f.userAddress,
         fusdAmount: E18('100'),
         assets: [secondAddress],
-      });
-      expect(signed.plan.allocations).to.have.length(1);
-      expect(signed.plan.allocations[0].asset).to.equal(secondAddress);
+      } as any);
+      expect(signed.plan.allocations.map((a) => a.asset)).to.have.members([
+        f.assetAddress,
+        secondAddress,
+      ]);
       await execute(f, signed);
-      expect(await f.asset.balanceOf(f.poolAddress)).to.equal(E18('1000'));
+      // Pro-rata by value across both allowed assets, exactly as with no assets field at all —
+      // the requester gained no ability to cherry-pick the healthier/more liquid asset.
+      expect(await f.asset.balanceOf(f.userAddress)).to.be.greaterThan(E18('49.7'));
+      expect(await second.balanceOf(f.userAddress)).to.be.greaterThan(E18('24.8'));
     });
 
     it('quotes the surcharge exactly: the signed ceiling covers it and the pool withholds the quoted amount', async () => {
@@ -221,18 +230,12 @@ describe('Attester service', () => {
       expect(signed.plan.user).to.equal(managerAddress);
     });
 
-    it('refuses amounts outside the configured range and assets that are not allowed', async () => {
+    it('refuses amounts outside the configured range', async () => {
       const f = await ready();
       const service = f.service({ maxFusdAmount: E18('50') });
       await expectRefusal(
         service.issue({ user: f.userAddress, fusdAmount: E18('100') }),
         'AMOUNT_OUT_OF_RANGE',
-      );
-      await expectRefusal(
-        f
-          .service()
-          .issue({ user: f.userAddress, fusdAmount: E18('10'), assets: [f.other.address] }),
-        'ASSET_NOT_ALLOWED',
       );
     });
 
@@ -596,8 +599,10 @@ describe('Attester service', () => {
         expect((await post({ ...valid, fusdAmount: '-1' })).status).to.equal(400);
         expect((await post({ ...valid, fusdAmount: '0' })).status).to.equal(400);
         expect((await post({ ...valid, fusdAmount: 1 })).status).to.equal(400);
-        expect((await post({ ...valid, assets: [] })).status).to.equal(400);
-        expect((await post({ ...valid, assets: ['x'] })).status).to.equal(400);
+        // SoftStack L-01: an assets field is not validated at all — it is read by nothing and
+        // cannot cause a 400 (malformed or not), because parseRequest never looks at it.
+        expect((await post({ ...valid, assets: [] })).status).to.equal(200);
+        expect((await post({ ...valid, assets: ['x'] })).status).to.equal(200);
         expect((await post('x'.repeat(5000))).status).to.equal(413);
         expect((await post(valid, API_KEY, '/other')).status).to.equal(404);
         expect((await fetch(base + '/healthz')).status).to.equal(200);
@@ -640,8 +645,8 @@ describe('Attester service', () => {
       expect(() => createAttesterServer(f.service(), { apiKey: 'short' })).to.throw('API key');
     });
 
-    it('parseRequest normalises addresses and accepts an asset list', () => {
-      const parsed = parseRequest(
+    it('parseRequest normalises the address and drops an assets field entirely (SoftStack L-01)', () => {
+      const parsed: any = parseRequest(
         JSON.stringify({
           user: '0x00000000000000000000000000000000000000a1',
           fusdAmount: '5',
@@ -650,9 +655,8 @@ describe('Attester service', () => {
       );
       expect(parsed.user).to.equal('0x00000000000000000000000000000000000000A1');
       expect(parsed.fusdAmount).to.equal(5n);
-      expect(parsed.assets).to.deep.equal(
-        ['0x00000000000000000000000000000000000000b2'].map(ethers.getAddress),
-      );
+      expect(parsed.assets).to.equal(undefined);
+      expect(Object.keys(parsed)).to.have.members(['user', 'fusdAmount']);
     });
   });
 });
