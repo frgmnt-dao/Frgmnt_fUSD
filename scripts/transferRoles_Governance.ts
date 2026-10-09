@@ -221,11 +221,13 @@ async function main() {
   }
 
   console.log('\nDone. Every core-contract admin/owner role, and all three Transparent');
-  console.log('proxies\' ProxyAdmin contracts, are now the Timelock (verified above). Future');
+  console.log("proxies' ProxyAdmin contracts, are now the Timelock (verified above). Future");
   console.log('changes to contract guards, asset guards, supported asset price feeds, the');
   console.log('governance/assetHandler references, TokenLogic admin operations,');
   console.log('PoolLogic.initializeAutoCompounding(), and any implementation upgrade of');
-  console.log('AssetHandler, PoolManagerLogic or PoolLogic all require a Timelock proposal + delay.');
+  console.log(
+    'AssetHandler, PoolManagerLogic or PoolLogic all require a Timelock proposal + delay.',
+  );
 }
 
 main().catch((error) => {

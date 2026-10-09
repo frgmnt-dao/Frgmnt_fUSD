@@ -57,13 +57,13 @@ sent, is silently ignored. On success (200) the response holds `plan`, `signatur
 `withdrawCashImmediateWithPlan(plan, signature, [])` from their own address (after approving the
 pool to burn their fUSD).
 
-| Status | Meaning                                                                    |
-| ------ | --------------------------------------------------------------------------- |
-| 400    | Malformed body (`INVALID_JSON`, `INVALID_USER`, `INVALID_AMOUNT`, …)        |
-| 401    | Missing or wrong API key                                                   |
+| Status | Meaning                                                                            |
+| ------ | ---------------------------------------------------------------------------------- |
+| 400    | Malformed body (`INVALID_JSON`, `INVALID_USER`, `INVALID_AMOUNT`, …)               |
+| 401    | Missing or wrong API key                                                           |
 | 409    | A deliberate refusal; the body has a machine-readable `error` code and a `message` |
-| 413    | Body over 4 KiB                                                            |
-| 500    | Unexpected error; no detail in the response, the operator's log has it     |
+| 413    | Body over 4 KiB                                                                    |
+| 500    | Unexpected error; no detail in the response, the operator's log has it             |
 
 Refusal codes: `FEATURE_DISABLED`, `ATTESTER_MISMATCH`, `COOLDOWN_ACTIVE`, `AMOUNT_OUT_OF_RANGE`,
 `INSUFFICIENT_LIQUIDITY`, `VOLUME_CAP`, `OUTSTANDING_CAP`, `RATE_LIMITED`,

@@ -138,7 +138,10 @@ contract TestPoolManagerLogic {
     }
 
     function totalFundValueWithCompleteness() external view returns (uint256, bool) {
-        return (dynamicTotalFundValue ? _dynamicTotalFundValue() : _totalFundValue, valuationComplete);
+        return (
+            dynamicTotalFundValue ? _dynamicTotalFundValue() : _totalFundValue,
+            valuationComplete
+        );
     }
 
     function factory() external view returns (address) {
