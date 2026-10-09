@@ -3752,6 +3752,135 @@ describe('PoolLogic — attested selective withdrawal', () => {
       expect(await pool.calculateAvailableManagerFee()).to.equal(0n);
     });
   });
+
+  describe('SoftStack L-05: a floored NAV must not hide a direct-leg over-draw when the deficit comes from another guard', () => {
+    // completeFundValue floors at zero, so once a plan's own draw drives it there, valueDelta can
+    // only ever read as completeBefore — not however much real value actually left. The
+    // receipt-side check closes this for every leg it can measure (delivered as a token), but a
+    // "direct leg" — value a guard pays through its own transactions, never reported as
+    // (withdrawAsset, withdrawAmount) — is invisible to it by construction. The accepted
+    // justification for exempting direct legs from that check ("those guards refuse debt, so no
+    // deficit is involved") does not hold here: the deficit is a POOL-LEVEL sum over every guard,
+    // so it can come from a different, untouched guard while the direct-leg guard itself holds a
+    // perfectly debt-free position.
+    async function ready() {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const assetAddress = await fixture.asset.getAddress(); // debt-free, direct-leg capable
+      const lev = await (
+        await ethers.getContractFactory('TestTokenLogic')
+      ).deploy('Leveraged', 'LEV', 18);
+      await lev.waitForDeployment();
+      const levGuard: any = await (
+        await ethers.getContractFactory('TestDeficitAssetGuard')
+      ).deploy();
+      await levGuard.waitForDeployment();
+      await fixture.poolManager.setAssetGuard(await lev.getAddress(), await levGuard.getAddress());
+      await fixture.poolManager.setSupportedAsset(
+        await lev.getAddress(),
+        true,
+        ethers.parseUnits('1', 18),
+        18,
+      );
+      return { ...fixture, assetAddress, lev, levGuard };
+    }
+
+    it("a last claimant can no longer draw a debt-free direct leg beyond the floored NAV by the other guard's deficit — reverts instead", async () => {
+      const f = await ready();
+      const { pool, fusd, asset, assetGuard, user, attester } = f;
+      const poolAddr = await pool.getAddress();
+
+      // Pool holds 100 of the debt-free asset; the OTHER (untouched) guard reports a deficit of
+      // 40 -> NAV 60. The only claimant holds exactly 60 fUSD.
+      await asset.mint(poolAddr, ethers.parseUnits('100', 18));
+      await f.levGuard.setDeficit(ethers.parseUnits('40', 18));
+      await fusd.mint(await user.getAddress(), ethers.parseUnits('60', 18));
+      await fusd.connect(user).approve(poolAddr, ethers.MaxUint256);
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('60', 18));
+
+      // The debt-free asset's guard pays through its OWN transaction (a direct leg): it sends
+      // the FULL 100 to the user, independent of whatever the library computes from fixedAmount.
+      await assetGuard.setWithdrawMode(true, true, 10_000);
+      await assetGuard.setTransaction(
+        await asset.getAddress(),
+        asset.interface.encodeFunctionData('transfer', [
+          await user.getAddress(),
+          ethers.parseUnits('100', 18),
+        ]),
+      );
+
+      const plan = buildPlan({
+        ...f,
+        userAddress: await user.getAddress(),
+        fusdAmount: ethers.parseUnits('60', 18),
+        minValueOutBps: 100n,
+        allocations: [
+          {
+            asset: f.assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: ethers.parseUnits('50', 18),
+          },
+        ],
+      });
+      const sig = await signPlan(f, plan, attester);
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+      // Nothing moved: the direct leg's transfer only happens inside the same transaction that
+      // reverted.
+      expect(await asset.balanceOf(await user.getAddress())).to.equal(0n);
+      expect(await asset.balanceOf(poolAddr)).to.equal(ethers.parseUnits('100', 18));
+    });
+
+    it('SoftStack L-05 wider form: a holder of the 0.01 fUSD minimum can no longer drain the whole debt-free direct leg when the NAV is at the dust floor', async () => {
+      const f = await ready();
+      const { pool, fusd, asset, assetGuard, user, other, attester } = f;
+      const poolAddr = await pool.getAddress();
+
+      // Debt-free direct-leg position worth 1000; an underwater leveraged position (a different,
+      // untouched guard) whose deficit leaves the floored NAV at 5e14 wei — matching the
+      // finding's own numbers exactly.
+      await asset.mint(poolAddr, ethers.parseUnits('1000', 18));
+      await f.levGuard.setDeficit(ethers.parseUnits('1000', 18) - 5n * 10n ** 14n);
+      // Alice (other) holds 999.99 fUSD, Bob (user) holds the 0.01 minimum. Claims 1000 total.
+      await fusd.mint(await other.getAddress(), ethers.parseUnits('999.99', 18));
+      await fusd.mint(await user.getAddress(), ethers.parseUnits('0.01', 18));
+      await fusd.connect(user).approve(poolAddr, ethers.MaxUint256);
+      await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('1000', 18));
+
+      await assetGuard.setWithdrawMode(true, true, 10_000);
+      await assetGuard.setTransaction(
+        await asset.getAddress(),
+        asset.interface.encodeFunctionData('transfer', [
+          await user.getAddress(),
+          ethers.parseUnits('1000', 18),
+        ]),
+      );
+
+      const plan = buildPlan({
+        ...f,
+        userAddress: await user.getAddress(),
+        fusdAmount: ethers.parseUnits('0.01', 18),
+        minValueOutBps: 100n,
+        allocations: [
+          {
+            asset: f.assetAddress,
+            useFixedAmount: true,
+            portion: 0n,
+            fixedAmount: ethers.parseUnits('500', 18),
+          },
+        ],
+      });
+      const sig = await signPlan(f, plan, attester);
+      await expectRevert(
+        pool.connect(user).withdrawCashImmediateWithPlan(plan, sig, []),
+        'ValueConservationViolated',
+      );
+      expect(await asset.balanceOf(await user.getAddress())).to.equal(0n);
+      expect(await asset.balanceOf(poolAddr)).to.equal(ethers.parseUnits('1000', 18));
+    });
+  });
 });
 
 describe('PoolLogic — live-upgrade migration sequence (transparent proxy, ProxyAdmin as msg.sender)', () => {

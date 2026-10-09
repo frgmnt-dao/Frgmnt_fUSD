@@ -549,6 +549,19 @@ library WithdrawalPlanLib {
             1
         );
         if (completeBefore < completeAfter) revert IPoolLogic.InvalidFundValue();
+        // SoftStack L-05: completeFundValue floors at zero, so once a plan's own draw drives it
+        // to exactly zero, valueDelta below can only ever read as completeBefore — however much
+        // REAL value actually left the pool. The receipt-side check further down closes this for
+        // every leg it can measure (delivered as a token), but a direct leg (paid through a
+        // guard's own transactions — Aave V4 Spoke, Uniswap V3, Morpho/Aave V3 without debt) is
+        // invisible to it by construction, and KI-ACC-02's "no deficit is involved" premise for
+        // exempting direct legs from that check does not hold here: the deficit that floors this
+        // NAV can come from a DIFFERENT, untouched guard while the direct-leg guard itself holds
+        // a debt-free position. Refusing outright when both conditions hold is the only way to
+        // bound a direct leg's outflow once the yardstick that would normally bound it is gone;
+        // a last claimant who legitimately empties the pool through a direct leg simply falls
+        // back to the pro-rata path instead.
+        if (completeAfter == 0 && hasDirectLeg) revert IPoolLogic.ValueConservationViolated();
         result.valueDelta = completeBefore - completeAfter;
         if (result.valueDelta > target + DUST_TOLERANCE) {
             revert IPoolLogic.ValueConservationViolated();
