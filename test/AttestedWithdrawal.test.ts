@@ -2638,6 +2638,47 @@ describe('PoolLogic — attested selective withdrawal', () => {
       await expectRevert(pool.connect(other).activateWithdrawalAttester(), 'NoRotationPending');
     });
 
+    it('SoftStack L-06: the factoryOwner stop also revokes the currently-active attester, not just future rotations', async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, owner, attester } = fixture;
+      const activeAttester = await attester.getAddress();
+      expect(await pool.withdrawalAttester()).to.equal(activeAttester);
+
+      const receipt = await (await pool.connect(owner).setAttestedWithdrawEnabled(false)).wait();
+      expect(await pool.withdrawalAttester()).to.equal(ethers.ZeroAddress);
+      // Emits the same WithdrawalAttesterActivated event a normal rotation does, so existing
+      // monitoring built around that event catches a revocation too.
+      await expect(receipt)
+        .to.emit(pool, 'WithdrawalAttesterActivated')
+        .withArgs(activeAttester, ethers.ZeroAddress);
+
+      // Re-enabling does not restore it: the feature stays functionally unusable (no address can
+      // produce a signature withdrawalAttester() would accept) until a fresh rotation completes.
+      await pool.connect(owner).setAttestedWithdrawEnabled(true);
+      expect(await pool.withdrawalAttester()).to.equal(ethers.ZeroAddress);
+    });
+
+    it("a manager-initiated disable does NOT revoke the attester — only the factoryOwner's stop does", async () => {
+      const fixture = await loadFixture(deployAttestedWithdrawalFixture);
+      const { pool, manager, attester } = fixture;
+      const activeAttester = await attester.getAddress();
+
+      await pool.connect(manager).setAttestedWithdrawEnabled(false);
+      expect(await pool.withdrawalAttester()).to.equal(activeAttester);
+      await pool.connect(manager).setAttestedWithdrawEnabled(true);
+      expect(await pool.withdrawalAttester()).to.equal(activeAttester);
+    });
+
+    it('the factoryOwner stop is a no-op on withdrawalAttester when no attester was ever active', async () => {
+      const fixture = await loadFixture(deployUninitializedAttestedWithdrawalFixture);
+      const { pool, owner } = fixture;
+      expect(await pool.withdrawalAttester()).to.equal(ethers.ZeroAddress);
+      const receipt = await (await pool.connect(owner).setAttestedWithdrawEnabled(false)).wait();
+      expect(await pool.withdrawalAttester()).to.equal(ethers.ZeroAddress);
+      // No spurious WithdrawalAttesterActivated(0x0, 0x0) — nothing to revoke.
+      expect(receipt!.logs.length).to.equal(1); // only AttestedWithdrawEnabledSet
+    });
+
     it('the factoryOwner stop is sticky: the manager cannot re-enable, even after re-proposing and rotating an attester', async () => {
       const fixture = await loadFixture(deployAttestedWithdrawalFixture);
       const { pool, manager, owner, other } = fixture;

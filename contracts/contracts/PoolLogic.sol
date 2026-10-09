@@ -1087,6 +1087,17 @@ contract PoolLogic is
             }
             attestedWithdrawOwnerStopped = !enabled;
             if (enabled) return;
+            // SoftStack L-06: a factoryOwner stop must also revoke whichever attester is
+            // currently active, not just disable the feature — an attester that activated (or
+            // was already active) before the stop executes would otherwise remain trusted the
+            // moment the feature is re-enabled, defeating the point of an emergency stop against
+            // a compromised or colluding attester key. Re-enabling therefore always requires a
+            // fresh proposeWithdrawalAttester()/activateWithdrawalAttester() rotation.
+            address revoked = withdrawalAttester;
+            if (revoked != address(0)) {
+                withdrawalAttester = address(0);
+                emit WithdrawalAttesterActivated(revoked, address(0));
+            }
         } else if (enabled && attestedWithdrawOwnerStopped) {
             revert AttestedWithdrawOwnerStopActive();
         }

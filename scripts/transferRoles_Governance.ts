@@ -48,6 +48,12 @@ import { assertProxyAdminOwner, getProxyAdminOwner } from './utils/ownership';
 // initializeAutoCompounding() require a proposal through the Timelock (Timelock.sol's
 // documented intent), giving on-chain visibility and a delay window before any such
 // change takes effect.
+//
+// SoftStack L-06: once this script moves factoryOwner behind the Timelock, the
+// attested-withdrawal emergency stop becomes Timelock-gated too — it refuses to proceed if
+// PoolLogic.attesterRotationDelay() does not comfortably exceed the Timelock's own
+// getMinDelay() (see the preflight below), since otherwise a colluding manager could always
+// complete an attester rotation before the stop can execute against it.
 // --------------------------------------------------
 
 const GOVERNANCE_PROXY = '';
@@ -149,6 +155,54 @@ async function main() {
   await assertProxyAdminOwner('AssetHandler', ASSET_HANDLER_PROXY, signer.address, signer);
   await assertProxyAdminOwner('PoolManagerLogic', POOL_MANAGER_LOGIC_PROXY, signer.address, signer);
   await assertProxyAdminOwner('PoolLogic', POOL_LOGIC_PROXY, signer.address, signer);
+
+  // SoftStack L-06: this script moves PoolManagerLogic.factoryOwner — the attested-withdrawal
+  // feature's emergency-stop holder — behind TIMELOCK, which enforces TIMELOCK.getMinDelay()
+  // between a stop being scheduled and executed. If PoolLogic.attesterRotationDelay() (the
+  // minimum delay between proposeWithdrawalAttester() and activateWithdrawalAttester(), both
+  // manager-only) is not comfortably longer than that, a colluding manager can propose and
+  // activate a replacement attester faster than the Timelock-gated stop can ever execute against
+  // it — the stop still latches eventually, but the attester it was meant to stop is already
+  // live, and the stop does not itself revoke an already-active attester (fixed separately,
+  // SoftStack L-06, in PoolLogic.setAttestedWithdrawEnabled()). Checked only if the attested
+  // feature is already initialized on this pool — a pool that has not added the feature yet
+  // (withdrawalAttester()/attesterRotationDelay() revert: an older PoolLogic implementation that
+  // predates the field entirely) has nothing to race.
+  let attesterInitialized = false;
+  try {
+    attesterInitialized = (await poolLogic.withdrawalAttester()) !== ethers.ZeroAddress;
+  } catch {
+    attesterInitialized = false;
+  }
+  if (!attesterInitialized) {
+    console.log('\nAttested withdrawal not initialized on this pool — nothing to race.');
+  } else {
+    const rotationDelay: bigint = await poolLogic.attesterRotationDelay();
+    const timelock = await ethers.getContractAt('Timelock', TIMELOCK, signer);
+    const timelockMinDelay: bigint = await timelock.getMinDelay();
+    console.log(
+      `\nPoolLogic.attesterRotationDelay(): ${rotationDelay}s, Timelock.getMinDelay(): ` +
+        `${timelockMinDelay}s`,
+    );
+    if (rotationDelay <= timelockMinDelay) {
+      const msg =
+        `attesterRotationDelay (${rotationDelay}s) does not exceed the Timelock's own minDelay ` +
+        `(${timelockMinDelay}s). Once factoryOwner moves to the Timelock below, a colluding ` +
+        "manager can complete an attester rotation before the factoryOwner's emergency stop " +
+        'can ever execute against it. Raise attesterRotationDelay ' +
+        '(PoolLogic.setAttesterRotationDelay(), factoryOwner-only — call it BEFORE running this ' +
+        'script, while factoryOwner is still fast) comfortably above the Timelock delay, with ' +
+        'margin for how long it actually takes a monitor to notice and the Safe to schedule the ' +
+        'stop.';
+      if (process.env.ALLOW_ATTESTER_ROTATION_RACE === '1') {
+        console.warn('WARNING (ALLOW_ATTESTER_ROTATION_RACE=1):', msg);
+      } else {
+        throw new Error(
+          msg + ' Set ALLOW_ATTESTER_ROTATION_RACE=1 only if you have accepted this.',
+        );
+      }
+    }
+  }
 
   console.log('\nTransferring Governance ownership to Timelock...');
   await (await governance.transferOwnership(TIMELOCK)).wait();

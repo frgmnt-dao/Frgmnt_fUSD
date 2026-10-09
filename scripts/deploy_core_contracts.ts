@@ -458,6 +458,24 @@ async function main() {
       'deployment-time decision made separately, not derived by this script.',
   );
 
+  // SoftStack L-06: PoolManagerLogic.manager() and .factoryOwner() are BOTH GOVERNANCE_SAFE
+  // immediately after this script (POOL_MANAGER_ADDRESS equals GOVERNANCE_SAFE above, and
+  // setFactoryOwner(GOVERNANCE_SAFE) already ran). setAttestedWithdrawEnabled()'s factoryOwner
+  // branch is unreachable whenever msg.sender == manager (the manager branch is checked first),
+  // so for this one address the emergency stop cannot latch at all: it can disable, re-enable
+  // and rotate the attester at will, with no independent check on it. This is expected and safe
+  // ONLY as long as nothing attested-related is live yet — it must be resolved (the manager role
+  // moved to a genuinely different address via PoolManagerLogic.changeManager(), manager-only)
+  // before initializeAttestedWithdrawal() is called and the feature is actually enabled.
+  console.log(
+    `REQUIRED FOLLOW-UP (manager ${POOL_MANAGER_ADDRESS}): PoolManagerLogic(${poolManagerProxy}).` +
+      'changeManager(<a genuinely different address from GOVERNANCE_SAFE>) — manager() and ' +
+      'factoryOwner() are both GOVERNANCE_SAFE right now, which makes the factoryOwner emergency ' +
+      "stop on attested withdrawals (setAttestedWithdrawEnabled's factoryOwner branch) " +
+      'unreachable for that address (the manager branch is checked first). Move the manager role ' +
+      'before enabling the attested-withdrawal feature for real.',
+  );
+
   // ============================================================
   // 🔍 IMPLEMENTATION & ADMIN ADDRESSES (EIP-1967)
   // ============================================================
