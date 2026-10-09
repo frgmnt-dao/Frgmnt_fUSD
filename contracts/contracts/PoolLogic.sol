@@ -253,6 +253,19 @@ contract PoolLogic is
     /// @dev Appended after maxSurchargeBps (new slot); append-only, no existing slot moves.
     bool public attestedWithdrawOwnerStopped;
 
+    /// @notice SoftStack L-03: sum of fusdNetForAsset across every currently-Pending
+    ///         cashWithdrawRequests entry for this asset. Incremented in requestCashWithdraw(),
+    ///         decremented in finalizeCashWithdraw() — the only two places a request's Pending
+    ///         status begins or ends. Lets the plan path draw an asset that queued requests are
+    ///         waiting on as long as enough of it is left afterward to still cover them, instead
+    ///         of the previous unconditional block on any nonzero pendingCashWithdrawCount, which
+    ///         let a single dust (as little as 1e-6 fUSD) queued request block every plan drawing
+    ///         that asset for the cost of one transaction. See
+    ///         WithdrawalPlanLib.executeWithdrawalPlan's own docs for where this is read.
+    /// @dev Appended after attestedWithdrawOwnerStopped (new slot); append-only, no existing slot
+    ///      moves.
+    mapping(address => uint256) public pendingCashWithdrawFusd;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -1244,6 +1257,7 @@ contract PoolLogic is
             status: RequestStatus.Pending
         });
         ++pendingCashWithdrawCount[asset];
+        pendingCashWithdrawFusd[asset] += netFusd;
 
         userRequests[msg.sender].push(requestId);
 
@@ -1326,6 +1340,7 @@ contract PoolLogic is
         r.assetAmount = assetAmount;
         r.status = RequestStatus.FinalizedEscrowed;
         --pendingCashWithdrawCount[asset];
+        pendingCashWithdrawFusd[asset] -= fusdNetForAsset;
 
         // FNA-38: this request's backing asset just left active NAV above; its FUSD isn't
         // burned until claimCashWithdraw(), so exclude it from totalClaims in the meantime too —

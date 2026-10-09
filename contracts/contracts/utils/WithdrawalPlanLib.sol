@@ -596,6 +596,30 @@ library WithdrawalPlanLib {
             }
         }
 
+        // SoftStack L-03: a plan may draw an asset that queued requests are waiting on, as long
+        // as enough of it is left afterward to still cover every Pending request's eventual
+        // finalization (converted to this asset at today's price, same conversion
+        // finalizeCashWithdraw() itself uses) on top of whatever is already reservedAssetBalance.
+        // Checked only for assets this plan actually delivered a nonzero amount of (result.outAssets
+        // — populated above, never address(0)/zero-amount), not every supported asset, and after
+        // the draw, not as an upfront all-or-nothing block: a dust Pending request needs a
+        // negligible amount held back, so it cannot meaningfully block a real plan the way an
+        // unconditional "any Pending request at all" check could.
+        for (uint256 i = 0; i < result.outAssets.length; ++i) {
+            address a = result.outAssets[i];
+            uint256 pendingFusd = IPoolLogic(address(this)).pendingCashWithdrawFusd(a);
+            if (pendingFusd == 0) continue;
+            uint256 pendingAssetAmount = FundCalculationLibrary.fusdToAssetAmount(
+                input.poolManagerLogic,
+                pendingFusd,
+                a
+            );
+            uint256 reserved = IPoolLogic(address(this)).reservedAssetBalance(a);
+            if (IERC20(a).balanceOf(address(this)) < reserved + pendingAssetAmount) {
+                revert IPoolLogic.AssetHasPendingWithdrawRequests();
+            }
+        }
+
         // See this event's own docs above for why it's emitted here rather than by PoolLogic.
         // Audit note: reuses CashWithdrawImmediateProRata's (asset[],amount[]) shape purely to
         // avoid compiling a second dynamic-array-encoding event on top of an already bytecode-
@@ -859,8 +883,13 @@ library WithdrawalPlanLib {
         }
     }
 
-    /// @dev Support, duplicate, guard-binding and pending-request checks for allocation `i`;
-    ///      returns the guard that is bound to the asset.
+    /// @dev Support, duplicate and guard-binding checks for allocation `i`; returns the guard
+    ///      that is bound to the asset. SoftStack L-03: this used to also revert here whenever
+    ///      the asset had any Pending queued request at all (pendingCashWithdrawCount != 0) — an
+    ///      unconditional block that let a single dust (as little as 1e-6 fUSD) queued request
+    ///      block every plan drawing that asset, for the cost of one transaction. That check is
+    ///      now the precise, balance-based one in executeWithdrawalPlan below, run once after the
+    ///      allocations loop against the assets actually drawn — see its own docs.
     function _validateAllocation(
         address poolManagerLogic,
         IPoolLogic.WithdrawalPlan calldata plan,
@@ -880,12 +909,6 @@ library WithdrawalPlanLib {
         guard = IPoolManagerLogic(poolManagerLogic).getAssetGuard(asset);
         if (guard == address(0)) revert IPoolLogic.InvalidGuard();
         if (guard != alloc.guard) revert IPoolLogic.GuardMismatch();
-
-        // A plan must not draw an asset that queued requests are waiting on: plans are the
-        // only immediate exit in queue mode, and nothing else earmarks liquidity for them.
-        if (IPoolLogic(address(this)).pendingCashWithdrawCount(asset) != 0) {
-            revert IPoolLogic.AssetHasPendingWithdrawRequests();
-        }
     }
 
     /// @dev Draws one allocation: position-level through the guard's subset entry point, or

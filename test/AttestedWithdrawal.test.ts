@@ -1588,11 +1588,25 @@ describe('PoolLogic — attested selective withdrawal', () => {
       );
     });
 
-    it('a plan cannot draw an asset that has Pending queued cash-withdraw requests', async () => {
+    // SoftStack L-03: pendingCashWithdrawCount != 0 used to block EVERY plan drawing that asset
+    // outright, so a single dust (as little as 1e-6 fUSD) queued request could block every plan
+    // for the cost of one transaction. The fix checks the real thing finalization needs —
+    // enough of the asset left afterward to cover every Pending request (pendingCashWithdrawFusd,
+    // converted to the asset at today's price) plus whatever is already reservedAssetBalance —
+    // not an unconditional, size-blind block. The three tests below cover: a draw that leaves
+    // enough (now allowed, where it used to revert unconditionally), a draw that would not (still
+    // reverts), and the actual vulnerability — a dust Pending request no longer blocks a plan
+    // that drains almost the whole asset.
+    it('a plan CAN still draw an asset with a Pending queued request, as long as enough is left to cover it', async () => {
       const f = await ready();
       await f.pool.connect(f.manager).setImmediateWithdrawEnabled(false); // queue mode
+      // Pool holds 1000 of the asset (fundPoolAndUser). A 50 fUSD request is queued, then the
+      // plan draws 50 — leaving 950, comfortably more than the 50 the pending request needs.
       await f.pool.connect(f.user).requestCashWithdraw(ethers.parseUnits('50', 18), f.assetAddress);
       expect(await f.pool.pendingCashWithdrawCount(f.assetAddress)).to.equal(1n);
+      expect(await f.pool.pendingCashWithdrawFusd(f.assetAddress)).to.equal(
+        ethers.parseUnits('50', 18),
+      );
 
       const half = ethers.parseUnits('50', 18);
       const plan = buildPlan({
@@ -1604,10 +1618,87 @@ describe('PoolLogic — attested selective withdrawal', () => {
         ],
       });
       const sig = await signPlan(f, plan, f.attester);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      expect(await f.asset.balanceOf(await f.pool.getAddress())).to.equal(
+        ethers.parseUnits('950', 18),
+      );
+      // The manager can still finalize the pending request afterward: it was never actually at risk.
+      await f.pool.connect(f.manager).finalizeCashWithdraw(1);
+      expect(await f.pool.pendingCashWithdrawCount(f.assetAddress)).to.equal(0n);
+    });
+
+    it('a plan that would leave less of the asset than the Pending requests need still reverts AssetHasPendingWithdrawRequests', async () => {
+      const f = await ready();
+      await f.pool.connect(f.manager).setImmediateWithdrawEnabled(false);
+      // Both the pending request and the plan are made by the manager (fee-exempt: netFusd ==
+      // fusdAmount exactly), kept separate from the fixture's own user/100-fUSD baseline so the
+      // haircut math below is exact. Pool NAV is 1000 (fundPoolAndUser); the fixture's user still
+      // idly holds their 100 fUSD claim throughout, so total claims at plan time = 100 (user,
+      // idle) + 900 (manager's pending request, held by the pool but not yet burned) + 1000
+      // (manager's plan, added back by the library's own totalClaims_ reconstruction) = 2000,
+      // against a NAV of 1000 — a clean 50% haircut: fairFusd = 1000 * 1000 / 2000 = 500 exactly.
+      const pending = ethers.parseUnits('900', 18);
+      const drawn = ethers.parseUnits('1000', 18); // plan's fusdAmount; fair value below is 500
+      const managerAddress = await f.manager.getAddress();
+      await f.fusd.mint(managerAddress, pending + drawn);
+      await f.fusd.connect(f.manager).approve(await f.pool.getAddress(), ethers.MaxUint256);
+      await f.pool.connect(f.manager).requestCashWithdraw(pending, f.assetAddress);
+
+      // Pool asset after the plan = 1000 - 500 (fair value) = 500 — less than the 900 the pending
+      // request will need at finalize.
+      const fairValue = ethers.parseUnits('500', 18);
+      const plan = buildPlan({
+        ...f,
+        userAddress: managerAddress,
+        fusdAmount: drawn,
+        minValueOutBps: 100n,
+        allocations: [
+          { asset: f.assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: fairValue },
+        ],
+      });
+      const sig = await signPlan(f, plan, f.attester);
       await expectRevert(
-        f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []),
+        f.pool.connect(f.manager).withdrawCashImmediateWithPlan(plan, sig, []),
         'AssetHasPendingWithdrawRequests',
       );
+    });
+
+    it('SoftStack L-03: a dust (1e-6 fUSD) Pending request no longer blocks a plan that drains almost the entire asset', async () => {
+      const f = await ready();
+      await f.pool.connect(f.manager).setImmediateWithdrawEnabled(false);
+      // The manager is fee-exempt (netFusd == amount exactly) and already has an approved
+      // allowance in this fixture, so using it for the dust request keeps the arithmetic exact
+      // without needing to account for the ordinary user's exit fee.
+      const dust = 10n ** 12n; // 1e-6 fUSD, matching the PoC's own choice
+      await f.fusd.mint(await f.manager.getAddress(), dust);
+      await f.fusd.connect(f.manager).approve(await f.pool.getAddress(), dust);
+      await f.pool.connect(f.manager).requestCashWithdraw(dust, f.assetAddress);
+      expect(await f.pool.pendingCashWithdrawFusd(f.assetAddress)).to.equal(dust);
+
+      // Plan drains 999.999 of the pool's 1000 — the pre-fix unconditional check would have
+      // reverted this outright for the dust request alone; the fix only needs the dust request's
+      // own tiny 0.000001 left, and 0.001 (what actually remains) comfortably covers that.
+      // fundPoolAndUser only gave the user `amount` (100) fUSD with a matching approval — top
+      // both up so the user can actually burn the full 999.999 this plan asks for.
+      const drawn = ethers.parseUnits('999.999', 18);
+      await f.fusd.mint(f.userAddress, drawn - amount);
+      await f.fusd.connect(f.user).approve(await f.pool.getAddress(), ethers.MaxUint256);
+
+      const plan = buildPlan({
+        ...f,
+        fusdAmount: drawn,
+        minValueOutBps: 100n,
+        allocations: [
+          { asset: f.assetAddress, useFixedAmount: true, portion: 0n, fixedAmount: drawn },
+        ],
+      });
+      const sig = await signPlan(f, plan, f.attester);
+      await f.pool.connect(f.user).withdrawCashImmediateWithPlan(plan, sig, []);
+      expect(await f.asset.balanceOf(await f.pool.getAddress())).to.equal(
+        ethers.parseUnits('0.001', 18),
+      );
+      await f.pool.connect(f.manager).finalizeCashWithdraw(1);
+      expect(await f.pool.pendingCashWithdrawCount(f.assetAddress)).to.equal(0n);
     });
   });
 
