@@ -1,9 +1,20 @@
 import { ethers } from 'hardhat';
+import { assertProxyAdminOwner, getProxyAdminOwner } from './utils/ownership';
 
 // --------------------------------------------------
 // FNA-01: locks every core-contract admin/owner role down to the already-deployed
 // Timelock — Governance, AssetHandler, PoolManagerLogic.factoryOwner, PoolLogic.owner,
 // and TokenLogic.DEFAULT_ADMIN_ROLE.
+//
+// SoftStack M-01: also locks the three Transparent proxies' ProxyAdmin contracts down to
+// the Timelock. ProxyAdmin ownership is a role distinct from the four Ownable/AccessControl
+// roles above — it is the one that actually authorizes replacing a proxy's implementation —
+// and this inventory previously omitted it, leaving it on whatever deployProxy's initialOwner
+// resolved to for each proxy (GOVERNANCE_SAFE as of the deploy_core_contracts.ts fix for
+// M-01, the deployer by default before it; the live PoolLogic ProxyAdmin was separately moved
+// to the DAO Safe by the pre-existing, one-off scripts/transferRoles_poolLogic.ts, which this
+// script's ProxyAdmin transfers now generalize to all three and route through the Timelock
+// instead). TokenLogic is UUPS and has no ProxyAdmin, so only three are handled here.
 //
 // Run this LAST, after the deployment/bootstrap sequence is fully done — i.e. after
 // deploy_core_contracts.ts, deploy_asset_guards.ts, deploy_contract_guard.ts,
@@ -78,6 +89,31 @@ async function main() {
   const tokenLogic = await ethers.getContractAt('TokenLogic', TOKEN_LOGIC_PROXY, signer);
   const DEFAULT_ADMIN_ROLE = await tokenLogic.DEFAULT_ADMIN_ROLE();
 
+  // SoftStack M-01: the three Transparent proxies' ProxyAdmin contracts, resolved from the
+  // proxies' own EIP-1967 admin storage slot rather than taken on faith as an input — a
+  // ProxyAdmin address pulled from a stale deployment record is exactly the kind of mistake
+  // this script exists to prevent repeating. getProxyAdminOwner() is the same helper used by
+  // deploy_core_contracts.ts's own ProxyAdmin assertion, so both places resolve/read it
+  // identically instead of maintaining two copies of the erc1967-slot-then-owner() lookup.
+  const assetHandlerAdminBefore = await getProxyAdminOwner(ASSET_HANDLER_PROXY, signer);
+  const poolManagerAdminBefore = await getProxyAdminOwner(POOL_MANAGER_LOGIC_PROXY, signer);
+  const poolLogicAdminBefore = await getProxyAdminOwner(POOL_LOGIC_PROXY, signer);
+  const assetHandlerAdmin = await ethers.getContractAt(
+    'ProxyAdmin',
+    assetHandlerAdminBefore.proxyAdmin,
+    signer,
+  );
+  const poolManagerAdmin = await ethers.getContractAt(
+    'ProxyAdmin',
+    poolManagerAdminBefore.proxyAdmin,
+    signer,
+  );
+  const poolLogicAdmin = await ethers.getContractAt(
+    'ProxyAdmin',
+    poolLogicAdminBefore.proxyAdmin,
+    signer,
+  );
+
   console.log('\nGovernance owner (before):', await governance.owner());
   console.log('AssetHandler owner (before):', await assetHandler.owner());
   console.log('PoolManagerLogic factoryOwner (before):', await poolManagerLogic.owner());
@@ -86,6 +122,33 @@ async function main() {
     'TokenLogic DEFAULT_ADMIN_ROLE held by CURRENT_ADMIN (before):',
     await tokenLogic.hasRole(DEFAULT_ADMIN_ROLE, CURRENT_ADMIN),
   );
+  console.log(
+    `AssetHandler ProxyAdmin (${assetHandlerAdminBefore.proxyAdmin}) owner (before):`,
+    assetHandlerAdminBefore.owner,
+  );
+  console.log(
+    `PoolManagerLogic ProxyAdmin (${poolManagerAdminBefore.proxyAdmin}) owner (before):`,
+    poolManagerAdminBefore.owner,
+  );
+  console.log(
+    `PoolLogic ProxyAdmin (${poolLogicAdminBefore.proxyAdmin}) owner (before):`,
+    poolLogicAdminBefore.owner,
+  );
+
+  // SoftStack M-01 preflight: on any deployment made before the deploy_core_contracts.ts fix
+  // for this finding, these three ProxyAdmins were never handed to GOVERNANCE_SAFE — they
+  // default to whichever EOA originally ran deployProxy, which is NOT this script's signer.
+  // Checked here, before any transaction below, so a mismatch aborts with nothing sent, rather
+  // than reverting partway through after Governance/AssetHandler.owner/factoryOwner/PoolLogic.owner
+  // have already been moved to the Timelock — a partially-migrated state that would otherwise
+  // require manual on-chain inspection to safely resume. If this fires, the ProxyAdmin's actual
+  // current owner (an EOA, or the pre-M-01 DAO Safe for PoolLogic specifically) must transfer it
+  // to GOVERNANCE_SAFE — or directly to TIMELOCK — itself before re-running this script. Reuses
+  // assertProxyAdminOwner (same helper the final-verification block below uses) with the
+  // signer's own address as the expected owner, rather than hand-rolling the same comparison.
+  await assertProxyAdminOwner('AssetHandler', ASSET_HANDLER_PROXY, signer.address, signer);
+  await assertProxyAdminOwner('PoolManagerLogic', POOL_MANAGER_LOGIC_PROXY, signer.address, signer);
+  await assertProxyAdminOwner('PoolLogic', POOL_LOGIC_PROXY, signer.address, signer);
 
   console.log('\nTransferring Governance ownership to Timelock...');
   await (await governance.transferOwnership(TIMELOCK)).wait();
@@ -103,6 +166,18 @@ async function main() {
   await (await poolLogic.transferOwnership(TIMELOCK)).wait();
   console.log('PoolLogic owner (after):', await poolLogic.owner());
 
+  console.log('\nTransferring AssetHandler ProxyAdmin ownership to Timelock...');
+  await (await assetHandlerAdmin.transferOwnership(TIMELOCK)).wait();
+  console.log('AssetHandler ProxyAdmin owner (after):', await assetHandlerAdmin.owner());
+
+  console.log('\nTransferring PoolManagerLogic ProxyAdmin ownership to Timelock...');
+  await (await poolManagerAdmin.transferOwnership(TIMELOCK)).wait();
+  console.log('PoolManagerLogic ProxyAdmin owner (after):', await poolManagerAdmin.owner());
+
+  console.log('\nTransferring PoolLogic ProxyAdmin ownership to Timelock...');
+  await (await poolLogicAdmin.transferOwnership(TIMELOCK)).wait();
+  console.log('PoolLogic ProxyAdmin owner (after):', await poolLogicAdmin.owner());
+
   console.log('\nGranting TokenLogic DEFAULT_ADMIN_ROLE to Timelock...');
   await (await tokenLogic.grantRole(DEFAULT_ADMIN_ROLE, TIMELOCK)).wait();
   console.log(
@@ -117,10 +192,40 @@ async function main() {
     await tokenLogic.hasRole(DEFAULT_ADMIN_ROLE, CURRENT_ADMIN),
   );
 
-  console.log('\nDone. Every core-contract admin/owner role is now the Timelock. Future');
+  // Final verification, not just trust in the calls above having succeeded: re-read every
+  // role from the chain and refuse to call this script's work done if any disagrees. A
+  // transaction that reverted silently mid-script (or succeeded against the wrong contract
+  // instance) should not be able to produce a false "Done".
+  const finalChecks: Array<[string, () => Promise<string>, string]> = [
+    ['Governance.owner', () => governance.owner(), TIMELOCK],
+    ['AssetHandler.owner', () => assetHandler.owner(), TIMELOCK],
+    ['PoolManagerLogic.factoryOwner', () => poolManagerLogic.owner(), TIMELOCK],
+    ['PoolLogic.owner', () => poolLogic.owner(), TIMELOCK],
+  ];
+  for (const [label, read, expected] of finalChecks) {
+    const actual = await read();
+    if (actual.toLowerCase() !== expected.toLowerCase()) {
+      throw new Error(`${label} is ${actual}, expected the Timelock (${expected}) — stopping.`);
+    }
+  }
+  // Same hard-stop semantics as the loop above, via the shared helper so a ProxyAdmin-owner
+  // mismatch is checked identically here and in deploy_core_contracts.ts.
+  await assertProxyAdminOwner('AssetHandler', ASSET_HANDLER_PROXY, TIMELOCK, signer);
+  await assertProxyAdminOwner('PoolManagerLogic', POOL_MANAGER_LOGIC_PROXY, TIMELOCK, signer);
+  await assertProxyAdminOwner('PoolLogic', POOL_LOGIC_PROXY, TIMELOCK, signer);
+  if (!(await tokenLogic.hasRole(DEFAULT_ADMIN_ROLE, TIMELOCK))) {
+    throw new Error('TokenLogic DEFAULT_ADMIN_ROLE is not held by the Timelock — stopping.');
+  }
+  if (await tokenLogic.hasRole(DEFAULT_ADMIN_ROLE, CURRENT_ADMIN)) {
+    throw new Error('TokenLogic DEFAULT_ADMIN_ROLE is still held by CURRENT_ADMIN — stopping.');
+  }
+
+  console.log('\nDone. Every core-contract admin/owner role, and all three Transparent');
+  console.log('proxies\' ProxyAdmin contracts, are now the Timelock (verified above). Future');
   console.log('changes to contract guards, asset guards, supported asset price feeds, the');
-  console.log('governance/assetHandler references, TokenLogic admin operations, and');
-  console.log('PoolLogic.initializeAutoCompounding() all require a Timelock proposal + delay.');
+  console.log('governance/assetHandler references, TokenLogic admin operations,');
+  console.log('PoolLogic.initializeAutoCompounding(), and any implementation upgrade of');
+  console.log('AssetHandler, PoolManagerLogic or PoolLogic all require a Timelock proposal + delay.');
 }
 
 main().catch((error) => {
