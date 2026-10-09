@@ -24,7 +24,9 @@ async function expectRevert(p: Promise<any>, messageSubstring: string) {
 /// @dev Mirrors test/PoolLogic.test.ts's deployPoolFixture exactly (library linking, proxy
 ///      init, asset guard wiring) plus initializeAttestedWithdrawal() so every test here starts
 ///      from a fully-wired attested-withdrawal-enabled pool.
-async function deployAttestedWithdrawalFixture() {
+// Exported so other test files (e.g. test/UpgradePreflight.test.ts) can reuse these fixtures
+// directly instead of duplicating the proxy/library wiring boilerplate.
+export async function deployAttestedWithdrawalFixture() {
   const [owner, manager, trader, user, attester, other] = await ethers.getSigners();
 
   const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');
@@ -180,8 +182,11 @@ async function deployAttestedWithdrawalFixture() {
 
 /// @dev Same wiring as deployAttestedWithdrawalFixture but deliberately skips
 ///      initializeAttestedWithdrawal() — used to verify the rotation machinery stays inert
-///      (attesterRotationDelay == 0) until that initializer has actually run.
-async function deployUninitializedAttestedWithdrawalFixture() {
+///      (attesterRotationDelay == 0) until that initializer has actually run. Also skips
+///      initializeAutoCompounding() and initializeWithdrawalEscrow() entirely (unlike that
+///      fixture), leaving the pool at a true "freshly upgraded, nothing migrated yet" state —
+///      exported for test/UpgradePreflight.test.ts, which needs exactly that starting point.
+export async function deployUninitializedAttestedWithdrawalFixture() {
   const [owner, manager, trader, user, attester, other] = await ethers.getSigners();
 
   const TestTokenLogic = await ethers.getContractFactory('TestTokenLogic');

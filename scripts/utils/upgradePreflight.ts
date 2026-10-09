@@ -55,3 +55,31 @@ export async function withdrawalEscrowUnset(poolLogicAddress: string): Promise<b
     return true;
   }
 }
+
+/// SoftStack L-04: true if PoolLogic.initializeAutoCompounding() (reinitializer(2)) has already
+/// run on the live proxy — compoundedRewardIndex() is nonzero (it is set to 1e18 unconditionally
+/// at the top of that initializer), or the call reverts because the function/field does not
+/// exist yet on the live implementation, in which case it is "not initialized" rather than
+/// "already initialized".
+export async function autoCompoundingInitialized(poolLogicAddress: string): Promise<boolean> {
+  const pool = await ethers.getContractAt('PoolLogic', poolLogicAddress);
+  try {
+    return (await pool.compoundedRewardIndex()) !== 0n;
+  } catch {
+    return false;
+  }
+}
+
+/// SoftStack L-04: true if PoolLogic.initializeAttestedWithdrawal() (reinitializer(3)) has NOT
+/// yet run on the live proxy — mirrors withdrawalEscrowUnset() above exactly. The contract's own
+/// initializeAttestedWithdrawal() uses the identical check (withdrawalAttester != address(0) ->
+/// AttestedWithdrawalAlreadyInitialized) to refuse a second run; this lets a script detect the
+/// same condition before building a batch that would revert on-chain.
+export async function withdrawalAttesterUnset(poolLogicAddress: string): Promise<boolean> {
+  const pool = await ethers.getContractAt('PoolLogic', poolLogicAddress);
+  try {
+    return (await pool.withdrawalAttester()) === ethers.ZeroAddress;
+  } catch {
+    return true;
+  }
+}
