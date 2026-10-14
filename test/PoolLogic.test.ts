@@ -751,6 +751,39 @@ describe('PoolLogic', () => {
     });
   });
 
+  describe('SoftStack M-03: onMorphoFlashLoan (Morpho flashloan callback) guarded-call invariant', () => {
+    it('reverts when called with no PoolLogic call already in progress', async () => {
+      const { pool } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('FlashloanCallbackRelay');
+      const relay = await Relay.deploy();
+
+      await relay.callOnMorphoFlashLoan(poolAddr);
+      expect(await relay.lastMorphoReverted()).to.equal(true);
+      expect(await relay.lastMorphoRevertSelector()).to.equal(
+        pool.interface.getError('FlashloanCallbackOutsideGuardedCall')!.selector,
+      );
+    });
+
+    it('does NOT hit that guard when called nested inside an already-guarded execTransaction call (the legitimate Morpho pattern)', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('FlashloanCallbackRelay');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      const callMorpho = relay.interface.encodeFunctionData('callOnMorphoFlashLoan', [poolAddr]);
+      await pool.connect(manager).execTransaction(relayAddr, callMorpho);
+      expect(await relay.lastMorphoRevertSelector()).to.not.equal(
+        pool.interface.getError('FlashloanCallbackOutsideGuardedCall')!.selector,
+      );
+    });
+  });
+
   // 28) only manager can toggle immediate withdraw mode
   it('only manager can setImmediateWithdrawEnabled', async () => {
     const { pool, manager, user } = await loadFixture(deployPoolFixture);

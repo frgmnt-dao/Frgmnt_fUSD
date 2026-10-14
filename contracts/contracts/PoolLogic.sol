@@ -1662,7 +1662,13 @@ contract PoolLogic is
     /// @notice Executes operations after receiving a flashloan from Morpho
     /// @param assets Amount that was flash loaned
     /// @param params Arbitrary bytes passed to the receiver
+    /// @dev SoftStack M-03: same reasoning as executeOperation's own note above, for the Morpho
+    ///      Blue flashloan callback. Morpho Blue has no separate "receiver" parameter — the
+    ///      callback always lands on whoever called flashLoan — so reaching this function with no
+    ///      lock held would require the pool itself to have called Morpho's flashLoan outside an
+    ///      already-nonReentrant entry point, which does not exist.
     function onMorphoFlashLoan(uint256 assets, bytes calldata params) external override {
+        if (!_reentrancyGuardEntered()) revert FlashloanCallbackOutsideGuardedCall();
         _executeMorphoFlashloan(assets, params);
     }
 
