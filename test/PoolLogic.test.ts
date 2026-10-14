@@ -685,6 +685,36 @@ describe('PoolLogic', () => {
     expect(await target.lastValue()).to.equal(7n);
   });
 
+  describe('SoftStack M-01: execTransaction reentrancy', () => {
+    it('a nested execTransaction call triggered from within an outer one reverts', async () => {
+      const { pool, poolManager, txGuard, target, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Sender = await ethers.getContractFactory('ReentrantCallbackSender');
+      const sender = await Sender.deploy();
+      const senderAddr = await sender.getAddress();
+
+      // Both the sender (outer call target) and the inner target need a registered, public
+      // contract guard so execTransaction accepts calling them.
+      await poolManager.setContractGuard(senderAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+      const targetAddr = await target.getAddress();
+      await poolManager.setContractGuard(targetAddr, await txGuard.getAddress());
+
+      const innerData = target.interface.encodeFunctionData('doSomething', [99n]);
+      await sender.configure(poolAddr, targetAddr, innerData);
+
+      const outerData = sender.interface.encodeFunctionData('execute', []);
+      // The outer call itself succeeds (execute() catches the inner revert), but the nested
+      // execTransaction it attempted must have failed.
+      await pool.connect(manager).execTransaction(senderAddr, outerData);
+      expect(await sender.reentryAttempted()).to.equal(true);
+      expect(await sender.reentrySucceeded()).to.equal(false);
+      // The inner target must be untouched — the nested call never actually ran.
+      expect(await target.lastValue()).to.equal(0n);
+    });
+  });
+
   // 28) only manager can toggle immediate withdraw mode
   it('only manager can setImmediateWithdrawEnabled', async () => {
     const { pool, manager, user } = await loadFixture(deployPoolFixture);

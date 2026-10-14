@@ -1527,7 +1527,7 @@ contract PoolLogic is
         return success;
     }
 
-    function execTransaction(address to, bytes calldata data) external returns (bool) {
+    function execTransaction(address to, bytes calldata data) external nonReentrant returns (bool) {
         return _execTx(to, data);
     }
 
