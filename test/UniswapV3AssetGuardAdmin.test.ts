@@ -418,6 +418,90 @@ describe('UniswapV3AssetGuard (real) — admin and view functions', () => {
   });
 
   // -----------------------------------------------------------------------
+  // SoftStack M-06: withdrawalTwapDeviationBps split from withdrawalSlippageBps
+  // -----------------------------------------------------------------------
+  describe('SoftStack M-06: the oracle deviation gate and the LP output floor are independently settable', () => {
+    function sqrtX96(price: bigint, scale: bigint): bigint {
+      // integer sqrt of (price/scale) * 2^192
+      const target = (price * (1n << 192n)) / scale;
+      let lo = 0n;
+      let hi = target + 1n;
+      while (lo < hi) {
+        const mid = (lo + hi) / 2n;
+        if (mid * mid <= target) lo = mid + 1n;
+        else hi = mid;
+      }
+      return lo - 1n;
+    }
+
+    async function deployHarness() {
+      const [admin, other] = await ethers.getSigners();
+      const Harness = await ethers.getContractFactory('TestUniswapV3AssetGuardHarness');
+      const guard = await Harness.deploy();
+      await guard.waitForDeployment();
+      return { guard, admin, other };
+    }
+
+    it('both default to 100 bps (1%), the pre-fix shared value — behavior-neutral at upgrade', async () => {
+      const { guard } = await deployHarness();
+      expect(await guard.withdrawalSlippageBps()).to.equal(100n);
+      expect(await guard.withdrawalTwapDeviationBps()).to.equal(100n);
+    });
+
+    it('at the shared 100 bps default, a realistic 1.5% spot/TWAP move still reverts the oracle gate (unchanged from before the split)', async () => {
+      const { guard } = await deployHarness();
+      const twap = sqrtX96(1n, 1n);
+      const spot = sqrtX96(1015n, 1000n); // 1.5% above TWAP
+      await expect(guard.exposedCheckSpotPriceDeviation(spot, twap)).to.be.revertedWith(
+        'UniswapV3AssetGuard: Spot deviation too high',
+      );
+    });
+
+    it('raising withdrawalTwapDeviationBps alone opens the oracle gate to that same 1.5% move without touching the LP output floor', async () => {
+      const { guard, admin } = await deployHarness();
+      await guard.connect(admin).setWithdrawalTwapDeviationBps(200); // 2%, above the 1.5% move
+      expect(await guard.withdrawalTwapDeviationBps()).to.equal(200n);
+      // The LP-output floor is untouched by that call.
+      expect(await guard.withdrawalSlippageBps()).to.equal(100n);
+
+      const twap = sqrtX96(1n, 1n);
+      const spot = sqrtX96(1015n, 1000n);
+      expect(await guard.exposedCheckSpotPriceDeviation(spot, twap)).to.equal(true);
+    });
+
+    it('raising withdrawalSlippageBps alone (the LP output floor) does not loosen the oracle gate', async () => {
+      const { guard, admin } = await deployHarness();
+      await guard.connect(admin).setWithdrawalSlippageBps(2000); // 20%, the setter's own max
+      expect(await guard.withdrawalSlippageBps()).to.equal(2000n);
+      // The oracle gate is untouched by that call — still the 100 bps default.
+      expect(await guard.withdrawalTwapDeviationBps()).to.equal(100n);
+
+      const twap = sqrtX96(1n, 1n);
+      const spot = sqrtX96(1015n, 1000n); // 1.5% move, above the still-100bps oracle gate
+      await expect(guard.exposedCheckSpotPriceDeviation(spot, twap)).to.be.revertedWith(
+        'UniswapV3AssetGuard: Spot deviation too high',
+      );
+    });
+
+    it('setWithdrawalTwapDeviationBps reverts above 2000 bps and for non-admin, mirroring setWithdrawalSlippageBps', async () => {
+      const { guard, other } = await deployHarness();
+      await expect(guard.setWithdrawalTwapDeviationBps(2001)).to.be.revertedWith(
+        'UniswapV3AssetGuard: deviation too high',
+      );
+      await expect(guard.connect(other).setWithdrawalTwapDeviationBps(100)).to.be.revertedWith(
+        'UniswapV3AssetGuard: not admin',
+      );
+    });
+
+    it('emits WithdrawalTwapDeviationBpsUpdated with the old and new values', async () => {
+      const { guard, admin } = await deployHarness();
+      await expect(guard.connect(admin).setWithdrawalTwapDeviationBps(150))
+        .to.emit(guard, 'WithdrawalTwapDeviationBpsUpdated')
+        .withArgs(100n, 150n);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // FNA-16: per-pool minimum TWAP liquidity floor
   // -----------------------------------------------------------------------
   describe('FNA-16: minimumPoolLiquidity', () => {

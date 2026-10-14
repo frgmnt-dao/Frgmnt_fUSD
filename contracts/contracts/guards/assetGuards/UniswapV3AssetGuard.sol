@@ -42,8 +42,18 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
     /// @dev Admin allowed to adjust withdrawal slippage and twap window.
     address public admin;
 
-    /// @dev Slippage protection used for Uniswap V3 liquidity withdrawals (in bps).
+    /// @dev Minimum-output floor for decreaseLiquidity on Uniswap V3 withdrawals (in bps).
     uint256 public withdrawalSlippageBps = 100; // 1%
+
+    /// @dev SoftStack M-06: the spot-vs-TWAP oracle-manipulation gate's own ceiling (in bps),
+    ///      split out from withdrawalSlippageBps above. The two had opposite pressure on one
+    ///      shared value: tightening it for stronger oracle-manipulation protection caused
+    ///      frequent withdrawal DoS during ordinary volatility (any spot/TWAP divergence above
+    ///      the threshold blocked every withdrawal), while loosening it for fewer false-DoS
+    ///      hits widened the LP-output sandwich window by the same amount. Same 100 bps default
+    ///      as withdrawalSlippageBps, so this change is behavior-neutral until an admin
+    ///      deliberately tunes either one independently.
+    uint256 public withdrawalTwapDeviationBps = 100; // 1%
 
     /// @dev TWAP window (seconds) used to mitigate price manipulation during withdrawal construction.
     uint32 public withdrawalTwapWindow = 600; // 10 minutes
@@ -62,6 +72,7 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
     uint256 private constant PORTION_DENOMINATOR = 1e18;
 
     event WithdrawalSlippageBpsUpdated(uint256 oldValue, uint256 newValue);
+    event WithdrawalTwapDeviationBpsUpdated(uint256 oldValue, uint256 newValue);
     event WithdrawalTwapWindowUpdated(uint32 oldValue, uint32 newValue);
     event AdminUpdated(address oldAdmin, address newAdmin);
     event MinimumPoolLiquidityUpdated(address indexed pool, uint128 oldValue, uint128 newValue);
@@ -82,6 +93,16 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
         uint256 oldValue = withdrawalSlippageBps;
         withdrawalSlippageBps = _withdrawalSlippageBps;
         emit WithdrawalSlippageBpsUpdated(oldValue, _withdrawalSlippageBps);
+    }
+
+    /// @notice Updates the spot-vs-TWAP deviation ceiling (in bps) used to gate against oracle
+    ///         manipulation during withdrawal construction. SoftStack M-06: independent from
+    ///         withdrawalSlippageBps's LP-output floor above.
+    function setWithdrawalTwapDeviationBps(uint256 _withdrawalTwapDeviationBps) external onlyAdmin {
+        require(_withdrawalTwapDeviationBps <= 2_000, "UniswapV3AssetGuard: deviation too high"); // max 20%
+        uint256 oldValue = withdrawalTwapDeviationBps;
+        withdrawalTwapDeviationBps = _withdrawalTwapDeviationBps;
+        emit WithdrawalTwapDeviationBpsUpdated(oldValue, _withdrawalTwapDeviationBps);
     }
 
     /// @notice Updates the TWAP window (seconds) used during withdrawal construction.
@@ -793,7 +814,7 @@ contract UniswapV3AssetGuard is ERC20Guard, IPreValuedAssetGuard, IIncompleteVal
         uint256 deviationBps = FullMath.mulDiv(diff, BPS_DENOMINATOR, twapPrice);
 
         require(
-            deviationBps <= withdrawalSlippageBps,
+            deviationBps <= withdrawalTwapDeviationBps,
             "UniswapV3AssetGuard: Spot deviation too high"
         );
 
