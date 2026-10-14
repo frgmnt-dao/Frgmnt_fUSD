@@ -1,7 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 import { ethers } from 'hardhat';
-import { assertNoPendingWithdrawals, withdrawalEscrowUnset } from './utils/upgradePreflight';
+import {
+  assertNoPendingWithdrawals,
+  autoCompoundingInitialized as checkAutoCompoundingInitialized,
+  withdrawalEscrowUnset,
+} from './utils/upgradePreflight';
 
 // --------------------------------------------------
 // Upgrades the live PoolLogic proxy (Base mainnet, chainId 8453) to add the Attested
@@ -320,12 +324,7 @@ async function main() {
   // value, both mean "not initialized". If it is not initialized it MUST be initialized before the
   // version-3 initializer, or it can never be (reinitializer(2) would then revert
   // InvalidInitialization) and staking is permanently dead until another upgrade.
-  let autoCompoundingInitialized = false;
-  try {
-    autoCompoundingInitialized = (await poolLogic.compoundedRewardIndex()) !== 0n;
-  } catch {
-    autoCompoundingInitialized = false;
-  }
+  const autoCompoundingInitialized = await checkAutoCompoundingInitialized(POOL_LOGIC_PROXY);
   console.log(
     '\nAuto-compounding (reinitializer(2)) already initialized on the live pool:',
     autoCompoundingInitialized,

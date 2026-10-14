@@ -51,17 +51,23 @@ export default defineConfig([
         },
     },
     {
-        // CommonJS config files run directly under Node, not bundled — declare
-        // the Node/CJS globals they use so `module`/`require`/etc. aren't
-        // flagged by no-undef.
-        files: ['.solcover.js'],
+        // CommonJS scripts run directly under Node (`node <file>`), not bundled or
+        // transpiled — declare the Node/CJS globals they use so `module`/`require`/
+        // `process`/`console`/etc. aren't flagged by no-undef.
+        files: ['.solcover.js', 'scripts/compare-with-baseline.js'],
         languageOptions: {
             globals: {
                 module: 'writable',
                 require: 'readonly',
                 process: 'readonly',
+                console: 'readonly',
                 __dirname: 'readonly',
             },
+        },
+        rules: {
+            // These files are plain CommonJS, not bundled — require() is the only way to
+            // import here, so the TS-oriented "use ESM import" rule doesn't apply.
+            '@typescript-eslint/no-require-imports': 'off',
         },
     },
     {

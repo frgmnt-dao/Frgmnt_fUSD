@@ -16,7 +16,10 @@ contract MockERC1271Signer {
         owner = owner_;
     }
 
-    function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4) {
+    function isValidSignature(
+        bytes32 hash,
+        bytes calldata signature
+    ) external view returns (bytes4) {
         (address recovered, ECDSA.RecoverError err, ) = ECDSA.tryRecover(hash, signature);
         if (err == ECDSA.RecoverError.NoError && recovered == owner) {
             return MAGIC_VALUE;

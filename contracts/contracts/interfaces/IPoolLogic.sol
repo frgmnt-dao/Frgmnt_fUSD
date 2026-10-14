@@ -88,9 +88,17 @@ interface IPoolLogic {
 
     function maxSurchargeBps() external view returns (uint256);
 
-    /// @dev Pending queued cash-withdraw requests per deposit asset (FNA-60); read by the plan path
-    ///      so a plan cannot draw an asset that queued requests are waiting on.
+    /// @dev Pending queued cash-withdraw requests per deposit asset (FNA-60); read by
+    ///      PoolManagerLogic._removeAsset() so it cannot delist an asset queued requests are
+    ///      still waiting on.
     function pendingCashWithdrawCount(address asset) external view returns (uint256);
+
+    /// @dev SoftStack L-03: sum of fusdNetForAsset across every currently-Pending
+    ///      cashWithdrawRequests entry for this asset — incremented in requestCashWithdraw(),
+    ///      decremented in finalizeCashWithdraw(). Read by the plan path so a plan can still draw
+    ///      an asset that queued requests are waiting on, as long as enough of it remains to cover
+    ///      their eventual finalization; see WithdrawalPlanLib.executeWithdrawalPlan's own docs.
+    function pendingCashWithdrawFusd(address asset) external view returns (uint256);
 
     /// @notice FNA-34: cumulative net yield ever routed into the staking reward index
     ///         (_accrueYield()'s appliedNetYield), regardless of whether any staker has

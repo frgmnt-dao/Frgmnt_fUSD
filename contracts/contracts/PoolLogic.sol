@@ -253,6 +253,19 @@ contract PoolLogic is
     /// @dev Appended after maxSurchargeBps (new slot); append-only, no existing slot moves.
     bool public attestedWithdrawOwnerStopped;
 
+    /// @notice SoftStack L-03: sum of fusdNetForAsset across every currently-Pending
+    ///         cashWithdrawRequests entry for this asset. Incremented in requestCashWithdraw(),
+    ///         decremented in finalizeCashWithdraw() — the only two places a request's Pending
+    ///         status begins or ends. Lets the plan path draw an asset that queued requests are
+    ///         waiting on as long as enough of it is left afterward to still cover them, instead
+    ///         of the previous unconditional block on any nonzero pendingCashWithdrawCount, which
+    ///         let a single dust (as little as 1e-6 fUSD) queued request block every plan drawing
+    ///         that asset for the cost of one transaction. See
+    ///         WithdrawalPlanLib.executeWithdrawalPlan's own docs for where this is read.
+    /// @dev Appended after attestedWithdrawOwnerStopped (new slot); append-only, no existing slot
+    ///      moves.
+    mapping(address => uint256) public pendingCashWithdrawFusd;
+
     // ============================================================
     // =                         ERRORS                           =
     // ============================================================
@@ -1074,6 +1087,17 @@ contract PoolLogic is
             }
             attestedWithdrawOwnerStopped = !enabled;
             if (enabled) return;
+            // SoftStack L-06: a factoryOwner stop must also revoke whichever attester is
+            // currently active, not just disable the feature — an attester that activated (or
+            // was already active) before the stop executes would otherwise remain trusted the
+            // moment the feature is re-enabled, defeating the point of an emergency stop against
+            // a compromised or colluding attester key. Re-enabling therefore always requires a
+            // fresh proposeWithdrawalAttester()/activateWithdrawalAttester() rotation.
+            address revoked = withdrawalAttester;
+            if (revoked != address(0)) {
+                withdrawalAttester = address(0);
+                emit WithdrawalAttesterActivated(revoked, address(0));
+            }
         } else if (enabled && attestedWithdrawOwnerStopped) {
             revert AttestedWithdrawOwnerStopActive();
         }
@@ -1177,7 +1201,7 @@ contract PoolLogic is
         _updateFeesAndRewardsFor(plan.user);
 
         WithdrawalPlanLib.PlanExecutionResult memory result = WithdrawalPlanLib
-            .executeWithdrawalPlan(plan, attesterSignature, complexAssetsData);
+            .executeWithdrawalPlan(plan, attesterSignature, complexAssetsData, accountedAssets);
 
         consumedPlanNonce[plan.user][plan.nonce] = true;
         attestedWithdrawVolume = AttestedWithdrawVolume(
@@ -1185,21 +1209,12 @@ contract PoolLogic is
             result.newVolumeAccumulated
         );
 
-        uint256 reduction = FundCalculationLibrary.computeAccountedAssetsReduction(
-            result.netFusd,
-            result.totalClaims,
-            accountedAssets,
-            result.completeFundValue,
-            result.valueDelta
-        );
-        // The surcharge needs no adjustment here. valueDelta is the real value that left the fund
-        // and the user receives only `target`, so the withheld slice is already retained by the
-        // smaller NAV drop; reducing accountedAssets by valueDelta (plus the FNA-42 loss share)
-        // keeps it equal to NAV — no overhang and no yield gap, so nothing is skimmed as
-        // performance fee. Subtracting surchargeAmount again would leave accountedAssets above
-        // NAV and swallow the next genuine yield.
-        if (accountedAssets < reduction) revert InvalidFundValue();
-        accountedAssets -= reduction;
+        // SoftStack L-02: result.accountedAssetsReduction is computed entirely inside
+        // executeWithdrawalPlan(), against the gross active NAV accrual itself compares
+        // accountedAssets against — see that library's own docs. Only the write (and its
+        // underflow check) stay here, since they touch accountedAssets directly.
+        if (accountedAssets < result.accountedAssetsReduction) revert InvalidFundValue();
+        accountedAssets -= result.accountedAssetsReduction;
 
         outAssets = result.outAssets;
         outAmounts = result.outAmounts;
@@ -1253,6 +1268,7 @@ contract PoolLogic is
             status: RequestStatus.Pending
         });
         ++pendingCashWithdrawCount[asset];
+        pendingCashWithdrawFusd[asset] += netFusd;
 
         userRequests[msg.sender].push(requestId);
 
@@ -1284,15 +1300,8 @@ contract PoolLogic is
         // see FundCalculationLibrary.computeFinalizeAssetAmount and FNA-05. FUSD backing this
         // request is transferred-not-burned until claimCashWithdraw, so totalSupply() already
         // reflects outstanding claims as of this finalization.
-        (
-            uint256 assetAmount,
-            uint256 totalClaims,
-            uint256 completeFundValue
-        ) = FundCalculationLibrary.computeFinalizeAssetAmount(
-                address(this),
-                asset,
-                fusdNetForAsset
-            );
+        (uint256 assetAmount, uint256 totalClaims, ) = FundCalculationLibrary
+            .computeFinalizeAssetAmount(address(this), asset, fusdNetForAsset);
         if (assetAmount == 0) revert ZeroAmount();
 
         // Finalization does not transfer assets to the user; assets remain on the contract until claim.
@@ -1323,10 +1332,12 @@ contract PoolLogic is
         // that function's docs for why that was wrong). Delegated entirely to
         // FundCalculationLibrary purely to keep this call site's own bytecode under the
         // EIP-170 size limit.
-        // FNA-42: also feeds this request's own netFusd/totalClaims/completeFundValue through so
-        // the baseline reduction accounts for this claim's own share of any pre-existing
-        // unrecognized loss, not just the dollars physically moved to escrow — see
-        // _computeAccountedAssetsReduction's own docs.
+        // FNA-42: also feeds this request's own netFusd/totalClaims through so the baseline
+        // reduction accounts for this claim's own share of any pre-existing unrecognized loss,
+        // not just the dollars physically moved to escrow — see _computeAccountedAssetsReduction's
+        // own docs. SoftStack L-02: the library reads the gross active NAV itself now, rather than
+        // being passed computeFinalizeAssetAmount's net-realizable completeFundValue — see
+        // finalizeReserveAndUpdateBaseline's own docs.
         accountedAssets = FundCalculationLibrary.finalizeReserveAndUpdateBaseline(
             poolManagerLogic,
             withdrawalEscrow,
@@ -1334,13 +1345,13 @@ contract PoolLogic is
             assetAmount,
             fusdNetForAsset,
             totalClaims,
-            completeFundValue,
             accountedAssets
         );
 
         r.assetAmount = assetAmount;
         r.status = RequestStatus.FinalizedEscrowed;
         --pendingCashWithdrawCount[asset];
+        pendingCashWithdrawFusd[asset] -= fusdNetForAsset;
 
         // FNA-38: this request's backing asset just left active NAV above; its FUSD isn't
         // burned until claimCashWithdraw(), so exclude it from totalClaims in the meantime too —

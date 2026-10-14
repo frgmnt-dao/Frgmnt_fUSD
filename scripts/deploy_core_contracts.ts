@@ -2,6 +2,7 @@ import { ethers, upgrades } from 'hardhat';
 import fs from 'fs';
 import path from 'path';
 import { validateEurUsdFeed } from './utils/validateEurUsdFeed';
+import { assertProxyAdminOwner } from './utils/ownership';
 
 // ============================================================
 // USER CONFIG
@@ -191,9 +192,16 @@ async function main() {
   // 4) AssetHandler (proxy)
   // ============================================================
 
+  // initialOwner is the owner of the ProxyAdmin this call creates for the Transparent proxy —
+  // a role distinct from AssetHandler's own Ownable owner (set by initialize() below to the
+  // deployer, then separately transferred to GOVERNANCE_SAFE further down). Without this
+  // option the plugin defaults the ProxyAdmin's owner to the deploying account instead, which
+  // then controls the raw authority to replace this contract's implementation with anything —
+  // leaving that on the deployer regardless of what AssetHandler.owner() itself reports.
   const AssetHandler = await ethers.getContractFactory('AssetHandler', signer);
   const assetHandler = await upgrades.deployProxy(AssetHandler, [INITIAL_ASSETS], {
     initializer: 'initialize',
+    initialOwner: GOVERNANCE_SAFE,
     ...txOpts(),
   });
   await assetHandler.waitForDeployment();
@@ -267,6 +275,9 @@ async function main() {
   // Safe) cannot sign a script-driven transaction. So factoryOwner starts as this deployer, the
   // same transitional-ownership shape already used for AssetHandler above, and is handed to
   // GOVERNANCE_SAFE via setFactoryOwner() once setPoolLogic() has run — see step 8 below.
+  // initialOwner (the ProxyAdmin's owner) is a separate, unrelated role from _factoryOwner above
+  // and needs none of that transitional dance — nothing in this script ever needs to act as the
+  // ProxyAdmin's owner, so it is set to GOVERNANCE_SAFE directly, same reasoning as AssetHandler.
   const PoolManagerLogic = await ethers.getContractFactory('PoolManagerLogic', signer);
   const poolManagerLogic = await upgrades.deployProxy(
     PoolManagerLogic,
@@ -280,7 +291,7 @@ async function main() {
       PERFORMANCE_FEE_NUMERATOR,
       MANAGER_FEE_NUMERATOR,
     ],
-    { initializer: 'initialize', ...txOpts() },
+    { initializer: 'initialize', initialOwner: GOVERNANCE_SAFE, ...txOpts() },
   );
   await poolManagerLogic.waitForDeployment();
   const poolManagerProxy = await poolManagerLogic.getAddress();
@@ -332,6 +343,10 @@ async function main() {
     [fusdProxy, poolManagerProxy, GOVERNANCE_SAFE, SHARE_TOKEN_NAME, SHARE_TOKEN_SYMBOL],
     {
       initializer: 'initialize',
+      // The ProxyAdmin's owner, not the Ownable owner PoolLogic.initialize() sets above (already
+      // GOVERNANCE_SAFE directly, no transitional dance needed there) — same distinct role as the
+      // other two Transparent proxies above, same reason for setting it here directly.
+      initialOwner: GOVERNANCE_SAFE,
       unsafeAllowLinkedLibraries: true,
       // initializeAutoCompounding() (reinitializer(2)) and initializeAttestedWithdrawal()
       // (reinitializer(3)) are both annotated @custom:oz-upgrades-validate-as-initializer so the
@@ -443,6 +458,24 @@ async function main() {
       'deployment-time decision made separately, not derived by this script.',
   );
 
+  // SoftStack L-06: PoolManagerLogic.manager() and .factoryOwner() are BOTH GOVERNANCE_SAFE
+  // immediately after this script (POOL_MANAGER_ADDRESS equals GOVERNANCE_SAFE above, and
+  // setFactoryOwner(GOVERNANCE_SAFE) already ran). setAttestedWithdrawEnabled()'s factoryOwner
+  // branch is unreachable whenever msg.sender == manager (the manager branch is checked first),
+  // so for this one address the emergency stop cannot latch at all: it can disable, re-enable
+  // and rotate the attester at will, with no independent check on it. This is expected and safe
+  // ONLY as long as nothing attested-related is live yet — it must be resolved (the manager role
+  // moved to a genuinely different address via PoolManagerLogic.changeManager(), manager-only)
+  // before initializeAttestedWithdrawal() is called and the feature is actually enabled.
+  console.log(
+    `REQUIRED FOLLOW-UP (manager ${POOL_MANAGER_ADDRESS}): PoolManagerLogic(${poolManagerProxy}).` +
+      'changeManager(<a genuinely different address from GOVERNANCE_SAFE>) — manager() and ' +
+      'factoryOwner() are both GOVERNANCE_SAFE right now, which makes the factoryOwner emergency ' +
+      "stop on attested withdrawals (setAttestedWithdrawEnabled's factoryOwner branch) " +
+      'unreachable for that address (the manager branch is checked first). Move the manager role ' +
+      'before enabling the attested-withdrawal feature for real.',
+  );
+
   // ============================================================
   // 🔍 IMPLEMENTATION & ADMIN ADDRESSES (EIP-1967)
   // ============================================================
@@ -463,6 +496,20 @@ async function main() {
     PoolLogic: await resolve('PoolLogic (Transparent)', poolLogicProxy),
     TokenLogic: await resolve('TokenLogic (UUPS)', fusdProxy),
   };
+
+  // ============================================================
+  // 🔒 ProxyAdmin ownership assertion
+  // ============================================================
+  // Defense in depth for the initialOwner options set above: confirms the three Transparent
+  // proxies' ProxyAdmin contracts are actually owned by GOVERNANCE_SAFE, not left on the
+  // deployer by a future edit that drops initialOwner (the plugin's own default). Checked here,
+  // not just relied on at deployProxy time, because that default is silent — nothing about the
+  // proxy's own owner()/factoryOwner() (both already verified correct above) would reveal it,
+  // and this is exactly the gap that previously went unnoticed. TokenLogic is UUPS and has no
+  // ProxyAdmin, so it is not checked here.
+  await assertProxyAdminOwner('AssetHandler', assetHandlerProxy, GOVERNANCE_SAFE, signer);
+  await assertProxyAdminOwner('PoolManagerLogic', poolManagerProxy, GOVERNANCE_SAFE, signer);
+  await assertProxyAdminOwner('PoolLogic', poolLogicProxy, GOVERNANCE_SAFE, signer);
 
   // ============================================================
   // Save deployment

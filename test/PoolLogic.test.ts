@@ -1216,8 +1216,15 @@ describe('PoolLogic', () => {
   });
 
   it('excludes finalized queued reserves from immediate withdrawable value', async () => {
-    const { pool, fusd, asset, assetGuard, manager, user, user2, withdrawalEscrow } =
+    const { pool, fusd, asset, assetGuard, manager, user, user2, withdrawalEscrow, poolManager } =
       await loadFixture(deployPoolFixture);
+    // SoftStack L-02: finalizeCashWithdraw() now reads the pool's gross active NAV (see
+    // FundCalculationLibrary.finalizeReserveAndUpdateBaseline's own docs), which TestPoolManagerLogic
+    // only computes correctly in its opt-in dynamic mode — the default flat _totalFundValue (never
+    // set by this fixture) stays 0 and would corrupt accountedAssets here. TestAssetGuard already
+    // tracks the pool's real token balance, so dynamic mode is exact for this single-asset setup.
+    await poolManager.setPool(await pool.getAddress());
+    await poolManager.setDynamicTotalFundValue(true);
     const requestAmount = ethers.parseUnits('100', 18);
     const immediateAmount = ethers.parseUnits('50', 18);
     const poolAsset = ethers.parseUnits('1000', 18);
@@ -2606,10 +2613,16 @@ describe('PoolLogic', () => {
   // double-counting the same value and understating every other still-active claim's fair share.
   describe('FNA-38: finalized-but-unclaimed reservations must not inflate other claims (totalClaims)', () => {
     it('gives an immediate withdrawer their true fair share instead of over-haircutting against a coexisting finalized reservation', async () => {
-      const { pool, fusd, asset, manager, user, user2 } = await loadFixture(deployPoolFixture);
+      const { pool, fusd, asset, manager, user, user2, poolManager } =
+        await loadFixture(deployPoolFixture);
       const alice = user;
       const bob = user2;
       const poolAddr = await pool.getAddress();
+      // SoftStack L-02: see the identical note on "excludes finalized queued reserves..." above —
+      // finalizeCashWithdraw() needs an accurate gross NAV, which this fixture's default flat
+      // _totalFundValue (never set here) cannot provide.
+      await poolManager.setPool(poolAddr);
+      await poolManager.setDynamicTotalFundValue(true);
 
       // Pool: 100 value backing Alice's 50 FUSD + Bob's 50 FUSD (fully collateralized).
       await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
