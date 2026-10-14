@@ -38,7 +38,20 @@ library FundCalculationLibrary {
         netYield = incrementalYield - performanceFee;
     }
 
+    /// @dev SoftStack M-04: _totalFusd is a raw fUSD token count while calculatePerformanceFee's
+    ///      incrementalYield is a USD-18 NAV delta. Both used to be summed and minted as one fUSD
+    ///      amount — correct only while NAV/fUSD == $1, which stops holding the moment any yield
+    ///      has accrued (the pool's normal state). Sized here against _totalValue (the pool's
+    ///      active NAV, already USD-18) instead: _totalFusd now only gates the "no outstanding
+    ///      claims, don't charge a fee on NAV nobody holds a claim to" case, same role
+    ///      finalizedUnclaimedFusd's exclusion (see _managementFeeBase's own doc) already plays —
+    ///      _totalValue itself already nets out exactly the same escrowed/finalized value that
+    ///      exclusion nets out of the token count, so no separate ratio is needed to reconcile
+    ///      the two; using a token-supply-based ratio here instead (an earlier version of this
+    ///      fix) double-counted that exclusion and undercharged whenever a finalized-but-unclaimed
+    ///      withdrawal was outstanding.
     function calculateManagementFee(
+        uint256 _totalValue,
         uint256 _totalFusd,
         uint256 _lastFeeMintTime,
         uint256 _managementFeeNumerator,
@@ -52,13 +65,13 @@ library FundCalculationLibrary {
 
         if (dt == 0) return (0, lastFeeMintTime);
 
-        // No supply or zero fee rate → no management fee
+        // No outstanding claims or zero fee rate → no management fee
         if (_totalFusd == 0 || _managementFeeNumerator == 0) {
             return (0, lastFeeMintTime);
         }
 
-        // Linear time-based management fee
-        managementFee = (_totalFusd * _managementFeeNumerator * dt) / _feeDenominator / 365 days;
+        // Linear time-based management fee, on the USD-18 active-NAV base
+        managementFee = (_totalValue * _managementFeeNumerator * dt) / _feeDenominator / 365 days;
     }
 
     // ============================================================
@@ -202,6 +215,7 @@ library FundCalculationLibrary {
         );
 
         (managementFee, newLastFeeMintTime) = calculateManagementFee(
+            _totalValue,
             _totalFusd,
             _lastFeeMintTime,
             _managementFeeNumerator,

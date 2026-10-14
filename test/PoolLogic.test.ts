@@ -2788,6 +2788,14 @@ describe('PoolLogic', () => {
       // management-fee component exactly.
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n);
 
+      // SoftStack M-04: the management fee is now sized against totalFundValue() (real NAV),
+      // not just fusd.totalSupply() — so this test needs the mock to actually report NAV from
+      // the pool's real asset balance (the default flat _totalFundValue mock defaults to 0,
+      // which was fine before this fix since management fee never read it). Same opt-in
+      // dynamicTotalFundValue mode used by the SoftStack L-02 fixes in this same file.
+      await poolManager.setPool(poolAddr);
+      await poolManager.setDynamicTotalFundValue(true);
+
       // Pool: 100 value backing Alice's 100 FUSD (fully collateralized, so accountedAssets ==
       // totalValue and netYield stays 0 regardless of the finalize below).
       await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
@@ -3471,12 +3479,16 @@ describe('PoolLogic', () => {
   });
 
   describe('FNA-22: pre-deposit fee checkpoint', () => {
-    // _accrueYield() clamps managementFee to netYield (totalValue - accountedAssets), so every
-    // test below sets totalFundValue far ahead of any accountedAssets ratcheting these small
-    // management-fee numbers could cause, keeping netYield comfortably non-binding throughout.
-    // See UtilityLibraries.test.ts's FNA-22 coverage for a clamp-independent, exact-arithmetic
-    // proof of the underlying retroactive-taxation fix via computeYieldAccrual directly.
-    const ampleFundValue = ethers.parseUnits('10000000', 18);
+    // _accrueYield() clamps managementFee to netYield (totalValue - accountedAssets). These
+    // tests never touch accountedAssets (stays at its 0 default), so netYield == totalValue —
+    // the clamp cannot bind as long as totalFundValue is set to any realistic pool size, since
+    // a 10%/year fee over weeks is always a small fraction of totalValue itself.
+    // SoftStack M-04: totalFundValue now also IS the management-fee base directly (previously
+    // only fusd.totalSupply() was), so each test below sets it to the pool's actual fUSD supply
+    // at peg (not an arbitrarily inflated figure — the old ampleFundValue no longer makes sense
+    // once totalValue feeds the fee calculation itself) — see UtilityLibraries.test.ts's FNA-22
+    // coverage for a clamp-independent, exact-arithmetic proof of the underlying
+    // retroactive-taxation fix via computeYieldAccrual directly.
 
     it('checkpointFeesForDeposit reverts unless called by TokenLogic (fusd)', async () => {
       const { pool, user } = await loadFixture(deployPoolFixture);
@@ -3490,7 +3502,8 @@ describe('PoolLogic', () => {
     it('checkpointFeesForDeposit settles the management fee against the pre-call fUSD supply and resets the accrual clock', async () => {
       const { pool, fusd, poolManager, manager, user } = await loadFixture(deployPoolFixture);
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n); // 10%/year mgmt, 0% perf
-      await poolManager.setTotalFundValue(ampleFundValue);
+      // At peg with the 1000 fUSD minted below, matching the already-written expected-fee math.
+      await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
 
       const managerAddr = await manager.getAddress();
       const poolAddr = await pool.getAddress();
@@ -3537,7 +3550,8 @@ describe('PoolLogic', () => {
       const { pool, fusd, poolManager, manager, user, user2 } =
         await loadFixture(deployPoolFixture);
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n); // 10%/year mgmt, 0% perf
-      await poolManager.setTotalFundValue(ampleFundValue);
+      // At peg with the 1000 fUSD minted below.
+      await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
 
       const managerAddr = await manager.getAddress();
       const poolAddr = await pool.getAddress();
@@ -3549,11 +3563,11 @@ describe('PoolLogic', () => {
       await fusd.triggerCheckpointFeesForDeposit(poolAddr);
       const mgrBalAfterCheckpoint = await fusd.balanceOf(managerAddr);
 
-      // Simulate a large deposit arriving right after the checkpoint. Fund value is bumped
-      // further ahead of the just-ratcheted accountedAssets so netYield stays ample for the
-      // next accrual too.
+      // Simulate a large deposit arriving right after the checkpoint. Fund value tracks the new,
+      // larger fUSD supply at peg (SoftStack M-04: totalFundValue is the fee base itself now, so
+      // an arbitrarily inflated figure here would no longer give a representative fee).
       await fusd.mint(await user2.getAddress(), ethers.parseUnits('100000', 18));
-      await poolManager.setTotalFundValue(ampleFundValue * 2n);
+      await poolManager.setTotalFundValue(ethers.parseUnits('101000', 18));
       await increaseTime(1 * 24 * 60 * 60); // dt2 = 1 day
 
       // Trigger the next accrual via a dust stake (transfers, doesn't mint/burn fUSD, so it
@@ -3578,7 +3592,10 @@ describe('PoolLogic', () => {
       const { pool, fusd, poolManager, manager, user, user2 } =
         await loadFixture(deployPoolFixture);
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n);
-      await poolManager.setTotalFundValue(ampleFundValue);
+      // At peg with the post-deposit (final) fUSD supply — this flat mock is set once, and the
+      // single accrual below only happens after both mints, matching the comment's own ~101000
+      // fUSD expectation (SoftStack M-04: totalFundValue is the fee base itself now).
+      await poolManager.setTotalFundValue(ethers.parseUnits('101000', 18));
 
       const managerAddr = await manager.getAddress();
 
