@@ -70,7 +70,7 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 (IV3SwapRouter.ExactInputParams)
             );
 
-            (address srcAsset, address dstAsset) = _decodePath(params.path);
+            (address srcAsset, address dstAsset) = _decodePath(params.path, poolManagerLogicAssets);
 
             require(
                 poolManagerLogicAssets.isSupportedAsset(dstAsset),
@@ -120,7 +120,7 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 (IV3SwapRouter.ExactOutputParams)
             );
 
-            (address dstAsset, address srcAsset) = _decodePath(params.path);
+            (address dstAsset, address srcAsset) = _decodePath(params.path, poolManagerLogicAssets);
 
             require(
                 poolManagerLogicAssets.isSupportedAsset(dstAsset),
@@ -183,17 +183,29 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
     }
 
     /// @dev Decodes a UniswapV3 path to the first (src) and final (dst) assets.
+    /// @dev SoftStack M-12: previously only validated the final (dst) token — see txGuard's own
+    ///      isSupportedAsset(dstAsset) checks — leaving every INTERMEDIATE hop of a multi-hop
+    ///      path completely unvalidated. A manager or trader could route a swap through an
+    ///      arbitrary, unregistered intermediate token with no guard ever inspecting it. This
+    ///      walk already visits every intermediate hop token to find the final one (`asset`
+    ///      below, captured once per iteration); validating it here, in the same pass, adds no
+    ///      second traversal — just one extra check per hop already being read.
     function _decodePath(
-        bytes memory path
-    ) internal pure returns (address srcAsset, address dstAsset) {
+        bytes memory path,
+        IHasSupportedAsset poolManagerLogicAssets
+    ) internal view returns (address srcAsset, address dstAsset) {
         (srcAsset, , ) = path.decodeFirstPool();
 
         address asset;
 
-        // Walk the path to find the final token
+        // Walk the path to find the final token, validating every intermediate hop along the way.
         while (path.hasMultiplePools()) {
             path = path.skipToken();
             (asset, , ) = path.decodeFirstPool();
+            require(
+                poolManagerLogicAssets.isSupportedAsset(asset),
+                "Frgmnt: unsupported hop asset"
+            );
         }
 
         // Destination is the token of the last pool in the path

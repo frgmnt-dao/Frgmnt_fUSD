@@ -443,6 +443,102 @@ describe('UniswapV3RouterGuard (original contract)', () => {
   });
 
   // -------------------------
+  // SoftStack M-12: every intermediate hop of a multi-hop path must itself be a supported
+  // asset, not just the first and last token.
+  // -------------------------
+  describe('SoftStack M-12: intermediate hop token validation', () => {
+    it('exactInput reverts when the middle hop token is not a supported asset', async () => {
+      await poolManagerLogic.setSupportedAsset(tokenMid.target, false);
+
+      const path = encodePath([tokenIn.target, tokenMid.target, tokenOut.target], [FEE, FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountIn: ethers.parseUnits('1', 18),
+        amountOutMinimum: 0n,
+      };
+      const data = routerIface.encodeFunctionData('exactInput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: unsupported hop asset');
+    });
+
+    it('exactOutput reverts when the middle hop token is not a supported asset', async () => {
+      await poolManagerLogic.setSupportedAsset(tokenMid.target, false);
+
+      // exactOutput paths are encoded output-first: tokenOut -> tokenMid -> tokenIn.
+      const path = encodePath([tokenOut.target, tokenMid.target, tokenIn.target], [FEE, FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountOut: ethers.parseUnits('1', 18),
+        amountInMaximum: ethers.parseUnits('2', 18),
+      };
+      const data = routerIface.encodeFunctionData('exactOutput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: unsupported hop asset');
+    });
+
+    it('exactInput succeeds and still emits ExchangeFrom once the hop token is (re-)registered as supported', async () => {
+      // Sanity: the guard-level rejection above is specifically about the asset registry, not
+      // path structure — the exact same path succeeds once tokenMid is supported again,
+      // matching the pre-existing multi-hop happy-path test above.
+      const path = encodePath([tokenIn.target, tokenMid.target, tokenOut.target], [FEE, FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountIn: ethers.parseUnits('1', 18),
+        amountOutMinimum: 0n,
+      };
+      const data = routerIface.encodeFunctionData('exactInput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.emit(guard, 'ExchangeFrom');
+    });
+
+    it('a 3-hop path validates every intermediate token, not just the first one found', async () => {
+      const MockERC20 = await ethers.getContractFactory('MockERC20');
+      const tokenMid2 = await MockERC20.deploy(18);
+      await tokenMid2.waitForDeployment();
+      // Deliberately never registered as a supported asset.
+
+      const path = encodePath(
+        [tokenIn.target, tokenMid.target, tokenMid2.target, tokenOut.target],
+        [FEE, FEE, FEE],
+      );
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountIn: ethers.parseUnits('1', 18),
+        amountOutMinimum: 0n,
+      };
+      const data = routerIface.encodeFunctionData('exactInput', [params]);
+
+      // tokenMid (the first intermediate hop) IS supported; tokenMid2 (the second) is not —
+      // the walk must not stop checking after the first intermediate token passes.
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: unsupported hop asset');
+    });
+  });
+
+  // -------------------------
   // multicall
   // -------------------------
   it('multicall - happy path with single exactInputSingle inside', async () => {

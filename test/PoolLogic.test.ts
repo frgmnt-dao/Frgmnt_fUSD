@@ -715,6 +715,65 @@ describe('PoolLogic', () => {
     });
   });
 
+  describe('SoftStack M-12 verification: does M-01 already block the hook-triggered harvest/stake/unstake reentrancy this finding depends on?', () => {
+    it('a hook-token-style callback calling harvest() directly, mid-execTransaction, reverts via the shared ReentrancyGuard mutex', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('ReentrantHarvestCallbackSender');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      const callHarvest = relay.interface.encodeFunctionData('callHarvest', [poolAddr]);
+      await pool.connect(manager).execTransaction(relayAddr, callHarvest);
+
+      expect(await relay.lastHarvestReverted()).to.equal(true);
+      expect(await relay.lastHarvestRevertSelector()).to.equal(
+        pool.interface.getError('ReentrancyGuardReentrantCall')!.selector,
+      );
+    });
+
+    it('a hook-token-style callback calling stake() directly, mid-execTransaction, reverts via the same mutex', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('ReentrantHarvestCallbackSender');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      const callStake = relay.interface.encodeFunctionData('callStake', [poolAddr, 1n]);
+      await pool.connect(manager).execTransaction(relayAddr, callStake);
+
+      expect(await relay.lastStakeReverted()).to.equal(true);
+      expect(await relay.lastStakeRevertSelector()).to.equal(
+        pool.interface.getError('ReentrancyGuardReentrantCall')!.selector,
+      );
+    });
+
+    it('a hook-token-style callback calling unstake() directly, mid-execTransaction, reverts via the same mutex', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('ReentrantHarvestCallbackSender');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      const callUnstake = relay.interface.encodeFunctionData('callUnstake', [poolAddr, 1n]);
+      await pool.connect(manager).execTransaction(relayAddr, callUnstake);
+
+      expect(await relay.lastUnstakeReverted()).to.equal(true);
+      expect(await relay.lastUnstakeRevertSelector()).to.equal(
+        pool.interface.getError('ReentrancyGuardReentrantCall')!.selector,
+      );
+    });
+  });
+
   describe('SoftStack M-02: executeOperation (Aave flashloan callback) guarded-call invariant', () => {
     it('reverts when called with no PoolLogic call already in progress', async () => {
       const { pool } = await loadFixture(deployPoolFixture);
