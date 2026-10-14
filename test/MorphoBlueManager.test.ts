@@ -16,6 +16,36 @@ describe('MorphoBlueManager', () => {
     return { manager, owner, other };
   }
 
+  // SoftStack M-11: setPoolMarkets() now reads the pool's own manager()/trader() through
+  // IPoolLogic(pool).poolManagerLogic(), so `pool` can no longer be an opaque, uninterpreted
+  // address the way the rest of this file used before this fix — it must be a real contract
+  // implementing poolManagerLogic(), pointing at a real contract implementing IManaged. Wires a
+  // minimal but genuine pair (MockPoolLogicWithManager + TestPoolManagerLogic) and defaults its
+  // manager/trader to two signers that are never this file's MorphoBlueManager owner, so every
+  // pre-existing test in this file (none of which is about the M-11 check itself) keeps passing
+  // unchanged. The dedicated 'SoftStack M-11' tests below pass managerAddr/traderAddr explicitly
+  // to exercise the check itself.
+  async function makeRealPool(managerAddr?: string, traderAddr?: string) {
+    const signers = await ethers.getSigners();
+    const defaultManager = signers[5].address;
+    const defaultTrader = signers[6].address;
+
+    const PmlFactory = await ethers.getContractFactory('TestPoolManagerLogic');
+    const pml = await PmlFactory.deploy(
+      managerAddr ?? defaultManager,
+      traderAddr ?? defaultTrader,
+      'Test Manager',
+      ethers.ZeroAddress,
+    );
+    await pml.waitForDeployment();
+
+    const PoolFactory = await ethers.getContractFactory('MockPoolLogicWithManager');
+    const pool = await PoolFactory.deploy(await pml.getAddress(), ethers.ZeroAddress);
+    await pool.waitForDeployment();
+
+    return await pool.getAddress();
+  }
+
   const mkId = (n: number) => ethers.zeroPadValue(ethers.toBeHex(n), 32) as `0x${string}`;
 
   it('deployer is owner', async () => {
@@ -48,7 +78,7 @@ describe('MorphoBlueManager', () => {
 
   it('setPoolMarkets reverts for non-owner', async () => {
     const { manager, other } = await deploy();
-    const pool = ethers.Wallet.createRandom().address;
+    const pool = await makeRealPool();
     await expect(manager.connect(other).setPoolMarkets(pool, [])).to.be.revertedWithCustomError(
       manager,
       'OwnableUnauthorizedAccount',
@@ -57,7 +87,7 @@ describe('MorphoBlueManager', () => {
 
   it('setPoolMarkets sets markets and emits event', async () => {
     const { manager } = await deploy();
-    const pool = ethers.Wallet.createRandom().address;
+    const pool = await makeRealPool();
     const id1 = mkId(1);
     const id2 = mkId(2);
 
@@ -77,7 +107,7 @@ describe('MorphoBlueManager', () => {
 
   it('setPoolMarkets replaces old markets (clears stale validity)', async () => {
     const { manager } = await deploy();
-    const pool = ethers.Wallet.createRandom().address;
+    const pool = await makeRealPool();
     const id1 = mkId(1);
     const id2 = mkId(2);
 
@@ -93,19 +123,19 @@ describe('MorphoBlueManager', () => {
 
   it('getPoolMarketsLength returns 0 for unknown pool', async () => {
     const { manager } = await deploy();
-    const pool = ethers.Wallet.createRandom().address;
+    const pool = await makeRealPool();
     expect(await manager.getPoolMarketsLength(pool)).to.equal(0n);
   });
 
   it('getPoolMarkets returns empty for unknown pool', async () => {
     const { manager } = await deploy();
-    const pool = ethers.Wallet.createRandom().address;
+    const pool = await makeRealPool();
     expect((await manager.getPoolMarkets(pool)).length).to.equal(0);
   });
 
   it('can clear all markets by setting empty array', async () => {
     const { manager } = await deploy();
-    const pool = ethers.Wallet.createRandom().address;
+    const pool = await makeRealPool();
     const id1 = mkId(1);
 
     await manager.setPoolMarkets(pool, [id1]);
@@ -121,7 +151,7 @@ describe('MorphoBlueManager', () => {
 
   it('reverts on a duplicate marketId within the same call (FNA-12)', async () => {
     const { manager } = await deploy();
-    const pool = ethers.Wallet.createRandom().address;
+    const pool = await makeRealPool();
     const id1 = mkId(1);
     const id2 = mkId(2);
 
@@ -132,7 +162,7 @@ describe('MorphoBlueManager', () => {
 
   it('allows re-using a marketId across separate setPoolMarkets calls (not a cross-call duplicate)', async () => {
     const { manager } = await deploy();
-    const pool = ethers.Wallet.createRandom().address;
+    const pool = await makeRealPool();
     const id1 = mkId(1);
 
     await manager.setPoolMarkets(pool, [id1]);
@@ -141,6 +171,78 @@ describe('MorphoBlueManager', () => {
     await expect(manager.setPoolMarkets(pool, [id1])).to.not.be.reverted;
     expect(await manager.isValidPoolMarket(pool, id1)).to.equal(true);
     expect(await manager.getPoolMarketsLength(pool)).to.equal(1n);
+  });
+
+  // -----------------------------------------------------------------------
+  // SoftStack M-11: the active allowlist is documented as a second, independent
+  // approval gate — on the live deployment it was not independent, since this
+  // contract's owner and the pool's manager were the same Safe. setPoolMarkets() must
+  // now refuse to authorize markets for a pool whose manager or trader is this
+  // contract's own owner.
+  // -----------------------------------------------------------------------
+  describe('SoftStack M-11: owner cannot also be the pool manager or trader', () => {
+    it("reverts when the pool manager is this contract's owner", async () => {
+      const { manager, owner } = await deploy();
+      const pool = await makeRealPool(owner.address);
+      const id1 = mkId(1);
+
+      await expect(manager.setPoolMarkets(pool, [id1])).to.be.revertedWithCustomError(
+        manager,
+        'OwnerIsPoolManagerOrTrader',
+      );
+    });
+
+    it("reverts when the pool trader is this contract's owner", async () => {
+      const { manager, owner } = await deploy();
+      const pool = await makeRealPool(undefined, owner.address);
+      const id1 = mkId(1);
+
+      await expect(manager.setPoolMarkets(pool, [id1])).to.be.revertedWithCustomError(
+        manager,
+        'OwnerIsPoolManagerOrTrader',
+      );
+    });
+
+    it('a pool with no trader assigned (trader = address(0)) is not treated as owner == trader', async () => {
+      const { manager, owner } = await deploy();
+      // Explicitly zero trader — must not be confused with "trader equals owner" just because
+      // both can be checked against the same owner address; zero means "no trader role set".
+      const pool = await makeRealPool(undefined, ethers.ZeroAddress);
+      const id1 = mkId(1);
+
+      // Sanity: owner.address is never the zero address, so this isn't accidentally passing
+      // because owner.address === ethers.ZeroAddress.
+      expect(owner.address).to.not.equal(ethers.ZeroAddress);
+      await expect(manager.setPoolMarkets(pool, [id1])).to.not.be.reverted;
+      expect(await manager.isValidPoolMarket(pool, id1)).to.equal(true);
+    });
+
+    it('succeeds once ownership is genuinely separate from the pool manager and trader', async () => {
+      const { manager } = await deploy();
+      const pool = await makeRealPool(); // defaults: manager/trader both != this manager's owner
+      const id1 = mkId(1);
+
+      await expect(manager.setPoolMarkets(pool, [id1])).to.not.be.reverted;
+      expect(await manager.isValidPoolMarket(pool, id1)).to.equal(true);
+    });
+
+    it("transferOwnership to a pool's manager immediately blocks further setPoolMarkets calls for that pool — the check is structural, not a one-time deploy-time gate", async () => {
+      const { manager, owner } = await deploy();
+      const [, , , , , futureManager] = await ethers.getSigners();
+      const pool = await makeRealPool(futureManager.address);
+      const id1 = mkId(1);
+
+      // Works fine while ownership and pool management are genuinely separate.
+      await expect(manager.setPoolMarkets(pool, [id1])).to.not.be.reverted;
+
+      // The owner hands this contract's ownership to the SAME address that happens to manage
+      // `pool`. From this point on, every setPoolMarkets call for that specific pool must fail
+      // — the check re-evaluates live state on every call, it does not just gate construction.
+      await manager.connect(owner).transferOwnership(futureManager.address);
+      await expect(
+        manager.connect(futureManager).setPoolMarkets(pool, [id1]),
+      ).to.be.revertedWithCustomError(manager, 'OwnerIsPoolManagerOrTrader');
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -162,13 +264,13 @@ describe('MorphoBlueManager', () => {
       const manager = await Factory.deploy(morphoAddr);
       await manager.waitForDeployment();
 
-      const pool = ethers.Wallet.createRandom().address;
+      const pool = await makeRealPool();
       return { manager, owner, other, morpho, morphoAddr, pool };
     }
 
     it('setPoolMarkets also tracks newly-authorized markets', async () => {
       const { manager } = await deploy();
-      const pool = ethers.Wallet.createRandom().address;
+      const pool = await makeRealPool();
       const id1 = mkId(1);
       const id2 = mkId(2);
 
@@ -183,7 +285,7 @@ describe('MorphoBlueManager', () => {
 
     it('delisting a market clears isValidPoolMarket but leaves it tracked', async () => {
       const { manager } = await deploy();
-      const pool = ethers.Wallet.createRandom().address;
+      const pool = await makeRealPool();
       const id1 = mkId(1);
       const id2 = mkId(2);
 
