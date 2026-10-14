@@ -58,6 +58,30 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    vault drawing from the exact same `(hub, assetId)`; see that guard's own contract-level
 ///    documentation for the full reasoning (a symmetric, deliberately out-of-scope gap, tracked
 ///    there so it only needs stating once).
+///  - SoftStack M-05 (the same gap, a second axis): `HubLiquidityLedger` is a `memory` struct,
+///    scoped to one top-level call to `getWithdrawableBalance`/`withdrawProcessing` — it cannot
+///    and does not coordinate across *separate* calls. Two different pools (or the same pool's
+///    separate per-asset guard-call frames within one withdrawal, since PoolLogic invokes each
+///    asset's guard independently) can each independently read the Hub's *full*
+///    `IHubBase.getAssetLiquidity(assetId)` and each plan to withdraw against it, with neither
+///    call aware of the other's claim. This cannot produce an incorrect payout — the real
+///    `ISpoke.withdraw`/Hub liquidity check that actually executes is the single source of
+///    truth, and reverts cleanly (reverting that pool's whole withdrawal transaction) if the two
+///    claims together exceed what the Hub can deliver — but it is a genuine liveness gap: the
+///    second caller's withdrawal can fail even though its own quote, read a moment earlier, said
+///    it would succeed.
+///    A real fix needs either persistent on-chain state recording in-flight claims (impossible
+///    from `getWithdrawableBalance`/`withdrawProcessing` as written, since both are `view` by
+///    interface — IWithdrawableBalanceGuard and the asset-guard `withdrawProcessing` contract
+///    across this whole codebase) or coordination above this guard entirely (e.g. in PoolLogic
+///    or a shared registry), either of which is a materially larger, interface-breaking change
+///    than this one finding's severity (a liveness freeze, not a fund-safety issue — matching
+///    the cross-guard-type gap immediately above, already accepted on the same reasoning)
+///    justifies. Left as a documented, accepted residual risk rather than a partial mitigation
+///    (e.g. a withdrawable-liquidity haircut) that would only reduce, not close, the race while
+///    adding real surface (a new owner-settable or immutable parameter threaded through every
+///    deploy/upgrade script that constructs this guard and its Selective variant) for no
+///    corresponding guarantee.
 ///  - FNA-15: `withdrawProcessing` calls `ISpoke.withdraw` directly rather than routing through
 ///    Aave's TakerPositionManager. PoolLogic always dispatches these calls from its own address,
 ///    so the position owner and the caller are the same address — Aave's own
