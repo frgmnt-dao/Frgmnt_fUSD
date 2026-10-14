@@ -8,6 +8,10 @@ import { IGuard } from "../interfaces/guards/IGuard.sol";
 import { ITxTrackingGuard } from "../interfaces/guards/ITxTrackingGuard.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { CallResultChecker } from "./CallResultChecker.sol";
+import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
+import {
+    IMorphoBlueLendingPoolAssetGuard
+} from "../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
 
 library PoolTxExecutor {
     // ============================================================
@@ -151,5 +155,74 @@ library PoolTxExecutor {
         if (!tracking) return;
 
         ITxTrackingGuard(guard).afterTxGuard(poolManagerLogic, to, data);
+    }
+
+    // ============================================================
+    // =                MORPHO FLASHLOAN CALLBACK                  =
+    // ============================================================
+    //
+    // The callback body below previously lived inline in PoolLogicFlashloanMorpho (an abstract,
+    // storage-less contract inherited by PoolLogic), so its bytecode was part of PoolLogic's own
+    // runtime code. Moved here verbatim purely to recover EIP-170 headroom on PoolLogic — the
+    // same pattern as exec() above and WithdrawalPlanLib/FundCalculationLibrary. This library is
+    // reached via DELEGATECALL, so address(this) is still the pool and msg.sender is still the
+    // Morpho flashloan provider exactly as before; every external call below is still made from
+    // the pool's own address, and revert data (including the require strings) bubbles up
+    // unchanged. The two values that used to come from PoolLogic hooks are derived from the
+    // passed-in poolManagerLogic address instead: _getPoolManagerLogic() is that address itself,
+    // and PoolLogic's _isAllowedCallbackSender(sender) override is exactly
+    // IPoolManagerLogic(poolManagerLogic).getAllowedCallbackSenders(sender).
+    //
+    // The Aave callback (PoolLogicFlashloanAave) is deliberately left inline: it is now
+    // PoolLogic's only direct user of CallResultChecker, so keeping it there keeps PoolLogic's
+    // library link set (FundCalculationLibrary, PoolTxExecutor, CallResultChecker,
+    // WithdrawalPlanLib) unchanged for every existing deploy/upgrade script and test fixture.
+
+    /// @dev Logic moved verbatim from PoolLogicFlashloanMorpho._executeMorphoFlashloan.
+    function executeMorphoFlashloan(
+        address pml,
+        uint256 repayAmount,
+        bytes calldata data
+    ) external {
+        require(
+            IPoolManagerLogic(pml).getAllowedCallbackSenders(msg.sender),
+            "callback sender not allowed"
+        );
+        require(data.length >= 64, "bad morpho data");
+
+        address guard = IPoolManagerLogic(pml).getAssetGuard(msg.sender);
+        require(guard != address(0), "invalid morpho guard");
+
+        require(msg.sender == _validateMorphoGuard(guard), "invalid morpho sender");
+
+        (address repayAsset, bytes memory innerParams) = abi.decode(data, (address, bytes));
+        require(repayAsset != address(0), "repayAsset=0");
+
+        uint256 balanceBefore = IERC20(repayAsset).balanceOf(address(this));
+
+        IAssetGuard.MultiTransaction[] memory txs = IMorphoBlueLendingPoolAssetGuard(guard)
+            .flashloanProcessing(address(this), repayAsset, repayAmount, innerParams);
+
+        bool success;
+        bytes memory returndata;
+
+        for (uint256 i = 0; i < txs.length; ++i) {
+            (success, returndata) = txs[i].to.call(txs[i].txData);
+
+            CallResultChecker._checkCallResult(txs[i].txData, success, returndata);
+        }
+
+        require(IERC20(repayAsset).balanceOf(address(this)) >= balanceBefore, "high slippage");
+    }
+
+    // Guard MUST implement IMorphoBlueLendingPoolAssetGuard.
+    // Using staticcall to avoid DoS if the guard is misconfigured.
+    function _validateMorphoGuard(address guard) private view returns (address) {
+        (bool ok, bytes memory data) = guard.staticcall(
+            abi.encodeWithSelector(IMorphoBlueLendingPoolAssetGuard.morpho.selector)
+        );
+
+        require(ok && data.length == 32, "invalid morpho guard");
+        return abi.decode(data, (address));
     }
 }
