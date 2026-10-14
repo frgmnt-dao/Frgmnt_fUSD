@@ -303,6 +303,7 @@ contract PoolLogic is
     error DecayWindowTooShort();
     error NoRotationPending();
     error RotationNotYetDue();
+    error FlashloanCallbackOutsideGuardedCall();
     // SlippageExceeded, InvalidReservedBalance, InvalidAssetData, AssetNotSupported, and
     // InvalidFundValue moved to IPoolLogic (shared with WithdrawalPlanLib.sol, which also
     // throws them for the attested-plan path). InvalidGuard, ComplexWithdrawFailed, TxFailed,
@@ -1629,6 +1630,20 @@ contract PoolLogic is
     /// @param initiator Address that initiated the flash loan
     /// @param params Arbitrary bytes passed to the receiver
     /// @return success Boolean indicating whether the operation was successful
+    /// @dev SoftStack M-02: NOT nonReentrant. This callback is a legitimate nested call that
+    ///      only ever arrives mid-flight inside an already-nonReentrant outer call
+    ///      (execTransaction or withdrawCashImmediate*/withdrawCashImmediateWithPlan, the only
+    ///      paths that can make PoolLogic itself call Aave's flashLoan — Aave's own
+    ///      `initiator == address(this)` check in _executeAaveFlashloan rules out any
+    ///      externally-triggered call reaching here with no lock held at all). Applying
+    ///      nonReentrant directly here, as the finding's literal text suggests, would make OZ's
+    ///      guard reject this exact legitimate nested call — breaking every withdrawal that
+    ///      unwinds an Aave debt position — since the modifier cannot distinguish an intentional
+    ///      nested step of the same outer call from an attack. The outer lock already covers the
+    ///      actual concern (an ERC-777-style hook re-entering harvest()/stake()/etc. during the
+    ///      unwind loop, which are nonReentrant themselves and so correctly reject it once the
+    ///      outer lock is held) — this assertion only documents and enforces that invariant
+    ///      against a future code path that might accidentally reach this callback unlocked.
     function executeOperation(
         address[] calldata assets,
         uint256[] calldata amounts,
@@ -1636,6 +1651,7 @@ contract PoolLogic is
         address initiator,
         bytes calldata params
     ) external override returns (bool) {
+        if (!_reentrancyGuardEntered()) revert FlashloanCallbackOutsideGuardedCall();
         return _executeAaveFlashloan(assets, amounts, premiums, initiator, params);
     }
 

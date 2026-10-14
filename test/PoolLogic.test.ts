@@ -715,6 +715,42 @@ describe('PoolLogic', () => {
     });
   });
 
+  describe('SoftStack M-02: executeOperation (Aave flashloan callback) guarded-call invariant', () => {
+    it('reverts when called with no PoolLogic call already in progress', async () => {
+      const { pool } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('FlashloanCallbackRelay');
+      const relay = await Relay.deploy();
+
+      await relay.callExecuteOperation(poolAddr);
+      expect(await relay.lastAaveReverted()).to.equal(true);
+      expect(await relay.lastAaveRevertSelector()).to.equal(
+        pool.interface.getError('FlashloanCallbackOutsideGuardedCall')!.selector,
+      );
+    });
+
+    it('does NOT hit that guard when called nested inside an already-guarded execTransaction call (the legitimate Aave pattern)', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('FlashloanCallbackRelay');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      // Nested via execTransaction, exactly like Aave calling back mid-flashloan.
+      const callAave = relay.interface.encodeFunctionData('callExecuteOperation', [poolAddr]);
+      await pool.connect(manager).execTransaction(relayAddr, callAave);
+      // Whatever happens past the reentrancy gate (empty asset arrays give it nothing real to
+      // do) is irrelevant here — the only thing under test is that the gate itself did not fire.
+      expect(await relay.lastAaveRevertSelector()).to.not.equal(
+        pool.interface.getError('FlashloanCallbackOutsideGuardedCall')!.selector,
+      );
+    });
+  });
+
   // 28) only manager can toggle immediate withdraw mode
   it('only manager can setImmediateWithdrawEnabled', async () => {
     const { pool, manager, user } = await loadFixture(deployPoolFixture);
