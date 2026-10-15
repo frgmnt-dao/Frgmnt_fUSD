@@ -193,7 +193,12 @@ async function main() {
 
   console.log('\n--- Deploy UniswapV3NonfungiblePositionGuard ---');
   const UniNFT = await ethers.getContractFactory('UniswapV3NonfungiblePositionGuard', signer);
-  const uniNFT = await UniNFT.deploy(UNI_V3_POSITIONS_LIMIT, nftTrackerProxy, txOpts());
+  const uniNFT = await UniNFT.deploy(
+    UNI_V3_POSITIONS_LIMIT,
+    nftTrackerProxy,
+    slippage.target,
+    txOpts(),
+  );
   await uniNFT.waitForDeployment();
   console.log('Address:', uniNFT.target);
   nonce++;

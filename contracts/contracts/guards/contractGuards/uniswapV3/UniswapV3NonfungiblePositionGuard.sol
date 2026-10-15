@@ -9,6 +9,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "../../../utils/TxDataUtils.sol";
 import "../../../utils/UniswapV3PriceLibrary.sol";
+import "../../../utils/SlippageAccumulator.sol";
 import "../../../utils/tracker/NftTrackerStorage.sol";
 import "../../../interfaces/guards/ITxTrackingGuard.sol";
 import "../../../interfaces/guards/IGuard.sol";
@@ -104,6 +105,22 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
     ///         (see UniswapV3AssetGuard.withdrawalSlippageBps/withdrawalTwapDeviationBps).
     uint256 public constant MINT_LOSS_TOLERANCE_BPS = 100;
 
+    /// @notice SoftStack M-14: the per-operation cap above only catches a single egregious mint.
+    ///         The audit's own live PoC demonstrated per-cycle losses of 0.39-0.65% — well under
+    ///         1% individually, but repeated many times (each cycle pushes spot back inside the
+    ///         band, mints, reverts the price) the cumulative extraction was 5% of NAV in 8
+    ///         cycles. A tighter PER-OPERATION cap can't fix this without also DoS-ing legitimate
+    ///         mints during ordinary, non-manipulated volatility — the spot-price band itself
+    ///         already tolerates ~1% deviation, so an honest mint placed near that band's edge
+    ///         can show comparable "cost" with zero manipulation involved. Every mint/
+    ///         increaseLiquidity's measured excess (actual cost vs fair value, the same two
+    ///         numbers MINT_LOSS_TOLERANCE_BPS checks) is additionally reported to the shared
+    ///         SlippageAccumulator, the same cumulative budget router swaps already draw down —
+    ///         so a sustained low-grade cycle, even if no single mint trips the per-operation cap,
+    ///         still erodes that shared budget and eventually reverts exactly as repeated swap
+    ///         slippage already does.
+    SlippageAccumulator public immutable slippageAccumulator;
+
     /// @dev Pre-mint/pre-increaseLiquidity pool balances of the position's own two tokens,
     ///      recorded in txGuard() and consumed by the matching afterTxGuardHandle() call for the
     ///      SAME pool — keyed by poolLogic (msg.sender at both write and read time, verified
@@ -119,10 +136,12 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
     }
     mapping(address => PendingMintBalances) private _pendingMintBalances;
 
-    constructor(uint256 _uniV3PositionsLimit, address _nftTracker) {
+    constructor(uint256 _uniV3PositionsLimit, address _nftTracker, address _slippageAccumulator) {
         require(_nftTracker != address(0), "Frgmnt: invalid tracker.");
+        require(_slippageAccumulator != address(0), "Frgmnt: invalid accumulator.");
         uniV3PositionsLimit = _uniV3PositionsLimit;
         nftTracker = _nftTracker;
+        slippageAccumulator = SlippageAccumulator(_slippageAccumulator);
     }
 
     /// @notice Return all tracked NFT tokenIds owned by a pool.
@@ -379,7 +398,13 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
             // cost too much (relative to the fair-priced value of the liquidity it actually
             // produced) reverts the whole call — the position limit below and the NFT tracker
             // are never touched for a rejected mint.
-            _checkMintLossWithinTolerance(poolLogic, nonfungiblePositionManager, tokenId);
+            _checkMintLossWithinTolerance(
+                poolManagerLogic,
+                to,
+                poolLogic,
+                nonfungiblePositionManager,
+                tokenId
+            );
 
             NftTrackerStorage(nftTracker).addData(to, NFT_TYPE, poolLogic, abi.encode(tokenId));
 
@@ -407,7 +432,13 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
                 getParams(data),
                 (INonfungiblePositionManager.IncreaseLiquidityParams)
             );
-            _checkMintLossWithinTolerance(poolLogic, nonfungiblePositionManager, param.tokenId);
+            _checkMintLossWithinTolerance(
+                poolManagerLogic,
+                to,
+                poolLogic,
+                nonfungiblePositionManager,
+                param.tokenId
+            );
 
             return true;
         } else if (method == INonfungiblePositionManager.burn.selector) {
@@ -459,10 +490,48 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
     ///      UniswapV3AssetGuard._positionTotalAmounts() already uses for position valuation
     ///      (FNA-58), not a re-derivation of Uniswap's own liquidity math.
     function _checkMintLossWithinTolerance(
+        address poolManagerLogic,
+        address positionManager,
         address poolLogic,
         INonfungiblePositionManager nonfungiblePositionManager,
         uint256 tokenId
     ) internal {
+        (uint256 actualValue, uint256 fairValue) = _mintActualAndFairValueUsd(
+            poolLogic,
+            nonfungiblePositionManager,
+            tokenId
+        );
+
+        if (actualValue > fairValue) {
+            uint256 excessUsd = actualValue - fairValue;
+            uint256 toleranceUsd = (fairValue * MINT_LOSS_TOLERANCE_BPS) / 10_000;
+            require(excessUsd <= toleranceUsd, "Frgmnt: LP mint cost exceeds fair value");
+        }
+
+        // SoftStack M-14: report the same actual-vs-fair comparison to the shared accumulator,
+        // regardless of whether the per-operation check above passed — a mint within tolerance
+        // can still carry a nonzero, genuine loss, and repeating it is exactly the attack the
+        // audit's own PoC demonstrated (each cycle individually under the per-operation cap,
+        // cumulatively draining the pool). Mirrors UniswapV3RouterGuard's existing pattern of
+        // calling this unconditionally after every operation, not only on a rejection.
+        slippageAccumulator.updateSlippageImpactUsd(
+            poolManagerLogic,
+            positionManager,
+            actualValue,
+            fairValue
+        );
+    }
+
+    /// @dev Split out of _checkMintLossWithinTolerance() purely to keep that function's stack
+    ///      shallow enough to compile (EIP-170/stack-depth, not a logic boundary) — returns just
+    ///      the two USD-18 numbers the caller needs, letting every intermediate (pending
+    ///      balances, tick range, liquidity, fair sqrt price, per-leg amounts) go out of scope
+    ///      before the caller's own locals are pushed.
+    function _mintActualAndFairValueUsd(
+        address poolLogic,
+        INonfungiblePositionManager nonfungiblePositionManager,
+        uint256 tokenId
+    ) private returns (uint256 actualValue, uint256 fairValue) {
         PendingMintBalances memory pending = _pendingMintBalances[poolLogic];
         delete _pendingMintBalances[poolLogic];
 
@@ -500,21 +569,19 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
             liquidity
         );
 
-        uint256 actualValue = _assetValue(factory, pending.token0, actualAmount0) +
+        actualValue =
+            _assetValue(factory, pending.token0, actualAmount0) +
             _assetValue(factory, pending.token1, actualAmount1);
-        uint256 fairValue = _assetValue(factory, pending.token0, fairAmount0) +
+        fairValue =
+            _assetValue(factory, pending.token0, fairAmount0) +
             _assetValue(factory, pending.token1, fairAmount1);
-
-        if (actualValue > fairValue) {
-            uint256 excessUsd = actualValue - fairValue;
-            uint256 toleranceUsd = (fairValue * MINT_LOSS_TOLERANCE_BPS) / 10_000;
-            require(excessUsd <= toleranceUsd, "Frgmnt: LP mint cost exceeds fair value");
-        }
     }
 
     /// @dev Matches SlippageAccumulator.assetValue()'s own formula exactly (amount * price /
-    ///      10**decimals) — kept local rather than imported so this guard has no dependency on
-    ///      SlippageAccumulator at all.
+    ///      10**decimals) — kept local to compute actualValue/fairValue directly in USD-18
+    ///      without a round-trip through SlippageAccumulator's own token-amount-based
+    ///      assetValue(), even though this guard now does hold a SlippageAccumulator reference
+    ///      for updateSlippageImpactUsd() above.
     function _assetValue(
         address factory,
         address asset,

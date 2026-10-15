@@ -290,6 +290,111 @@ describe('SlippageAccumulator', () => {
   });
 
   // --------------------------
+  // updateSlippageImpactUsd (SoftStack M-14)
+  // --------------------------
+  describe('updateSlippageImpactUsd', () => {
+    it('reverts for a caller that is not the registered guard for router, same as updateSlippageImpact', async () => {
+      await expect(
+        slippageAccumulator
+          .connect(other)
+          .updateSlippageImpactUsd(
+            poolManagerAddress,
+            routerAddress,
+            ethers.parseEther('100'),
+            ethers.parseEther('90'),
+          ),
+      ).to.be.revertedWith('Not authorised guard');
+    });
+
+    it('does not update if dstValueUsd >= srcValueUsd (no loss)', async () => {
+      await slippageAccumulator
+        .connect(guard)
+        .updateSlippageImpactUsd(
+          poolManagerAddress,
+          routerAddress,
+          ethers.parseEther('100'),
+          ethers.parseEther('100'),
+        );
+
+      const managerData = await slippageAccumulator.managerData(poolManagerAddress);
+      expect(managerData.lastTradeTimestamp).to.equal(0n);
+      expect(managerData.accumulatedSlippage).to.equal(0n);
+    });
+
+    it('updates accumulated slippage using the USD values directly, with no isSupportedAsset gate', async () => {
+      // Unlike updateSlippageImpact, this entry point takes pre-priced USD-18 values with no
+      // srcAsset/token to check isSupportedAsset against — a liquidity-provision caller already
+      // validated both of the position's underlying tokens itself (unsupported token0/token1
+      // reverts earlier in that guard's own txGuard).
+      const before = await slippageAccumulator.managerData(poolManagerAddress);
+      expect(before.accumulatedSlippage).to.equal(0n);
+
+      await slippageAccumulator
+        .connect(guard)
+        .updateSlippageImpactUsd(
+          poolManagerAddress,
+          routerAddress,
+          ethers.parseEther('100'),
+          ethers.parseEther('96'),
+        );
+
+      const after = await slippageAccumulator.managerData(poolManagerAddress);
+      expect(after.accumulatedSlippage).to.be.greaterThan(0n);
+      expect(after.lastTradeTimestamp).to.be.greaterThan(0n);
+
+      // Same 4% formula as the token-amount-based updateSlippageImpact test above.
+      const cumulative = await slippageAccumulator.getCumulativeSlippageImpact(poolManagerAddress);
+      expect(cumulative).to.equal(after.accumulatedSlippage);
+      expect(cumulative).to.equal(40000n); // 4% * 1e6 scaling = 40000
+    });
+
+    it('reverts when the new cumulative slippage exceeds the maximum, same cap as updateSlippageImpact', async () => {
+      await slippageAccumulator.connect(owner).setMaxCumulativeSlippage(1n);
+
+      await expect(
+        slippageAccumulator
+          .connect(guard)
+          .updateSlippageImpactUsd(
+            poolManagerAddress,
+            routerAddress,
+            ethers.parseEther('100'),
+            ethers.parseEther('90'),
+          ),
+      ).to.be.revertedWith('slippage impact exceeded');
+    });
+
+    it('shares the same cumulative state as updateSlippageImpact: a swap and a value-based report compound together', async () => {
+      // A 3% token-amount-based swap loss...
+      await slippageAccumulator
+        .connect(guard)
+        .updateSlippageImpact(poolManagerAddress, routerAddress, {
+          srcAsset: srcTokenAddress,
+          dstAsset: dstTokenAddress,
+          srcAmount: ethers.parseEther('100'),
+          dstAmount: ethers.parseEther('97'),
+        });
+      const afterSwap = await slippageAccumulator.managerData(poolManagerAddress);
+      expect(afterSwap.accumulatedSlippage).to.equal(30000n); // 3%
+
+      // ...plus a 2% value-based LP-mint loss, reported moments later (a tiny, sub-second-scale
+      // decay applies between the two Hardhat-auto-mined blocks, hence the tolerance below)...
+      await slippageAccumulator
+        .connect(guard)
+        .updateSlippageImpactUsd(
+          poolManagerAddress,
+          routerAddress,
+          ethers.parseEther('100'),
+          ethers.parseEther('98'),
+        );
+      const afterMint = await slippageAccumulator.managerData(poolManagerAddress);
+
+      // ...compound into the SAME cumulative figure (~5%), one shared budget for both callers.
+      expect(afterMint.accumulatedSlippage).to.be.greaterThan(49990n);
+      expect(afterMint.accumulatedSlippage).to.be.lessThanOrEqual(50000n);
+    });
+  });
+
+  // --------------------------
   // getCumulativeSlippageImpact
   // --------------------------
   describe('getCumulativeSlippageImpact', () => {

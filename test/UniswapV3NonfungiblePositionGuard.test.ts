@@ -16,6 +16,7 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
   let poolLogic: any;
   let poolManagerLogic: any;
   let guard: any;
+  let slippageAccumulator: any;
 
   const NFT_TYPE = ethers.keccak256(ethers.toUtf8Bytes('UNISWAP_NFT_TYPE'));
   const FEE_3000 = 3000;
@@ -110,10 +111,25 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     await poolManagerLogic.setSupportedAsset(await positionManager.getAddress(), true);
 
     //------------------------------------------------------------------
+    // 7b. SlippageAccumulator (SoftStack M-14): reuses guardInfo as its "poolFactory" — it only
+    //     calls getContractGuard(), which MockGuardInfo already implements.
+    //------------------------------------------------------------------
+    const SlippageAccumulatorFactory = await ethers.getContractFactory('SlippageAccumulator');
+    slippageAccumulator = await SlippageAccumulatorFactory.deploy(
+      await guardInfo.getAddress(),
+      21600, // 6h decay, matches the live default
+      50000, // 5% cap, matches the live default
+    );
+
+    //------------------------------------------------------------------
     // 8. Deploy the guard and wire it into tracker
     //------------------------------------------------------------------
     const Guard = await ethers.getContractFactory('UniswapV3NonfungiblePositionGuard');
-    guard = await Guard.deploy(MAX_POSITIONS, await nftTracker.getAddress());
+    guard = await Guard.deploy(
+      MAX_POSITIONS,
+      await nftTracker.getAddress(),
+      await slippageAccumulator.getAddress(),
+    );
 
     // positionManager must be guarded by this guard in NftTrackerStorage
     await guardInfo.setContractGuard(await positionManager.getAddress(), await guard.getAddress());
@@ -602,6 +618,54 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
       await expect(
         callAfterTx(await positionManager.getAddress(), increaseData),
       ).to.be.revertedWith('MockPoolLogicV3Guard: afterTxGuard call failed');
+    });
+
+    it('repeated increaseLiquidity cycles, each individually within the 1% per-operation tolerance, eventually trip the shared cumulative cap', async () => {
+      // SoftStack M-14 (full report): the audit's own live PoC demonstrated per-cycle losses of
+      // 0.39-0.65% of position size — well under this guard's 1% per-operation cap — but
+      // repeating the cycle drained 5% of NAV in 8 cycles. This proves the per-operation cap
+      // ALONE would have let every one of those cycles through; the SlippageAccumulator
+      // integration is what actually catches the sustained pattern.
+      const { amount0: fairAmount0, amount1: fairAmount1 } =
+        await fairAmountsForLiquidity(LIQUIDITY);
+
+      const mintData = await setUpMint(1, fairAmount0, fairAmount1);
+      await token0.burn(await poolLogic.getAddress(), fairAmount0);
+      await token1.burn(await poolLogic.getAddress(), fairAmount1);
+      await callAfterTx(await positionManager.getAddress(), mintData);
+
+      // ~0.9% of total value per cycle (1.8% excess concentrated on token0 alone) — safely under
+      // the 1% MINT_LOSS_TOLERANCE_BPS per-operation cap, matching the audit's own demonstrated
+      // per-cycle magnitude.
+      const perCycleActualAmount0 = (fairAmount0 * 1018n) / 1000n;
+
+      let succeeded = 0;
+      let reverted = false;
+      for (let i = 0; i < 10 && !reverted; i++) {
+        await token0.mint(await poolLogic.getAddress(), perCycleActualAmount0);
+        await token1.mint(await poolLogic.getAddress(), fairAmount1);
+
+        const increaseData = await encodeIncreaseLiquidity(1n);
+        await realTxGuard(await positionManager.getAddress(), increaseData);
+
+        await token0.burn(await poolLogic.getAddress(), perCycleActualAmount0);
+        await token1.burn(await poolLogic.getAddress(), fairAmount1);
+
+        try {
+          await callAfterTx(await positionManager.getAddress(), increaseData);
+          succeeded++;
+        } catch (err: any) {
+          reverted = true;
+          expect(String(err.message || err)).to.include(
+            'MockPoolLogicV3Guard: afterTxGuard call failed',
+          );
+        }
+      }
+
+      // Each individual cycle passed the 1% per-operation cap (proving that cap alone is not
+      // the mechanism that stops this) — but the shared cumulative budget eventually reverted.
+      expect(succeeded).to.be.greaterThan(1);
+      expect(reverted).to.equal(true);
     });
   });
 });
