@@ -774,6 +774,63 @@ describe('PoolLogic', () => {
     });
   });
 
+  describe('SoftStack M-13: allowedCallbackSenders alone no longer grants user-impersonation power', () => {
+    it("a manager-listed callback sender cannot forward a different user's identity via unstake, even though it is allowlisted", async () => {
+      const { pool, fusd, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const amount = ethers.parseUnits('100', 18);
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await pool.connect(user).stake(amount);
+      const userShares = await pool.balanceOf(await user.getAddress());
+      expect(userShares).to.be.gt(0n);
+
+      const Sender = await ethers.getContractFactory('ImpersonatingActionSender');
+      const sender = await Sender.deploy(poolAddr);
+      const senderAddr = await sender.getAddress();
+
+      // The manager lists the malicious contract via the OLD mechanism — still manager-
+      // controlled, still legitimately needed for flashloan protocol callbacks — but never
+      // registers it as userActionsRouter (that would require the factoryOwner).
+      await poolManager.connect(manager).setAllowedCallbackSender(senderAddr, true);
+      expect(await poolManager.getAllowedCallbackSenders(senderAddr)).to.equal(true);
+      await sender.setActionUser(await user.getAddress());
+
+      // Pre-fix, _actionSender() would have resolved this call to the victim (user), letting
+      // the malicious contract unstake the victim's shares on their behalf with no consent.
+      // Post-fix, being merely allowlisted does nothing: _actionSender() still resolves to the
+      // sender contract's own address, which holds no shares of its own, so the forwarded call
+      // simply fails on insufficient balance — the victim's position is untouched.
+      await expect(sender.forwardUnstake(userShares)).to.be.reverted;
+      expect(await pool.balanceOf(await user.getAddress())).to.equal(userShares);
+    });
+
+    it('the same sender succeeds once it is registered as userActionsRouter (the only legitimate path)', async () => {
+      const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const amount = ethers.parseUnits('100', 18);
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await pool.connect(user).stake(amount);
+      const userShares = await pool.balanceOf(await user.getAddress());
+
+      const Sender = await ethers.getContractFactory('ImpersonatingActionSender');
+      const sender = await Sender.deploy(poolAddr);
+      const senderAddr = await sender.getAddress();
+      await sender.setActionUser(await user.getAddress());
+
+      // This is the only address that should ever be able to grant this — exercised directly
+      // here (bypassing manager/factoryOwner distinctions, which the mock does not enforce) to
+      // isolate the userActionsRouter check itself from PoolManagerLogic's own access control
+      // (covered separately in PoolManagerLogic.test.ts).
+      await poolManager.setUserActionsRouter(senderAddr);
+
+      await sender.forwardUnstake(userShares);
+      expect(await pool.balanceOf(await user.getAddress())).to.equal(0n);
+      expect(await fusd.balanceOf(await user.getAddress())).to.equal(userShares);
+    });
+  });
+
   describe('SoftStack M-02: executeOperation (Aave flashloan callback) guarded-call invariant', () => {
     it('reverts when called with no PoolLogic call already in progress', async () => {
       const { pool } = await loadFixture(deployPoolFixture);

@@ -62,6 +62,7 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     event NftMembershipCollectionAddressSet(address indexed previous, address indexed current);
     event PoolPrivacyUpdated(bool isPoolPrivate);
     event AllowedCallbackSenderSet(address indexed caller, bool allowed);
+    event UserActionsRouterSet(address indexed previous, address indexed current);
     event ManagerFeeIncreaseCommitted(
         uint256 performanceFeeNumerator,
         uint256 managerFeeNumerator,
@@ -112,7 +113,15 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
 
     address public assetHandler;
 
-    uint256[20] private __gap;
+    /// @notice SoftStack M-13: the single contract trusted to resolve a caller's real identity
+    ///         in PoolLogic._actionSender()/TokenLogic._actionSender() — see
+    ///         setUserActionsRouter() and IPoolManagerLogic.userActionsRouter() for the full
+    ///         reasoning. Consumes one slot from the storage gap below (20 -> 19) rather than
+    ///         appending after it, the standard upgrade-safe way to add a new variable to an
+    ///         already-deployed contract that reserves a gap.
+    address public userActionsRouter;
+
+    uint256[19] private __gap;
 
     error InvalidFactory();
     error InvalidPoolLogic();
@@ -887,6 +896,22 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
         require(caller != address(0), "caller=0");
         allowedCallbackSenders[caller] = allowed;
         emit AllowedCallbackSenderSet(caller, allowed);
+    }
+
+    /// @notice SoftStack M-13: sets the single contract PoolLogic/TokenLogic will treat as
+    ///         authorized to act on behalf of other addresses (via IUserActionSender.actionUser(),
+    ///         see _actionSender() in both). Previously this power came from the same
+    ///         manager-controlled allowedCallbackSenders list used for flashloan protocol
+    ///         callbacks — any address the manager listed there could return an arbitrary
+    ///         actionUser() and impersonate any user on deposit/stake/unstake/
+    ///         withdrawCashImmediate, with no consent from that user. Deliberately
+    ///         factoryOwner-gated, not manager-gated: the manager still fully controls
+    ///         allowedCallbackSenders for its own, legitimate, unrelated purpose. address(0) is
+    ///         a valid, deliberate input — it disables impersonation entirely.
+    function setUserActionsRouter(address router) external onlyFactoryOwner {
+        address previous = userActionsRouter;
+        userActionsRouter = router;
+        emit UserActionsRouterSet(previous, router);
     }
 
     function setNftMembershipCollectionAddress(address addr) external onlyManager {

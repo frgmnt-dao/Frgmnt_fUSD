@@ -600,9 +600,16 @@ contract PoolLogic is
         if (index == 0) revert AutoCompoundingNotInitialized();
     }
 
+    /// @dev SoftStack M-13: impersonation power (resolving the real acting user via
+    ///      IUserActionSender.actionUser()) now comes from a single, factoryOwner-set
+    ///      userActionsRouter — not the manager-controlled allowedCallbackSenders list, which
+    ///      exists for a different purpose (flashloan protocol callbacks, see
+    ///      _isAllowedCallbackSender) and must not also grant this. See
+    ///      PoolManagerLogic.setUserActionsRouter()'s own documentation for the full reasoning.
     function _actionSender() internal view returns (address sender) {
         sender = msg.sender;
-        if (_isAllowedCallbackSender(sender)) {
+        address router = IPoolManagerLogic(poolManagerLogic).userActionsRouter();
+        if (router != address(0) && sender == router) {
             sender = IUserActionSender(sender).actionUser();
         }
     }

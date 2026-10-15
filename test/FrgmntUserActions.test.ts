@@ -143,6 +143,10 @@ async function deployFixture() {
   );
   await userActions.waitForDeployment();
   await poolManager.setAllowedCallbackSender(await userActions.getAddress(), true);
+  // SoftStack M-13: impersonation power is now gated by userActionsRouter specifically, not
+  // allowedCallbackSenders — the real router must be registered here too for FrgmntUserActions
+  // to keep working as the one legitimate consumer of this mechanism.
+  await poolManager.setUserActionsRouter(await userActions.getAddress());
 
   return { admin, manager, user, other, poolManager, userActions, fusd, pool, usdc };
 }
@@ -346,11 +350,14 @@ describe('FrgmntUserActions', () => {
     expect(await usdc.balanceOf(await user.getAddress())).to.equal(usdcBefore + 500n * 10n ** 6n);
   });
 
-  it('cannot forward user identity until the router is allowlisted', async () => {
+  it('cannot forward user identity until the router is registered as userActionsRouter', async () => {
     const { user, userActions, fusd, poolManager, usdc } = await loadFixture(deployFixture);
     const amount = 1_000n * 10n ** 6n;
 
-    await poolManager.setAllowedCallbackSender(await userActions.getAddress(), false);
+    // SoftStack M-13: impersonation power now comes from userActionsRouter specifically, not
+    // allowedCallbackSenders (which this test deliberately leaves untouched/still true, to
+    // prove it is the userActionsRouter unset that blocks forwarding, not the old mechanism).
+    await poolManager.setUserActionsRouter(ethers.ZeroAddress);
     await usdc.connect(user).approve(await fusd.getAddress(), amount);
 
     await expect(
