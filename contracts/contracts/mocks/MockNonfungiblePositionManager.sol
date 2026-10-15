@@ -13,6 +13,9 @@ contract MockNonfungiblePositionManager {
         address token0;
         address token1;
         uint24 fee;
+        int24 tickLower;
+        int24 tickUpper;
+        uint128 liquidity;
     }
 
     mapping(uint256 => Position) public positionsStorage;
@@ -57,17 +60,16 @@ contract MockNonfungiblePositionManager {
     {
         Position memory p = positionsStorage[tokenId];
 
-        // we only care about token0, token1, fee for tests
         token0 = p.token0;
         token1 = p.token1;
         fee = p.fee;
+        tickLower = p.tickLower;
+        tickUpper = p.tickUpper;
+        liquidity = p.liquidity;
 
-        // rest zero
+        // rest zero: unused by this guard, no test needs them
         nonce = 0;
         operator = address(0);
-        tickLower = 0;
-        tickUpper = 0;
-        liquidity = 0;
         feeGrowthInside0LastX128 = 0;
         feeGrowthInside1LastX128 = 0;
         tokensOwed0 = 0;
@@ -85,6 +87,35 @@ contract MockNonfungiblePositionManager {
     }
 
     function setPosition(uint256 tokenId, address token0, address token1, uint24 fee) external {
-        positionsStorage[tokenId] = Position({ token0: token0, token1: token1, fee: fee });
+        positionsStorage[tokenId] = Position({
+            token0: token0,
+            token1: token1,
+            fee: fee,
+            tickLower: 0,
+            tickUpper: 0,
+            liquidity: 0
+        });
+    }
+
+    /// @notice SoftStack M-14 test helper: also sets tickLower/tickUpper/liquidity, needed to
+    ///         exercise the mint/increaseLiquidity fair-value check (which reads these via
+    ///         positions()).
+    function setPositionFull(
+        uint256 tokenId,
+        address token0,
+        address token1,
+        uint24 fee,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 liquidity
+    ) external {
+        positionsStorage[tokenId] = Position({
+            token0: token0,
+            token1: token1,
+            fee: fee,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            liquidity: liquidity
+        });
     }
 }

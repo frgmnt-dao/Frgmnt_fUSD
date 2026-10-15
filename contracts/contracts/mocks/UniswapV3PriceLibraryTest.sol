@@ -2,9 +2,29 @@
 pragma solidity ^0.8.24;
 
 import "../utils/UniswapV3PriceLibrary.sol";
+import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
+import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 
 /// @notice Wrapper exposing UniswapV3PriceLibrary functions for testing.
 contract UniswapV3PriceLibraryTest {
+    /// @notice SoftStack M-14 test helper: exposes the exact LiquidityAmounts/TickMath call
+    ///         UniswapV3NonfungiblePositionGuard._checkMintLossWithinTolerance() uses, so a test
+    ///         can precisely compute the fair-price-equivalent amounts for a chosen
+    ///         liquidity/tick range and construct "actual consumption" relative to it.
+    function getAmountsForLiquidityWrapper(
+        uint160 sqrtRatioX96,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 liquidity
+    ) external pure returns (uint256 amount0, uint256 amount1) {
+        return
+            LiquidityAmounts.getAmountsForLiquidity(
+                sqrtRatioX96,
+                TickMath.getSqrtRatioAtTick(tickLower),
+                TickMath.getSqrtRatioAtTick(tickUpper),
+                liquidity
+            );
+    }
     // Factory-based overload
     function assertFairPriceWithFactory(
         address dhedgeFactory,

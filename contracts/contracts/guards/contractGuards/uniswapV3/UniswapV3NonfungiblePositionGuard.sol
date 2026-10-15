@@ -3,6 +3,9 @@ pragma solidity ^0.8.24;
 
 import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 import "@uniswap/v3-periphery/contracts/interfaces/IMulticall.sol";
+import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
+import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import "../../../utils/TxDataUtils.sol";
 import "../../../utils/UniswapV3PriceLibrary.sol";
@@ -12,6 +15,8 @@ import "../../../interfaces/guards/IGuard.sol";
 import "../../../interfaces/IPoolManagerLogic.sol";
 import "../../../interfaces/IPoolLogic.sol";
 import "../../../interfaces/IHasSupportedAsset.sol";
+import "../../../interfaces/IHasAssetInfo.sol";
+import "../../../interfaces/IERC20Extended.sol";
 import "../../../interfaces/ITransactionTypes.sol";
 
 /**
@@ -83,6 +88,36 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
     uint256 public uniV3PositionsLimit;
 
     bool public override isTxTrackingGuard = true;
+
+    /// @notice SoftStack M-14: the assertFairPrice() spot-price band above (and M-06's own
+    ///         withdrawal-side TWAP band) bounds how far the pool's CURRENT price may sit from
+    ///         the Chainlink fair price before a mint/increaseLiquidity is even attempted — but
+    ///         a price anywhere INSIDE that band still skews the (amount0, amount1) split
+    ///         Uniswap computes for a given liquidity, so the pool can still pay more, in real
+    ///         Chainlink-valued dollars, than the SAME resulting liquidity is worth at fair
+    ///         price. A trader can push spot to just inside the band, let the pool mint there,
+    ///         then revert the price and extract the difference — repeatable, since nothing
+    ///         downstream of the band check ever compares what was paid against what was
+    ///         received. This is a second, independent gate on top of the spot-price band: it
+    ///         bounds the dollar cost of the skew itself, directly, rather than the price
+    ///         deviation that causes it. 1% matches this guard family's existing default scale
+    ///         (see UniswapV3AssetGuard.withdrawalSlippageBps/withdrawalTwapDeviationBps).
+    uint256 public constant MINT_LOSS_TOLERANCE_BPS = 100;
+
+    /// @dev Pre-mint/pre-increaseLiquidity pool balances of the position's own two tokens,
+    ///      recorded in txGuard() and consumed by the matching afterTxGuardHandle() call for the
+    ///      SAME pool — keyed by poolLogic (msg.sender at both write and read time, verified
+    ///      against IPoolManagerLogic.poolLogic() in both txGuard and afterTxGuard), the same
+    ///      unforgeable-key pattern SlippageAccumulatorUser already uses (see that contract's
+    ///      own FNA-47 documentation) to prevent one caller's pending snapshot from being read or
+    ///      overwritten by another.
+    struct PendingMintBalances {
+        address token0;
+        address token1;
+        uint256 balance0Before;
+        uint256 balance1Before;
+    }
+    mapping(address => PendingMintBalances) private _pendingMintBalances;
 
     constructor(uint256 _uniV3PositionsLimit, address _nftTracker) {
         require(_nftTracker != address(0), "Frgmnt: invalid tracker.");
@@ -162,6 +197,15 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
                 param.fee
             );
 
+            // SoftStack M-14: snapshot pre-mint balances so afterTxGuardHandle can measure what
+            // was actually consumed, independent of the pool's spot price at mint time.
+            _pendingMintBalances[pool] = PendingMintBalances({
+                token0: param.token0,
+                token1: param.token1,
+                balance0Before: IERC20(param.token0).balanceOf(pool),
+                balance1Before: IERC20(param.token1).balanceOf(pool)
+            });
+
             emit Mint(
                 poolManagerLogic.poolLogic(),
                 param.token0,
@@ -222,6 +266,14 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
                 token1,
                 fee
             );
+
+            // SoftStack M-14: see the matching snapshot in the mint branch above.
+            _pendingMintBalances[pool] = PendingMintBalances({
+                token0: token0,
+                token1: token1,
+                balance0Before: IERC20(token0).balanceOf(pool),
+                balance1Before: IERC20(token1).balanceOf(pool)
+            });
 
             emit IncreaseLiquidity(
                 poolManagerLogic.poolLogic(),
@@ -323,6 +375,12 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
             // Underflow revert on index-1 if index == 0 is intentional to prevent stale state
             uint256 tokenId = nonfungiblePositionManager.tokenByIndex(index - 1);
 
+            // SoftStack M-14: checked BEFORE the position is tracked/counted, so a mint that
+            // cost too much (relative to the fair-priced value of the liquidity it actually
+            // produced) reverts the whole call — the position limit below and the NFT tracker
+            // are never touched for a rejected mint.
+            _checkMintLossWithinTolerance(poolLogic, nonfungiblePositionManager, tokenId);
+
             NftTrackerStorage(nftTracker).addData(to, NFT_TYPE, poolLogic, abi.encode(tokenId));
 
             emit PositionTracked(poolLogic, to, tokenId);
@@ -332,6 +390,24 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
                     uniV3PositionsLimit,
                 "Frgmnt: too many Uniswap V3 positions"
             );
+
+            return true;
+        } else if (method == INonfungiblePositionManager.increaseLiquidity.selector) {
+            // SoftStack M-14: same check as mint — increaseLiquidity has no NFT-tracking side
+            // effects of its own, so this is the only afterTxGuardHandle work needed here.
+            // Returns true (reusing the existing "one balance-sensitive op per multicall" gate
+            // below, previously mint/burn-only) because _pendingMintBalances is a single slot
+            // per pool: two mint/increaseLiquidity calls batched in the same multicall would
+            // have the second one's txGuard() snapshot silently clobber the first's before
+            // either one's real balance delta is ever read, corrupting both checks. A manager
+            // who needs to increase two positions in one block submits two transactions — the
+            // same tradeoff UniswapV3RouterGuard's own multicall handling already accepts for
+            // swaps, for exactly this class of problem (see its own "exactly one swap" comment).
+            INonfungiblePositionManager.IncreaseLiquidityParams memory param = abi.decode(
+                getParams(data),
+                (INonfungiblePositionManager.IncreaseLiquidityParams)
+            );
+            _checkMintLossWithinTolerance(poolLogic, nonfungiblePositionManager, param.tokenId);
 
             return true;
         } else if (method == INonfungiblePositionManager.burn.selector) {
@@ -351,7 +427,9 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
             bool includeMintOrBurn;
             for (uint256 i = 0; i < params.length; i++) {
                 if (afterTxGuardHandle(poolManagerLogic, to, params[i])) {
-                    // Only one mint OR one burn is allowed per multicall for safety
+                    // Only one mint, increaseLiquidity, or burn is allowed per multicall for
+                    // safety (SoftStack M-14 widened this from mint/burn-only — see
+                    // the increaseLiquidity branch above for why).
                     require(!includeMintOrBurn, "Frgmnt: invalid multicall");
                     includeMintOrBurn = true;
                 }
@@ -361,5 +439,90 @@ contract UniswapV3NonfungiblePositionGuard is TxDataUtils, ITxTrackingGuard, ITr
         }
 
         return false;
+    }
+
+    /// @notice SoftStack M-14: reverts if a just-executed mint/increaseLiquidity cost the pool
+    ///         more, in real Chainlink-valued dollars, than the SAME resulting liquidity is
+    ///         worth priced at the Chainlink fair rate — the exact gap a trader exploits by
+    ///         pushing the pool's spot price to just inside the assertFairPrice() band before
+    ///         the mint, then reverting it afterward.
+    /// @dev Compares two independently-computed USD values for the SAME `liquidity` the
+    ///      position now holds (liquidity itself is one fixed number regardless of which price
+    ///      it's priced at — only the resulting (amount0, amount1) split changes):
+    ///      (1) `actualValue`: the real token0/token1 amounts the pool's balance actually fell
+    ///          by (measured directly, not estimated), valued at Chainlink prices.
+    ///      (2) `fairValue`: LiquidityAmounts.getAmountsForLiquidity() re-run at the Chainlink
+    ///          fair sqrt price for the position's own tickLower/tickUpper/liquidity — i.e. what
+    ///          the pool would have had to pay for this exact liquidity had the pool's spot
+    ///          price matched fair value, also valued at Chainlink prices.
+    ///      Uses the same audited LiquidityAmounts/TickMath libraries
+    ///      UniswapV3AssetGuard._positionTotalAmounts() already uses for position valuation
+    ///      (FNA-58), not a re-derivation of Uniswap's own liquidity math.
+    function _checkMintLossWithinTolerance(
+        address poolLogic,
+        INonfungiblePositionManager nonfungiblePositionManager,
+        uint256 tokenId
+    ) internal {
+        PendingMintBalances memory pending = _pendingMintBalances[poolLogic];
+        delete _pendingMintBalances[poolLogic];
+
+        uint256 actualAmount0 = pending.balance0Before -
+            IERC20(pending.token0).balanceOf(poolLogic);
+        uint256 actualAmount1 = pending.balance1Before -
+            IERC20(pending.token1).balanceOf(poolLogic);
+
+        (
+            ,
+            ,
+            ,
+            ,
+            ,
+            int24 tickLower,
+            int24 tickUpper,
+            uint128 liquidity,
+            ,
+            ,
+            ,
+
+        ) = nonfungiblePositionManager.positions(tokenId);
+
+        address factory = IPoolLogic(poolLogic).factory();
+        uint160 fairSqrtPriceX96 = UniswapV3PriceLibrary.getFairSqrtPriceX96(
+            factory,
+            pending.token0,
+            pending.token1
+        );
+
+        (uint256 fairAmount0, uint256 fairAmount1) = LiquidityAmounts.getAmountsForLiquidity(
+            fairSqrtPriceX96,
+            TickMath.getSqrtRatioAtTick(tickLower),
+            TickMath.getSqrtRatioAtTick(tickUpper),
+            liquidity
+        );
+
+        uint256 actualValue = _assetValue(factory, pending.token0, actualAmount0) +
+            _assetValue(factory, pending.token1, actualAmount1);
+        uint256 fairValue = _assetValue(factory, pending.token0, fairAmount0) +
+            _assetValue(factory, pending.token1, fairAmount1);
+
+        if (actualValue > fairValue) {
+            uint256 excessUsd = actualValue - fairValue;
+            uint256 toleranceUsd = (fairValue * MINT_LOSS_TOLERANCE_BPS) / 10_000;
+            require(excessUsd <= toleranceUsd, "Frgmnt: LP mint cost exceeds fair value");
+        }
+    }
+
+    /// @dev Matches SlippageAccumulator.assetValue()'s own formula exactly (amount * price /
+    ///      10**decimals) — kept local rather than imported so this guard has no dependency on
+    ///      SlippageAccumulator at all.
+    function _assetValue(
+        address factory,
+        address asset,
+        uint256 amount
+    ) internal view returns (uint256) {
+        if (amount == 0) return 0;
+        uint256 price = IHasAssetInfo(factory).getAssetPrice(asset);
+        uint8 decimals = IERC20Extended(asset).decimals();
+        return (amount * price) / (10 ** uint256(decimals));
     }
 }
