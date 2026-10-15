@@ -77,6 +77,13 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 "Frgmnt: unsupported destination asset"
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
+            // SoftStack M-09: amountOutMinimum = 0 lets the swap execute at any price — the
+            // SlippageAccumulator is a reactive, post-execution circuit breaker, not a
+            // preventive per-swap bound, and a single large swap may not trip its cumulative
+            // cap. This is the minimum floor the finding's own recommendation asks for; it does
+            // not replace per-pool slippage judgement, it just forecloses the zero-protection
+            // case the PoC used.
+            require(params.amountOutMinimum > 0, "Frgmnt: amountOutMinimum must be > 0");
 
             intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: srcAsset,
@@ -98,6 +105,8 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 "Frgmnt: unsupported destination asset"
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
+            // SoftStack M-09: see the matching check in the exactInput branch above.
+            require(params.amountOutMinimum > 0, "Frgmnt: amountOutMinimum must be > 0");
 
             intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: params.tokenIn,
@@ -127,6 +136,12 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 "Frgmnt: unsupported destination asset"
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
+            // SoftStack M-09: amountInMaximum = type(uint256).max lets the swap pay any price
+            // for the fixed output — the exact-output mirror of the exactInput check above.
+            require(
+                params.amountInMaximum < type(uint256).max,
+                "Frgmnt: amountInMaximum must be bounded"
+            );
 
             intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: srcAsset,
@@ -148,6 +163,11 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 "Frgmnt: unsupported destination asset"
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
+            // SoftStack M-09: see the matching check in the exactOutput branch above.
+            require(
+                params.amountInMaximum < type(uint256).max,
+                "Frgmnt: amountInMaximum must be bounded"
+            );
 
             intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: params.tokenIn,
