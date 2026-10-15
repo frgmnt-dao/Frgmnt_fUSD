@@ -831,6 +831,80 @@ describe('PoolLogic', () => {
     });
   });
 
+  describe('SoftStack M-10 verification: does mintFromPool(mgr, _fee) actually mint sfUSD pool shares to the manager?', () => {
+    // The finding's claim is that _accrueYield()'s fee mint inflates the manager's POOL
+    // balanceOf() (the sfUSD staked-share balance tracked by rewardDebt/compoundedRewardIndex),
+    // so the newly "minted shares" retroactively earn the reward growth for an interval before
+    // they existed. mintFromPool(mgr, _fee) mints plain FUSD via ITokenLogic (a completely
+    // separate ERC20 contract, `fusd`) — PoolLogic's own balanceOf() (inherited, unmodified,
+    // from ERC20Upgradeable) tracks ONLY PoolLogic's own token supply (staked sfUSD shares) and
+    // is never touched by a mint on the `fusd` contract. This test proves that directly: a
+    // manager's pool share balance and pending reward are both completely unaffected by the fee
+    // mint — only their FUSD balance (an unstaked, un-reward-earning token) changes.
+    it("the fee mint changes the manager's FUSD balance, never their pool share balance or pending reward", async () => {
+      const { pool, fusd, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      await poolManager.setFees(1000n, 0n, 0n, 0n, 10_000n); // 10% perf fee
+
+      // Manager stakes a pre-existing sfUSD position BEFORE any yield cycle, so there is a
+      // concrete balance to prove is untouched by the fee mint that follows.
+      const managerStake = ethers.parseUnits('200', 18);
+      await mintAndApproveFUSD(fusd, pool, manager, managerStake);
+      await pool.connect(manager).stake(managerStake);
+      const managerSharesBefore = await pool.balanceOf(await manager.getAddress());
+      expect(managerSharesBefore).to.equal(managerStake);
+
+      const managerFusdBefore = await fusd.balanceOf(await manager.getAddress());
+      expect(managerFusdBefore).to.equal(0n);
+
+      // A real staker also stakes, so there is a NAV to grow and a netYield to split.
+      const stakeAmount = ethers.parseUnits('1000', 18);
+      await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+      await pool.connect(user).stake(stakeAmount);
+
+      // Simulate 500 FUSD of yield: 10% perf fee -> perfFee = 50 FUSD minted to the manager.
+      const reward = ethers.parseUnits('500', 18);
+      await fusd.mint(await pool.getAddress(), reward);
+      await poolManager.setTotalFundValue(reward);
+
+      // Trigger accrual (a tiny stake by the user, matching the existing FNA tests' own pattern).
+      const tiny = ethers.parseUnits('1', 18);
+      await mintAndApproveFUSD(fusd, pool, user, tiny);
+      await pool.connect(user).stake(tiny);
+
+      const expectedFee = (reward * 1000n) / 10_000n; // 50 FUSD
+      const managerFusdAfter = await fusd.balanceOf(await manager.getAddress());
+      expect(managerFusdAfter).to.equal(managerFusdBefore + expectedFee);
+
+      // The claim under test: the manager's POOL share balance must be completely unaffected by
+      // that fee mint — it is a different ERC20 contract.
+      const managerSharesAfter = await pool.balanceOf(await manager.getAddress());
+      expect(managerSharesAfter).to.equal(managerSharesBefore);
+
+      // A manager who staked NOTHING before this cycle must show exactly zero pending reward —
+      // the decisive check that the fee mint grants no reward entitlement on its own, since a
+      // phantom "fee_shares" credit (the finding's claimed mechanism) would show up here with
+      // no staked balance to otherwise explain it.
+      const {
+        pool: pool2,
+        fusd: fusd2,
+        poolManager: poolManager2,
+        manager: manager2,
+        user: user2,
+      } = await loadFixture(deployPoolFixture);
+      await poolManager2.setFees(1000n, 0n, 0n, 0n, 10_000n);
+      await mintAndApproveFUSD(fusd2, pool2, user2, stakeAmount);
+      await pool2.connect(user2).stake(stakeAmount);
+      await fusd2.mint(await pool2.getAddress(), reward);
+      await poolManager2.setTotalFundValue(reward);
+      await mintAndApproveFUSD(fusd2, pool2, user2, tiny);
+      await pool2.connect(user2).stake(tiny); // triggers _accrueYield(), mints the fee to manager2
+
+      expect(await fusd2.balanceOf(await manager2.getAddress())).to.equal(expectedFee);
+      expect(await pool2.balanceOf(await manager2.getAddress())).to.equal(0n);
+      expect(await pool2.pendingReward(await manager2.getAddress())).to.equal(0n);
+    });
+  });
+
   describe('SoftStack M-02: executeOperation (Aave flashloan callback) guarded-call invariant', () => {
     it('reverts when called with no PoolLogic call already in progress', async () => {
       const { pool } = await loadFixture(deployPoolFixture);
