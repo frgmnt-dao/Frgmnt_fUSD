@@ -64,24 +64,51 @@ import { ClosedAssetGuard } from "./ClosedAssetGuard.sol";
 ///    separate per-asset guard-call frames within one withdrawal, since PoolLogic invokes each
 ///    asset's guard independently) can each independently read the Hub's *full*
 ///    `IHubBase.getAssetLiquidity(assetId)` and each plan to withdraw against it, with neither
-///    call aware of the other's claim. This cannot produce an incorrect payout — the real
-///    `ISpoke.withdraw`/Hub liquidity check that actually executes is the single source of
-///    truth, and reverts cleanly (reverting that pool's whole withdrawal transaction) if the two
-///    claims together exceed what the Hub can deliver — but it is a genuine liveness gap: the
-///    second caller's withdrawal can fail even though its own quote, read a moment earlier, said
-///    it would succeed.
-///    A real fix needs either persistent on-chain state recording in-flight claims (impossible
-///    from `getWithdrawableBalance`/`withdrawProcessing` as written, since both are `view` by
-///    interface — IWithdrawableBalanceGuard and the asset-guard `withdrawProcessing` contract
-///    across this whole codebase) or coordination above this guard entirely (e.g. in PoolLogic
-///    or a shared registry), either of which is a materially larger, interface-breaking change
-///    than this one finding's severity (a liveness freeze, not a fund-safety issue — matching
-///    the cross-guard-type gap immediately above, already accepted on the same reasoning)
-///    justifies. Left as a documented, accepted residual risk rather than a partial mitigation
-///    (e.g. a withdrawable-liquidity haircut) that would only reduce, not close, the race while
-///    adding real surface (a new owner-settable or immutable parameter threaded through every
-///    deploy/upgrade script that constructs this guard and its Selective variant) for no
-///    corresponding guarantee.
+///    call aware of the other's claim.
+///
+///    An earlier version of this note claimed a code fix was impossible because both
+///    `getWithdrawableBalance` and `withdrawProcessing` are `view` "by interface... across this
+///    whole codebase." That was wrong for `withdrawProcessing`: `IAssetGuard.withdrawProcessing`
+///    does not mandate `view` — this guard's own `view` there is a voluntary, non-interface
+///    choice, not a hard constraint. Re-traced after that was caught, the full call graph is:
+///      (a) `PoolLogic.withdrawCashImmediate` (the synchronous pro-rata path, via
+///          `WithdrawalPlanLib.executeProRataWithdrawal`) computes everything live, atomically,
+///          within one transaction — no external actor can interleave mid-transaction, so there
+///          is no staleness window here at all. It also has no LOWER value bound (only an upper
+///          one, `executeProRataWithdrawal`'s own `valueDelta > netFusd + DUST_TOLERANCE` check)
+///          — a Hub-liquidity cap binding here just delivers less of that one asset, the same
+///          graceful degrade this guard already applies everywhere else, not a revert.
+///      (b) `PoolLogic.requestCashWithdraw`/`finalizeCashWithdraw` (the queued path) reads this
+///          guard's `getWithdrawableBalance` only indirectly, as part of live NAV/FX-rate math at
+///          *finalize* time (not a stale request-time snapshot) to convert FUSD to asset units —
+///          it never calls `withdrawProcessing` at all. The actual payout is separately gated by
+///          the pool's own already-idle on-chain balance (`InsufficientAssetBalance` reverts
+///          otherwise), so a stale read here cannot cause an over-payment.
+///      (c) `PoolLogic.withdrawCashImmediateWithPlan` (the attested path,
+///          `WithdrawalPlanLib.executeWithdrawalPlan`) is the one genuine staleness window: an
+///          off-chain attester signs a specific per-asset allocation (EIP-712) potentially
+///          minutes before the user submits it, and Hub liquidity can move in that gap. But this
+///          is already bounded, not open-ended: `executeWithdrawalPlan` checks
+///          `result.valueDelta >= target - (target * plan.minValueOutBps) / 10_000`, an AGGREGATE
+///          tolerance the attester itself signs into the plan (capped by `MAX_MIN_VALUE_OUT_BPS`,
+///          so even a buggy attester cannot authorize unlimited loss). An Aave V4 Spoke
+///          allocation is a "direct leg" (see the receipt-side-check docs further down in
+///          WithdrawalPlanLib), which skips the *stricter*, per-leg receipt-side bound entirely —
+///          only this aggregate, attester-authorized tolerance governs it. Reverting beyond that
+///          tolerance is correct, safety-preserving behavior: the user burns a fixed amount of
+///          FUSD for the plan's promised value, and silently letting an under-delivery through
+///          would mean they burn more than they receive — strictly worse than an atomic revert.
+///
+///    Net: there is no safe, valuable on-chain change left here. A reservation/ledger
+///    coordinating claims across pools would not address (c) (the staleness window is
+///    attestation-to-submission, potentially minutes — not same-block ordering), would not
+///    improve on (a)'s already-existing graceful degrade, and for (b) the idle-balance check
+///    already backstops it. The actual lever that reduces how often (c) happens is off-chain: the
+///    attester service should query current guard liquidity before signing a plan and choose
+///    `minValueOutBps` deliberately — see the reference attester service's own docs for this.
+///    This remains a liveness-only residual on the attested path specifically (bounded by
+///    whatever tolerance the attester authorizes), not a fund-safety issue, matching the
+///    cross-guard-type gap immediately above.
 ///  - FNA-15: `withdrawProcessing` calls `ISpoke.withdraw` directly rather than routing through
 ///    Aave's TakerPositionManager. PoolLogic always dispatches these calls from its own address,
 ///    so the position owner and the caller are the same address — Aave's own
