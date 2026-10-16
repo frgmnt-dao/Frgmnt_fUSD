@@ -107,28 +107,58 @@ contract SlippageAccumulator is Ownable {
         if (IHasSupportedAsset(poolManagerLogic).isSupportedAsset(swapData.srcAsset)) {
             uint256 srcValue = assetValue(swapData.srcAsset, swapData.srcAmount);
             uint256 dstValue = assetValue(swapData.dstAsset, swapData.dstAmount);
+            _applySlippage(poolManagerLogic, srcValue, dstValue);
+        }
+    }
 
-            // Only update the cumulative slippage in case the amount received is lesser than amount sent/traded.
-            if (dstValue < srcValue) {
-                // newSlippage = (srcValue - dstValue) / srcValue * SCALING_FACTOR
-                uint256 diff = srcValue - dstValue;
-                uint256 newSlippage256 = (diff * SCALING_FACTOR) / srcValue;
-                uint128 newSlippage = newSlippage256.toUint128();
+    /// @notice SoftStack M-14: value-based counterpart to updateSlippageImpact() for callers that
+    ///         already hold USD-18 values and have no single src/dst token pair to express as a
+    ///         swap — a Uniswap V3 mint/increaseLiquidity spends two tokens and receives an LP
+    ///         position, not a token, so there is no natural SwapData encoding of "value spent vs
+    ///         value created" without a lossy round-trip through assetValue() and back into a
+    ///         synthetic raw token amount. Takes the two USD-18 values directly instead, sharing
+    ///         the exact same cumulative-slippage state and decay/cap logic as router swaps, so a
+    ///         liquidity-provision loss too small to trip a single-operation check still erodes
+    ///         the same shared budget a sandwiching swap would, and a repeated low-grade cycle
+    ///         (individually within tolerance, cumulatively not) is caught the same way repeated
+    ///         swap slippage already is.
+    /// @param poolManagerLogic Address of the poolManager whose cumulative impact is stored.
+    /// @param router Address of the guarded contract (e.g. the position manager) — the caller
+    ///        must be that contract's registered guard, exactly as updateSlippageImpact requires.
+    /// @param srcValueUsd USD-18 value of what was spent (e.g. actual tokens consumed by a mint).
+    /// @param dstValueUsd USD-18 value of what was created/received (e.g. the fair-priced value
+    ///        of the resulting liquidity).
+    function updateSlippageImpactUsd(
+        address poolManagerLogic,
+        address router,
+        uint256 srcValueUsd,
+        uint256 dstValueUsd
+    ) external onlyContractGuard(router) {
+        _applySlippage(poolManagerLogic, srcValueUsd, dstValueUsd);
+    }
 
-                // Combine the new slippage with the decayed historical slippage.
-                uint128 currentCumulative = getCumulativeSlippageImpact(poolManagerLogic);
-                uint256 newCumulative256 = uint256(currentCumulative) + uint256(newSlippage);
-                uint128 newCumulativeSlippage = newCumulative256.toUint128();
+    /// @dev Shared by updateSlippageImpact() (token-amount callers) and updateSlippageImpactUsd()
+    ///      (value callers) — both resolve to the same two USD-18 numbers before reaching here.
+    function _applySlippage(address poolManagerLogic, uint256 srcValue, uint256 dstValue) private {
+        // Only update the cumulative slippage in case the amount received is lesser than amount sent/traded.
+        if (dstValue < srcValue) {
+            // newSlippage = (srcValue - dstValue) / srcValue * SCALING_FACTOR
+            uint256 diff = srcValue - dstValue;
+            uint256 newSlippage256 = (diff * SCALING_FACTOR) / srcValue;
+            uint128 newSlippage = newSlippage256.toUint128();
 
-                require(newCumulativeSlippage < maxCumulativeSlippage, "slippage impact exceeded");
+            // Combine the new slippage with the decayed historical slippage.
+            uint128 currentCumulative = getCumulativeSlippageImpact(poolManagerLogic);
+            uint256 newCumulative256 = uint256(currentCumulative) + uint256(newSlippage);
+            uint128 newCumulativeSlippage = newCumulative256.toUint128();
 
-                // Update the last traded timestamp.
-                managerData[poolManagerLogic].lastTradeTimestamp = uint256(block.timestamp)
-                    .toUint64();
+            require(newCumulativeSlippage < maxCumulativeSlippage, "slippage impact exceeded");
 
-                // Update the accumulated slippage impact for the poolManager.
-                managerData[poolManagerLogic].accumulatedSlippage = newCumulativeSlippage;
-            }
+            // Update the last traded timestamp.
+            managerData[poolManagerLogic].lastTradeTimestamp = uint256(block.timestamp).toUint64();
+
+            // Update the accumulated slippage impact for the poolManager.
+            managerData[poolManagerLogic].accumulatedSlippage = newCumulativeSlippage;
         }
     }
 

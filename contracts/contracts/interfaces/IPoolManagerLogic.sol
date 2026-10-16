@@ -53,4 +53,14 @@ interface IPoolManagerLogic {
     ///         to gate attesterRotationDelay the same way, so a manager can never shorten the
     ///         detection window around a withdrawal-attester rotation they themselves proposed.
     function factoryOwner() external view returns (address);
+
+    /// @notice SoftStack M-13: the single contract allowed to resolve a caller's real identity
+    ///         via IUserActionSender.actionUser() in PoolLogic._actionSender() /
+    ///         TokenLogic._actionSender() — set only by factoryOwner (setUserActionsRouter()),
+    ///         never the manager. address(0) disables impersonation entirely (every caller is
+    ///         treated as acting for itself). Deliberately separate from
+    ///         getAllowedCallbackSenders()/setAllowedCallbackSender(), which stays
+    ///         manager-controlled for its own, unrelated purpose (flashloan protocol callbacks)
+    ///         and grants no action-impersonation power.
+    function userActionsRouter() external view returns (address);
 }

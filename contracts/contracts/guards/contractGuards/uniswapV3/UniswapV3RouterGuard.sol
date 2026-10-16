@@ -70,13 +70,20 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 (IV3SwapRouter.ExactInputParams)
             );
 
-            (address srcAsset, address dstAsset) = _decodePath(params.path);
+            (address srcAsset, address dstAsset) = _decodePath(params.path, poolManagerLogicAssets);
 
             require(
                 poolManagerLogicAssets.isSupportedAsset(dstAsset),
                 "Frgmnt: unsupported destination asset"
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
+            // SoftStack M-09: amountOutMinimum = 0 lets the swap execute at any price — the
+            // SlippageAccumulator is a reactive, post-execution circuit breaker, not a
+            // preventive per-swap bound, and a single large swap may not trip its cumulative
+            // cap. This is the minimum floor the finding's own recommendation asks for; it does
+            // not replace per-pool slippage judgement, it just forecloses the zero-protection
+            // case the PoC used.
+            require(params.amountOutMinimum > 0, "Frgmnt: amountOutMinimum must be > 0");
 
             intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: srcAsset,
@@ -98,6 +105,8 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 "Frgmnt: unsupported destination asset"
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
+            // SoftStack M-09: see the matching check in the exactInput branch above.
+            require(params.amountOutMinimum > 0, "Frgmnt: amountOutMinimum must be > 0");
 
             intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: params.tokenIn,
@@ -120,13 +129,19 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 (IV3SwapRouter.ExactOutputParams)
             );
 
-            (address dstAsset, address srcAsset) = _decodePath(params.path);
+            (address dstAsset, address srcAsset) = _decodePath(params.path, poolManagerLogicAssets);
 
             require(
                 poolManagerLogicAssets.isSupportedAsset(dstAsset),
                 "Frgmnt: unsupported destination asset"
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
+            // SoftStack M-09: amountInMaximum = type(uint256).max lets the swap pay any price
+            // for the fixed output — the exact-output mirror of the exactInput check above.
+            require(
+                params.amountInMaximum < type(uint256).max,
+                "Frgmnt: amountInMaximum must be bounded"
+            );
 
             intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: srcAsset,
@@ -148,6 +163,11 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
                 "Frgmnt: unsupported destination asset"
             );
             require(poolLogic == params.recipient, "Frgmnt: recipient is not pool");
+            // SoftStack M-09: see the matching check in the exactOutput branch above.
+            require(
+                params.amountInMaximum < type(uint256).max,
+                "Frgmnt: amountInMaximum must be bounded"
+            );
 
             intermediateSwapData[msg.sender] = SlippageAccumulator.SwapData({
                 srcAsset: params.tokenIn,
@@ -183,17 +203,29 @@ contract UniswapV3RouterGuard is TxDataUtils, ITransactionTypes, SlippageAccumul
     }
 
     /// @dev Decodes a UniswapV3 path to the first (src) and final (dst) assets.
+    /// @dev SoftStack M-12: previously only validated the final (dst) token — see txGuard's own
+    ///      isSupportedAsset(dstAsset) checks — leaving every INTERMEDIATE hop of a multi-hop
+    ///      path completely unvalidated. A manager or trader could route a swap through an
+    ///      arbitrary, unregistered intermediate token with no guard ever inspecting it. This
+    ///      walk already visits every intermediate hop token to find the final one (`asset`
+    ///      below, captured once per iteration); validating it here, in the same pass, adds no
+    ///      second traversal — just one extra check per hop already being read.
     function _decodePath(
-        bytes memory path
-    ) internal pure returns (address srcAsset, address dstAsset) {
+        bytes memory path,
+        IHasSupportedAsset poolManagerLogicAssets
+    ) internal view returns (address srcAsset, address dstAsset) {
         (srcAsset, , ) = path.decodeFirstPool();
 
         address asset;
 
-        // Walk the path to find the final token
+        // Walk the path to find the final token, validating every intermediate hop along the way.
         while (path.hasMultiplePools()) {
             path = path.skipToken();
             (asset, , ) = path.decodeFirstPool();
+            require(
+                poolManagerLogicAssets.isSupportedAsset(asset),
+                "Frgmnt: unsupported hop asset"
+            );
         }
 
         // Destination is the token of the last pool in the path

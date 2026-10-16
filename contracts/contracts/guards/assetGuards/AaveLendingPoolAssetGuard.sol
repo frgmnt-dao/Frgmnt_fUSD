@@ -277,6 +277,31 @@ contract AaveV3LendingPoolAssetGuard is
         if (debtAssetCount == 0) return gross;
 
         address settlementToken = _chooseSettlementToken(repayPlans);
+
+        // SoftStack M-08: an owner who lists a new Aave V3 debt asset before calling
+        // setUniV3Fee/setUniV3PathExactOut for its settlement<->debt pair must not freeze NAV
+        // and withdrawal computation for the ENTIRE pool. _estimateFlashAmountInSettlement
+        // resolves this route via _routeFeeSettlementToDebt, which reverts unconditionally when
+        // neither a fee nor a path is configured, and that revert propagates straight through
+        // getNetRealizableBalance()/getWithdrawableBalance() into every caller
+        // (finalizeCashWithdraw, the attested withdrawal plan path, this guard's own liquidity
+        // cap). This cheap, memory-only pre-check (repayPlans is already materialized, no extra
+        // external calls) lets this function degrade to net-realizable = 0 instead — the same
+        // conservative fallback IWithdrawableBalanceGuard.getWithdrawableBalance() callers
+        // already apply elsewhere on a failed guard call (FundCalculationLibrary
+        // .guardWithdrawableBalance). The collateral loop below applies the matching per-leg
+        // check inline, without a second pass over supported assets. A route that IS configured
+        // but malformed (wrong path endpoints) is a real bug, not a missing-config gap, and
+        // still reverts via the normal resolvers exactly as before.
+        for (uint256 i; i < repayPlans.length; ++i) {
+            address debtToken = repayPlans[i].underlyingAsset;
+            if (debtToken == settlementToken) continue;
+            if (
+                uniV3PathExactOut[settlementToken][debtToken].length == 0 &&
+                uniV3Fee[settlementToken][debtToken] == 0
+            ) return 0;
+        }
+
         uint256 flashAmount = _estimateFlashAmountInSettlement(
             pool,
             repayPlans,
@@ -320,6 +345,22 @@ contract AaveV3LendingPoolAssetGuard is
                 uint256 collateralDecimals = IERC20Extended(underlying).decimals();
                 uint256 collateralUsd = (collateralPriceUsd * collateralBalance) /
                     (10 ** collateralDecimals);
+
+                // SoftStack M-08: this specific collateral leg's own route may be unconfigured
+                // (the owner added this collateral without calling setUniV3Fee/
+                // setUniV3PathExactIn for it yet) without the whole NAV read reverting — treat
+                // an unconfigured leg's entire USD value as unwind cost (worst case: this leg
+                // contributes nothing to net-realizable value until the route exists), same
+                // conservative-degrade shape as the debt-leg pre-check above. Re-uses
+                // collateralBalance/collateralUsd already fetched for this iteration — no extra
+                // external call, no second pass over supportedAssets.
+                if (
+                    uniV3PathExactIn[underlying][settlementToken].length == 0 &&
+                    uniV3Fee[underlying][settlementToken] == 0
+                ) {
+                    costUsd += collateralUsd;
+                    continue;
+                }
 
                 uint256 effBps = _effectiveSlippageExactIn(
                     defaultSlippageBps,

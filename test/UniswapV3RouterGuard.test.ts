@@ -134,7 +134,7 @@ describe('UniswapV3RouterGuard (original contract)', () => {
       recipient: poolLogicSigner.address,
       deadline,
       amountIn,
-      amountOutMinimum: 0n,
+      amountOutMinimum: 1n, // SoftStack M-09: txGuard now requires a nonzero minimum
     };
 
     const data = routerIface.encodeFunctionData('exactInput', [params]);
@@ -209,7 +209,7 @@ describe('UniswapV3RouterGuard (original contract)', () => {
       recipient: poolLogicSigner.address,
       deadline,
       amountIn,
-      amountOutMinimum: 0n,
+      amountOutMinimum: 1n, // SoftStack M-09: txGuard now requires a nonzero minimum
       sqrtPriceLimitX96: 0n,
     };
 
@@ -411,6 +411,107 @@ describe('UniswapV3RouterGuard (original contract)', () => {
   });
 
   // -------------------------
+  // SoftStack M-09: a zero amountOutMinimum (exact-input) or an unbounded amountInMaximum
+  // (exact-output) let the swap execute at any price — the SlippageAccumulator only reacts
+  // after the fact and may not catch a single large swap.
+  // -------------------------
+  describe('SoftStack M-09: per-swap output/input bound is required', () => {
+    it('exactInput reverts when amountOutMinimum is zero', async () => {
+      const path = encodePath([tokenIn.target, tokenOut.target], [FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountIn: ethers.parseUnits('1', 18),
+        amountOutMinimum: 0n,
+      };
+      const data = routerIface.encodeFunctionData('exactInput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: amountOutMinimum must be > 0');
+    });
+
+    it('exactInputSingle reverts when amountOutMinimum is zero', async () => {
+      const params = {
+        tokenIn: tokenIn.target,
+        tokenOut: tokenOut.target,
+        fee: FEE,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountIn: ethers.parseUnits('1', 18),
+        amountOutMinimum: 0n,
+        sqrtPriceLimitX96: 0n,
+      };
+      const data = routerIface.encodeFunctionData('exactInputSingle', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: amountOutMinimum must be > 0');
+    });
+
+    it('exactOutput reverts when amountInMaximum is type(uint256).max (unbounded)', async () => {
+      const path = encodePath([tokenOut.target, tokenIn.target], [FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountOut: ethers.parseUnits('1', 18),
+        amountInMaximum: ethers.MaxUint256,
+      };
+      const data = routerIface.encodeFunctionData('exactOutput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: amountInMaximum must be bounded');
+    });
+
+    it('exactOutputSingle reverts when amountInMaximum is type(uint256).max (unbounded)', async () => {
+      const params = {
+        tokenIn: tokenIn.target,
+        tokenOut: tokenOut.target,
+        fee: FEE,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountOut: ethers.parseUnits('0.3', 18),
+        amountInMaximum: ethers.MaxUint256,
+        sqrtPriceLimitX96: 0n,
+      };
+      const data = routerIface.encodeFunctionData('exactOutputSingle', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: amountInMaximum must be bounded');
+    });
+
+    it('exactOutput with amountInMaximum one below the max still succeeds (only the literal max is rejected)', async () => {
+      const path = encodePath([tokenOut.target, tokenIn.target], [FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountOut: ethers.parseUnits('1', 18),
+        amountInMaximum: ethers.MaxUint256 - 1n,
+      };
+      const data = routerIface.encodeFunctionData('exactOutput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.emit(guard, 'ExchangeTo');
+    });
+  });
+
+  // -------------------------
   // _decodePath via exactInput multi-hop
   // -------------------------
   it('_decodePath handles multi-hop path (src=first token, dst=last token)', async () => {
@@ -424,7 +525,7 @@ describe('UniswapV3RouterGuard (original contract)', () => {
       recipient: poolLogicSigner.address,
       deadline,
       amountIn,
-      amountOutMinimum: 0n,
+      amountOutMinimum: 1n, // SoftStack M-09: txGuard now requires a nonzero minimum
     };
 
     const data = routerIface.encodeFunctionData('exactInput', [params]);
@@ -443,6 +544,102 @@ describe('UniswapV3RouterGuard (original contract)', () => {
   });
 
   // -------------------------
+  // SoftStack M-12: every intermediate hop of a multi-hop path must itself be a supported
+  // asset, not just the first and last token.
+  // -------------------------
+  describe('SoftStack M-12: intermediate hop token validation', () => {
+    it('exactInput reverts when the middle hop token is not a supported asset', async () => {
+      await poolManagerLogic.setSupportedAsset(tokenMid.target, false);
+
+      const path = encodePath([tokenIn.target, tokenMid.target, tokenOut.target], [FEE, FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountIn: ethers.parseUnits('1', 18),
+        amountOutMinimum: 0n,
+      };
+      const data = routerIface.encodeFunctionData('exactInput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: unsupported hop asset');
+    });
+
+    it('exactOutput reverts when the middle hop token is not a supported asset', async () => {
+      await poolManagerLogic.setSupportedAsset(tokenMid.target, false);
+
+      // exactOutput paths are encoded output-first: tokenOut -> tokenMid -> tokenIn.
+      const path = encodePath([tokenOut.target, tokenMid.target, tokenIn.target], [FEE, FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountOut: ethers.parseUnits('1', 18),
+        amountInMaximum: ethers.parseUnits('2', 18),
+      };
+      const data = routerIface.encodeFunctionData('exactOutput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: unsupported hop asset');
+    });
+
+    it('exactInput succeeds and still emits ExchangeFrom once the hop token is (re-)registered as supported', async () => {
+      // Sanity: the guard-level rejection above is specifically about the asset registry, not
+      // path structure — the exact same path succeeds once tokenMid is supported again,
+      // matching the pre-existing multi-hop happy-path test above.
+      const path = encodePath([tokenIn.target, tokenMid.target, tokenOut.target], [FEE, FEE]);
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountIn: ethers.parseUnits('1', 18),
+        amountOutMinimum: 1n, // SoftStack M-09: txGuard now requires a nonzero minimum
+      };
+      const data = routerIface.encodeFunctionData('exactInput', [params]);
+
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.emit(guard, 'ExchangeFrom');
+    });
+
+    it('a 3-hop path validates every intermediate token, not just the first one found', async () => {
+      const MockERC20 = await ethers.getContractFactory('MockERC20');
+      const tokenMid2 = await MockERC20.deploy(18);
+      await tokenMid2.waitForDeployment();
+      // Deliberately never registered as a supported asset.
+
+      const path = encodePath(
+        [tokenIn.target, tokenMid.target, tokenMid2.target, tokenOut.target],
+        [FEE, FEE, FEE],
+      );
+      const params = {
+        path,
+        recipient: poolLogicSigner.address,
+        deadline: await futureDeadline(),
+        amountIn: ethers.parseUnits('1', 18),
+        amountOutMinimum: 0n,
+      };
+      const data = routerIface.encodeFunctionData('exactInput', [params]);
+
+      // tokenMid (the first intermediate hop) IS supported; tokenMid2 (the second) is not —
+      // the walk must not stop checking after the first intermediate token passes.
+      await expect(
+        guard
+          .connect(poolLogicSigner)
+          .txGuard(await poolManagerLogic.getAddress(), swapRouter, data),
+      ).to.be.revertedWith('Frgmnt: unsupported hop asset');
+    });
+  });
+
+  // -------------------------
   // multicall
   // -------------------------
   it('multicall - happy path with single exactInputSingle inside', async () => {
@@ -456,7 +653,7 @@ describe('UniswapV3RouterGuard (original contract)', () => {
       recipient: poolLogicSigner.address,
       deadline,
       amountIn,
-      amountOutMinimum: 0n,
+      amountOutMinimum: 1n, // SoftStack M-09: txGuard now requires a nonzero minimum
       sqrtPriceLimitX96: 0n,
     };
 

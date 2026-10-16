@@ -16,6 +16,12 @@ contract MockERC20 {
         balances[to] += amount;
     }
 
+    /// @notice SoftStack M-14 test helper: lets a test simulate tokens actually consumed by a
+    ///         mint/increaseLiquidity (this mock has no real Uniswap mint logic of its own).
+    function burn(address from, uint256 amount) external {
+        balances[from] -= amount;
+    }
+
     function balanceOf(address account) external view returns (uint256) {
         return balances[account];
     }

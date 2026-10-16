@@ -31,6 +31,15 @@ import { UniswapV3AssetGuard } from "./UniswapV3AssetGuard.sol";
 ///      Known limit (inherited from reusing the validated function): the plan is computed for
 ///      ALL owned NFTs before filtering, so an unselected NFT whose pricing reverts still reverts
 ///      the call, and gas grows with the number of owned NFTs, not with the selection.
+///
+///      SoftStack M-07: the oracle-deviation gate fixed in UniswapV3AssetGuard (the
+///      withdrawalTwapDeviationBps/withdrawalSlippageBps split) is inherited here unchanged — this
+///      contract overrides no function of UniswapV3AssetGuard and references neither parameter
+///      directly, so the fix applies to this contract's own withdrawProcessing() call with no
+///      code change needed in this file. Because this is a separately deployed contract with its
+///      own guard-registry entry, picking up the fix on the LIVE instance still requires its own
+///      redeploy and setAssetGuard() re-registration — the source fix alone does not remediate an
+///      already-deployed instance of this contract.
 contract UniswapV3SelectiveAssetGuard is UniswapV3AssetGuard, ISubPositionGuard {
     error InvalidPositionId();
     error PositionsNotAscending();

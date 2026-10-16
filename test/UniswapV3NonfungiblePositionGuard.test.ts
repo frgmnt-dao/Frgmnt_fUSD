@@ -16,6 +16,7 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
   let poolLogic: any;
   let poolManagerLogic: any;
   let guard: any;
+  let slippageAccumulator: any;
 
   const NFT_TYPE = ethers.keccak256(ethers.toUtf8Bytes('UNISWAP_NFT_TYPE'));
   const FEE_3000 = 3000;
@@ -110,10 +111,25 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     await poolManagerLogic.setSupportedAsset(await positionManager.getAddress(), true);
 
     //------------------------------------------------------------------
+    // 7b. SlippageAccumulator (SoftStack M-14): reuses guardInfo as its "poolFactory" — it only
+    //     calls getContractGuard(), which MockGuardInfo already implements.
+    //------------------------------------------------------------------
+    const SlippageAccumulatorFactory = await ethers.getContractFactory('SlippageAccumulator');
+    slippageAccumulator = await SlippageAccumulatorFactory.deploy(
+      await guardInfo.getAddress(),
+      21600, // 6h decay, matches the live default
+      50000, // 5% cap, matches the live default
+    );
+
+    //------------------------------------------------------------------
     // 8. Deploy the guard and wire it into tracker
     //------------------------------------------------------------------
     const Guard = await ethers.getContractFactory('UniswapV3NonfungiblePositionGuard');
-    guard = await Guard.deploy(MAX_POSITIONS, await nftTracker.getAddress());
+    guard = await Guard.deploy(
+      MAX_POSITIONS,
+      await nftTracker.getAddress(),
+      await slippageAccumulator.getAddress(),
+    );
 
     // positionManager must be guarded by this guard in NftTrackerStorage
     await guardInfo.setContractGuard(await positionManager.getAddress(), await guard.getAddress());
@@ -208,6 +224,21 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     );
   }
 
+  // SoftStack M-14: txGuard() now has a real, state-mutating side effect on mint/
+  // increaseLiquidity (it snapshots pre-op pool balances for afterTxGuard to compare against).
+  // staticTxGuard()'s .staticCall() never persists that write, so any test that calls
+  // afterTxGuard for a mint/increaseLiquidity afterwards must send a REAL txGuard transaction
+  // first, exactly like PoolTxExecutor does in production.
+  async function realTxGuard(to: string, data: string) {
+    const tx = await poolLogic.callTxGuard(
+      await guard.getAddress(),
+      await poolManagerLogic.getAddress(),
+      to,
+      data,
+    );
+    await tx.wait();
+  }
+
   async function callAfterTx(to: string, data: string) {
     // must be called from poolLogic address via helper
     await poolLogic.callAfterTxGuard(
@@ -246,6 +277,8 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     const [txType] = await staticTxGuard(await positionManager.getAddress(), data);
     expect(txType).to.equal(3); // UniswapV3Mint
 
+    // Real (non-static) txGuard call so the SoftStack M-14 pre-mint balance snapshot persists.
+    await realTxGuard(await positionManager.getAddress(), data);
     await callAfterTx(await positionManager.getAddress(), data);
 
     const ids = await nftTracker.getAllUintIds(NFT_TYPE, await poolLogic.getAddress());
@@ -318,6 +351,8 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
         FEE_3000,
       );
       const mintData = await encodeMintToPool();
+      // Real (non-static) txGuard call so the SoftStack M-14 pre-mint balance snapshot persists.
+      await realTxGuard(await positionManager.getAddress(), mintData);
       await callAfterTx(await positionManager.getAddress(), mintData);
     }
 
@@ -420,6 +455,10 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     const [txType] = await staticTxGuard(await positionManager.getAddress(), data);
     expect(txType).to.equal(3); // UniswapV3Mint
 
+    // Real (non-static) txGuard call so the SoftStack M-14 pre-mint balance snapshot persists
+    // and the position-limit check below is what actually fires, not a stale/missing snapshot.
+    await realTxGuard(await positionManager.getAddress(), data);
+
     // afterTxGuard should revert. The inner revert reason is
     // "Frgmnt: too many Uniswap V3 positions" but it is wrapped by
     // MockPoolLogicV3Guard and surfaces as:
@@ -445,9 +484,188 @@ describe('UniswapV3NonfungiblePositionGuard', () => {
     const [txType] = await staticTxGuard(await positionManager.getAddress(), multiData);
     expect(txType).to.equal(8); // UniswapV3Multicall
 
+    // Real (non-static) txGuard call so the multicall-restriction check below is what actually
+    // fires (both inner mints' SoftStack M-14 snapshots get written during this call, exactly
+    // as they would in production — the second inner afterTxGuardHandle call is still the one
+    // that trips "invalid multicall", see that check's own updated comment).
+    await realTxGuard(await positionManager.getAddress(), multiData);
+
     // MockPoolLogicV3Guard wraps the revert from guard.afterTxGuard()
     await expect(callAfterTx(await positionManager.getAddress(), multiData)).to.be.revertedWith(
       'MockPoolLogicV3Guard: afterTxGuard call failed',
     );
+  });
+
+  // -------------------------------------------------------------------
+  // SoftStack M-14: a mint/increaseLiquidity that costs more, in real Chainlink-valued
+  // dollars, than the resulting liquidity is worth at the Chainlink fair price must revert.
+  // -------------------------------------------------------------------
+  describe('SoftStack M-14: mint/increaseLiquidity cost must stay within fair-value tolerance', () => {
+    const TICK_LOWER = -60;
+    const TICK_UPPER = 60;
+    const LIQUIDITY = 1_000_000_000n;
+
+    async function fairAmountsForLiquidity(liquidity: bigint) {
+      const PriceLibTest = await ethers.getContractFactory('UniswapV3PriceLibraryTest');
+      const priceLibTest = await PriceLibTest.deploy();
+      const sqrtOne = 1n << 96n;
+      const [amount0, amount1] = await priceLibTest.getAmountsForLiquidityWrapper(
+        sqrtOne,
+        TICK_LOWER,
+        TICK_UPPER,
+        liquidity,
+      );
+      return { amount0, amount1 };
+    }
+
+    async function setUpMint(tokenId: number, fundAmount0: bigint, fundAmount1: bigint) {
+      // Fund the pool with enough of both tokens to "pay" for the mint.
+      await token0.mint(await poolLogic.getAddress(), fundAmount0);
+      await token1.mint(await poolLogic.getAddress(), fundAmount1);
+
+      await positionManager.setTokenByIndex(0, tokenId);
+      await positionManager.setPositionFull(
+        tokenId,
+        await token0.getAddress(),
+        await token1.getAddress(),
+        FEE_3000,
+        TICK_LOWER,
+        TICK_UPPER,
+        LIQUIDITY,
+      );
+
+      const mintData = await encodeMintToPool();
+      // Snapshots pre-mint balances (fundAmount0/fundAmount1, just minted above).
+      await realTxGuard(await positionManager.getAddress(), mintData);
+      return mintData;
+    }
+
+    it('a mint that costs exactly the fair value succeeds', async () => {
+      const { amount0: fairAmount0, amount1: fairAmount1 } =
+        await fairAmountsForLiquidity(LIQUIDITY);
+
+      const mintData = await setUpMint(1, fairAmount0, fairAmount1);
+
+      // Simulate the mint consuming exactly the fair-priced amounts — zero excess.
+      await token0.burn(await poolLogic.getAddress(), fairAmount0);
+      await token1.burn(await poolLogic.getAddress(), fairAmount1);
+
+      await expect(callAfterTx(await positionManager.getAddress(), mintData)).to.not.be.reverted;
+
+      const ids = await nftTracker.getAllUintIds(NFT_TYPE, await poolLogic.getAddress());
+      expect(ids.length).to.equal(1);
+    });
+
+    it('a mint that costs slightly more than fair value, within the 1% tolerance, succeeds', async () => {
+      const { amount0: fairAmount0, amount1: fairAmount1 } =
+        await fairAmountsForLiquidity(LIQUIDITY);
+
+      // 0.5% excess on token0 only — well within MINT_LOSS_TOLERANCE_BPS (100 = 1%).
+      const actualAmount0 = (fairAmount0 * 1005n) / 1000n;
+
+      const mintData = await setUpMint(1, actualAmount0, fairAmount1);
+
+      await token0.burn(await poolLogic.getAddress(), actualAmount0);
+      await token1.burn(await poolLogic.getAddress(), fairAmount1);
+
+      await expect(callAfterTx(await positionManager.getAddress(), mintData)).to.not.be.reverted;
+    });
+
+    it('a mint that costs more than fair value beyond the 1% tolerance reverts', async () => {
+      const { amount0: fairAmount0, amount1: fairAmount1 } =
+        await fairAmountsForLiquidity(LIQUIDITY);
+
+      // 10% excess on token0 (~5% of total value) — beyond MINT_LOSS_TOLERANCE_BPS (100 = 1%).
+      const actualAmount0 = (fairAmount0 * 110n) / 100n; // 10% on this token ~= 5% of total value, clearly over the 1% tolerance
+
+      const mintData = await setUpMint(1, actualAmount0, fairAmount1);
+
+      await token0.burn(await poolLogic.getAddress(), actualAmount0);
+      await token1.burn(await poolLogic.getAddress(), fairAmount1);
+
+      await expect(callAfterTx(await positionManager.getAddress(), mintData)).to.be.revertedWith(
+        'MockPoolLogicV3Guard: afterTxGuard call failed',
+      );
+
+      // The rejected mint must not have been tracked.
+      const ids = await nftTracker.getAllUintIds(NFT_TYPE, await poolLogic.getAddress());
+      expect(ids.length).to.equal(0);
+    });
+
+    it('increaseLiquidity is checked the same way and reverts beyond tolerance', async () => {
+      const { amount0: fairAmount0, amount1: fairAmount1 } =
+        await fairAmountsForLiquidity(LIQUIDITY);
+
+      // Pre-track position 1 (a normal, in-tolerance mint) so increaseLiquidity has a tracked
+      // NFT to target.
+      const mintData = await setUpMint(1, fairAmount0, fairAmount1);
+      await token0.burn(await poolLogic.getAddress(), fairAmount0);
+      await token1.burn(await poolLogic.getAddress(), fairAmount1);
+      await callAfterTx(await positionManager.getAddress(), mintData);
+
+      // Now increase it with a 10% excess on token0 (~5% of total value).
+      await poolManagerLogic.setSupportedAsset(await positionManager.getAddress(), true);
+      const extraFund0 = (fairAmount0 * 110n) / 100n; // 10% on this token ~= 5% of total value, clearly over the 1% tolerance
+      await token0.mint(await poolLogic.getAddress(), extraFund0);
+      await token1.mint(await poolLogic.getAddress(), fairAmount1);
+
+      const increaseData = await encodeIncreaseLiquidity(1n);
+      await realTxGuard(await positionManager.getAddress(), increaseData);
+
+      await token0.burn(await poolLogic.getAddress(), extraFund0);
+      await token1.burn(await poolLogic.getAddress(), fairAmount1);
+
+      await expect(
+        callAfterTx(await positionManager.getAddress(), increaseData),
+      ).to.be.revertedWith('MockPoolLogicV3Guard: afterTxGuard call failed');
+    });
+
+    it('repeated increaseLiquidity cycles, each individually within the 1% per-operation tolerance, eventually trip the shared cumulative cap', async () => {
+      // SoftStack M-14 (full report): the audit's own live PoC demonstrated per-cycle losses of
+      // 0.39-0.65% of position size — well under this guard's 1% per-operation cap — but
+      // repeating the cycle drained 5% of NAV in 8 cycles. This proves the per-operation cap
+      // ALONE would have let every one of those cycles through; the SlippageAccumulator
+      // integration is what actually catches the sustained pattern.
+      const { amount0: fairAmount0, amount1: fairAmount1 } =
+        await fairAmountsForLiquidity(LIQUIDITY);
+
+      const mintData = await setUpMint(1, fairAmount0, fairAmount1);
+      await token0.burn(await poolLogic.getAddress(), fairAmount0);
+      await token1.burn(await poolLogic.getAddress(), fairAmount1);
+      await callAfterTx(await positionManager.getAddress(), mintData);
+
+      // ~0.9% of total value per cycle (1.8% excess concentrated on token0 alone) — safely under
+      // the 1% MINT_LOSS_TOLERANCE_BPS per-operation cap, matching the audit's own demonstrated
+      // per-cycle magnitude.
+      const perCycleActualAmount0 = (fairAmount0 * 1018n) / 1000n;
+
+      let succeeded = 0;
+      let reverted = false;
+      for (let i = 0; i < 10 && !reverted; i++) {
+        await token0.mint(await poolLogic.getAddress(), perCycleActualAmount0);
+        await token1.mint(await poolLogic.getAddress(), fairAmount1);
+
+        const increaseData = await encodeIncreaseLiquidity(1n);
+        await realTxGuard(await positionManager.getAddress(), increaseData);
+
+        await token0.burn(await poolLogic.getAddress(), perCycleActualAmount0);
+        await token1.burn(await poolLogic.getAddress(), fairAmount1);
+
+        try {
+          await callAfterTx(await positionManager.getAddress(), increaseData);
+          succeeded++;
+        } catch (err: any) {
+          reverted = true;
+          expect(String(err.message || err)).to.include(
+            'MockPoolLogicV3Guard: afterTxGuard call failed',
+          );
+        }
+      }
+
+      // Each individual cycle passed the 1% per-operation cap (proving that cap alone is not
+      // the mechanism that stops this) — but the shared cumulative budget eventually reverted.
+      expect(succeeded).to.be.greaterThan(1);
+      expect(reverted).to.equal(true);
+    });
   });
 });

@@ -303,6 +303,7 @@ contract PoolLogic is
     error DecayWindowTooShort();
     error NoRotationPending();
     error RotationNotYetDue();
+    error FlashloanCallbackOutsideGuardedCall();
     // SlippageExceeded, InvalidReservedBalance, InvalidAssetData, AssetNotSupported, and
     // InvalidFundValue moved to IPoolLogic (shared with WithdrawalPlanLib.sol, which also
     // throws them for the attested-plan path). InvalidGuard, ComplexWithdrawFailed, TxFailed,
@@ -599,9 +600,16 @@ contract PoolLogic is
         if (index == 0) revert AutoCompoundingNotInitialized();
     }
 
+    /// @dev SoftStack M-13: impersonation power (resolving the real acting user via
+    ///      IUserActionSender.actionUser()) now comes from a single, factoryOwner-set
+    ///      userActionsRouter — not the manager-controlled allowedCallbackSenders list, which
+    ///      exists for a different purpose (flashloan protocol callbacks, see
+    ///      _isAllowedCallbackSender) and must not also grant this. See
+    ///      PoolManagerLogic.setUserActionsRouter()'s own documentation for the full reasoning.
     function _actionSender() internal view returns (address sender) {
         sender = msg.sender;
-        if (_isAllowedCallbackSender(sender)) {
+        address router = IPoolManagerLogic(poolManagerLogic).userActionsRouter();
+        if (router != address(0) && sender == router) {
             sender = IUserActionSender(sender).actionUser();
         }
     }
@@ -1527,7 +1535,7 @@ contract PoolLogic is
         return success;
     }
 
-    function execTransaction(address to, bytes calldata data) external returns (bool) {
+    function execTransaction(address to, bytes calldata data) external nonReentrant returns (bool) {
         return _execTx(to, data);
     }
 
@@ -1629,6 +1637,20 @@ contract PoolLogic is
     /// @param initiator Address that initiated the flash loan
     /// @param params Arbitrary bytes passed to the receiver
     /// @return success Boolean indicating whether the operation was successful
+    /// @dev SoftStack M-02: NOT nonReentrant. This callback is a legitimate nested call that
+    ///      only ever arrives mid-flight inside an already-nonReentrant outer call
+    ///      (execTransaction or withdrawCashImmediate*/withdrawCashImmediateWithPlan, the only
+    ///      paths that can make PoolLogic itself call Aave's flashLoan — Aave's own
+    ///      `initiator == address(this)` check in _executeAaveFlashloan rules out any
+    ///      externally-triggered call reaching here with no lock held at all). Applying
+    ///      nonReentrant directly here, as the finding's literal text suggests, would make OZ's
+    ///      guard reject this exact legitimate nested call — breaking every withdrawal that
+    ///      unwinds an Aave debt position — since the modifier cannot distinguish an intentional
+    ///      nested step of the same outer call from an attack. The outer lock already covers the
+    ///      actual concern (an ERC-777-style hook re-entering harvest()/stake()/etc. during the
+    ///      unwind loop, which are nonReentrant themselves and so correctly reject it once the
+    ///      outer lock is held) — this assertion only documents and enforces that invariant
+    ///      against a future code path that might accidentally reach this callback unlocked.
     function executeOperation(
         address[] calldata assets,
         uint256[] calldata amounts,
@@ -1636,6 +1658,7 @@ contract PoolLogic is
         address initiator,
         bytes calldata params
     ) external override returns (bool) {
+        if (!_reentrancyGuardEntered()) revert FlashloanCallbackOutsideGuardedCall();
         return _executeAaveFlashloan(assets, amounts, premiums, initiator, params);
     }
 
@@ -1646,7 +1669,13 @@ contract PoolLogic is
     /// @notice Executes operations after receiving a flashloan from Morpho
     /// @param assets Amount that was flash loaned
     /// @param params Arbitrary bytes passed to the receiver
+    /// @dev SoftStack M-03: same reasoning as executeOperation's own note above, for the Morpho
+    ///      Blue flashloan callback. Morpho Blue has no separate "receiver" parameter — the
+    ///      callback always lands on whoever called flashLoan — so reaching this function with no
+    ///      lock held would require the pool itself to have called Morpho's flashLoan outside an
+    ///      already-nonReentrant entry point, which does not exist.
     function onMorphoFlashLoan(uint256 assets, bytes calldata params) external override {
+        if (!_reentrancyGuardEntered()) revert FlashloanCallbackOutsideGuardedCall();
         _executeMorphoFlashloan(assets, params);
     }
 
