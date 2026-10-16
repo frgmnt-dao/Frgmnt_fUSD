@@ -87,7 +87,7 @@ missing fUSD allowance), `NOT_SOLVENT_FOR_PLAN`, `CHAIN_STATE_UNAVAILABLE`.
   drift; the contract caps it at 1%.
 - **`liquidityBufferBps` exists for a specific, real risk: shared-liquidity drift between signing
   and execution.** Some guards (e.g. an Aave V4 Spoke) report `withdrawableValue` against a pot of
-  liquidity shared with *other, unrelated pools* — a Hub, not something exclusive to this one.
+  liquidity shared with _other, unrelated pools_ — a Hub, not something exclusive to this one.
   `composePlan` reads that figure live, at request time, but a plan can sit unexecuted for up to
   `planTtlSeconds`; if another pool drains the same shared Hub in that window, the amount this
   pool could actually deliver by execution time is lower than what was quoted at signing time. The
