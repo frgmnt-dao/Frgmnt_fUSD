@@ -110,6 +110,7 @@ contract TestFundCalculationLibrary {
     }
 
     function calculateManagementFee(
+        uint256 totalValue,
         uint256 totalFusd,
         uint256 lastFeeMintTime,
         uint256 managementFeeNumerator,
@@ -117,6 +118,7 @@ contract TestFundCalculationLibrary {
     ) external view returns (uint256 managementFee, uint256 updatedLastFeeMintTime) {
         return
             FundCalculationLibrary.calculateManagementFee(
+                totalValue,
                 totalFusd,
                 lastFeeMintTime,
                 managementFeeNumerator,

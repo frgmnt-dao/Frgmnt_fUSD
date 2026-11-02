@@ -827,6 +827,286 @@ describe('AaveLendingPoolAssetGuard (AaveV3LendingPoolAssetGuard)', () => {
   });
 
   // -----------------------------------------------------------------------
+  // SoftStack M-08: an unconfigured Uniswap route (collateral->settlement or
+  // settlement->debt) must degrade getNetRealizableBalance/getWithdrawableBalance to a
+  // conservative value instead of reverting the whole NAV/withdrawal computation. The real
+  // transaction-building path (withdrawProcessing) must keep reverting on a genuinely missing
+  // route — it cannot execute an unbounded swap.
+  // -----------------------------------------------------------------------
+
+  describe('SoftStack M-08: unconfigured collateral/debt swap route degrades NAV instead of reverting', () => {
+    it('collateral leg: an unconfigured collateral->settlement route no longer reverts getNetRealizableBalance — the whole leg is treated as unwind cost', async () => {
+      const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const wethAToken = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('aWETH', 'aWETH', 18));
+      await wethAToken.waitForDeployment();
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      const plAddr = await pl.getAddress();
+
+      // Same fixture as the FNA-35 collateral-leg test above (WETH collateral, USDC debt — no
+      // settlement<->debt swap needed), EXCEPT setUniV3Fee(weth, usdc, ...) is never called.
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+      );
+
+      await aToken.mint(plAddr, 10_000n * 10n ** 6n);
+      await wethAToken.mint(plAddr, ethers.parseEther('1'));
+      await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
+
+      // Full liquidity behind both reserves, so getWithdrawableBalance's own liquidity cap
+      // (maxSafePortion) is 100% and does not itself mask the net-realizable comparison below.
+      await usdc.mint(await aToken.getAddress(), 10_000n * 10n ** 6n);
+      await weth.mint(await wethAToken.getAddress(), ethers.parseEther('1'));
+
+      await guard.setDefaultSlippageBps(50);
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(0);
+
+      // Precondition: the WETH -> USDC route really is unconfigured.
+      expect(await guard.uniV3Fee(await weth.getAddress(), await usdc.getAddress())).to.equal(0n);
+      expect(
+        await guard.uniV3PathExactIn(await weth.getAddress(), await usdc.getAddress()),
+      ).to.equal('0x');
+
+      const gross = await guard.getBalance(plAddr, ethers.ZeroAddress);
+      // (10,000 + 2,000) - 100 = 11,900, same as the configured-route FNA-35 test.
+      expect(gross).to.equal(ethers.parseUnits('11900', 18));
+
+      // Without the fix this reverts with "Frgmnt: missing fee/path collateral->settle".
+      const net = await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress);
+
+      // Worst case: the entire unconfigured WETH leg ($2,000) is treated as unwind cost, not
+      // just its slippage (contrast the $16 deducted in the configured-route FNA-35 test above).
+      const expectedNet = gross - ethers.parseUnits('2000', 18);
+      expect(net).to.equal(expectedNet);
+      expect(net).to.equal(ethers.parseUnits('9900', 18));
+
+      // getWithdrawableBalance (liquidity-capped counterpart) goes through the same
+      // _netRealizableBalance() and must degrade identically, not revert either.
+      const withdrawable = await guard.getWithdrawableBalance(plAddr, ethers.ZeroAddress);
+      expect(withdrawable).to.equal(net);
+    });
+
+    it('debt leg: an unconfigured settlement->debt route no longer reverts — getNetRealizableBalance degrades to 0', async () => {
+      const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      const wethDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dWETH', 'dWETH', 18));
+      await wethDebt.waitForDeployment();
+      const plAddr = await pl.getAddress();
+
+      // Same fixture as the FNA-35 debt-leg test above (USDC settlement, WETH debt forces a
+      // genuine settlement->debt swap via _chooseSettlementToken's preferredSettlementAsset
+      // fallback), EXCEPT setUniV3Fee(usdc, weth, ...) is never called.
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await weth.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+        await wethDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await weth.getAddress(),
+        ethers.ZeroAddress,
+        await wethDebt.getAddress(),
+      );
+
+      await aToken.mint(plAddr, 10_000n * 10n ** 6n);
+      await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
+      await wethDebt.mint(plAddr, ethers.parseEther('1'));
+
+      await guard.setDefaultSlippageBps(50);
+      await guard.setFlashAmountBufferBps(0);
+      await aavePool.setFlashloanPremiumTotal(100);
+
+      // Precondition: the USDC -> WETH route really is unconfigured.
+      expect(await guard.uniV3Fee(await usdc.getAddress(), await weth.getAddress())).to.equal(0n);
+
+      // Without the fix this reverts with "Frgmnt: missing fee" inside
+      // _estimateFlashAmountInSettlement's _routeFeeSettlementToDebt call.
+      expect(await guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress)).to.equal(0n);
+      expect(await guard.getWithdrawableBalance(plAddr, ethers.ZeroAddress)).to.equal(0n);
+
+      // getBalance (the plain, route-independent gross figure) is unaffected.
+      expect(await guard.getBalance(plAddr, ethers.ZeroAddress)).to.equal(
+        ethers.parseUnits('7900', 18),
+      );
+    });
+
+    it('a route that IS configured but malformed (wrong path endpoints) still reverts — this fix only covers "unconfigured", not "broken"', async () => {
+      const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const wethAToken = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('aWETH', 'aWETH', 18));
+      await wethAToken.waitForDeployment();
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      const plAddr = await pl.getAddress();
+
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+      );
+
+      await aToken.mint(plAddr, 10_000n * 10n ** 6n);
+      await wethAToken.mint(plAddr, ethers.parseEther('1'));
+      await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
+
+      // A path IS configured for WETH -> USDC (so the existence pre-check passes), but its
+      // endpoints don't actually match (points at a third, unrelated token) — a real
+      // misconfiguration bug, not a missing route. _routeFeeCollateralToSettlement's own
+      // endpoint check must still catch this and revert, exactly as before this fix.
+      const other = ethers.Wallet.createRandom().address;
+      await guard.setUniV3PathExactIn(
+        await weth.getAddress(),
+        await usdc.getAddress(),
+        uniV3Path(await weth.getAddress(), 3000, other),
+      );
+
+      await expect(guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress)).to.be.revertedWith(
+        'Frgmnt: path endpoints mismatch',
+      );
+    });
+
+    it('withdrawProcessing (the real unwind transaction builder) still reverts on a genuinely missing collateral route — only the NAV read was fixed', async () => {
+      const { guard, dataProvider, aavePool, usdc, weth, aToken } = await deploy();
+      const [signer, , , to] = await ethers.getSigners();
+      const { factory, pm, pl } = await deployPool(signer.address);
+      const wethAToken = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('aWETH', 'aWETH', 18));
+      await wethAToken.waitForDeployment();
+      const usdcDebt = await ethers
+        .getContractFactory('MockERC20Custom')
+        .then((f) => f.deploy('dUSDC', 'dUSDC', 6));
+      await usdcDebt.waitForDeployment();
+      const plAddr = await pl.getAddress();
+
+      await supportAsset(pm, factory, usdc, ethers.parseUnits('1', 18));
+      await supportAsset(pm, factory, weth, ethers.parseUnits('2000', 18));
+
+      await dataProvider.setReserveTokensAddresses(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        ethers.ZeroAddress,
+        await usdcDebt.getAddress(),
+      );
+      await dataProvider.setReserveTokensAddresses(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+        ethers.ZeroAddress,
+      );
+      await aavePool.setReserveTokens(
+        await usdc.getAddress(),
+        await aToken.getAddress(),
+        await usdcDebt.getAddress(),
+      );
+      await aavePool.setReserveTokens(
+        await weth.getAddress(),
+        await wethAToken.getAddress(),
+        ethers.ZeroAddress,
+      );
+
+      await aToken.mint(plAddr, 10_000n * 10n ** 6n);
+      await wethAToken.mint(plAddr, ethers.parseEther('1'));
+      await usdcDebt.mint(plAddr, 100n * 10n ** 6n);
+
+      // Full liquidity behind both reserves so _maxSafePortion is 100% and withdrawProcessing
+      // actually attempts to unwind the full position (a 0% liquidity ceiling would otherwise
+      // size effectivePortion down to 0 and skip collateral-swap building entirely).
+      await usdc.mint(await aToken.getAddress(), 10_000n * 10n ** 6n);
+      await weth.mint(await wethAToken.getAddress(), ethers.parseEther('1'));
+
+      // getNetRealizableBalance (the view/NAV path) no longer reverts...
+      await expect(guard.getNetRealizableBalance(plAddr, ethers.ZeroAddress)).to.not.be.reverted;
+
+      // ...but actually building the unwind transactions still correctly refuses to proceed:
+      // there is no way to bound a WETH -> USDC swap without a configured route.
+      await expect(
+        guard.withdrawProcessing.staticCall(
+          plAddr,
+          ethers.ZeroAddress,
+          ethers.parseUnits('1', 18),
+          to.address,
+        ),
+      ).to.be.revertedWith('Frgmnt: missing fee/path collateral->settle');
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // CertiK FNA-07 follow-up: getWithdrawableBalance (liquidity-capped counterpart to
   // getNetRealizableBalance) and its uniform-ceiling effect on withdrawProcessing.
   // -----------------------------------------------------------------------

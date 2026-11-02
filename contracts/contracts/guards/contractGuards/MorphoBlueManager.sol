@@ -8,6 +8,8 @@ pragma solidity ^0.8.24;
 import { IMorpho, Id, Position } from "@morpho-org/morpho-blue/src/interfaces/IMorpho.sol";
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { IMorphoBlueManager } from "../../interfaces/IMorphoBlueManager.sol";
+import { IPoolLogic } from "../../interfaces/IPoolLogic.sol";
+import { IManaged } from "../../interfaces/IManaged.sol";
 
 /*//////////////////////////////////////////////////////////////
                     MORPHO BLUE MANAGER
@@ -35,6 +37,11 @@ contract MorphoBlueManager is IMorphoBlueManager, Ownable {
     //////////////////////////////////////////////////////////////*/
 
     error MorphoZero();
+
+    /// @notice SoftStack M-11: this contract's owner authorized a pool's manager or trader to
+    ///         list Morpho markets for their own pool, defeating the independent-approval gate
+    ///         the active allowlist exists for — see setPoolMarkets().
+    error OwnerIsPoolManagerOrTrader();
 
     /*//////////////////////////////////////////////////////////////
                               IMMUTABLES
@@ -104,6 +111,25 @@ contract MorphoBlueManager is IMorphoBlueManager, Ownable {
     ///      trackedPoolMarkets below.
     function setPoolMarkets(address pool, Id[] calldata markets) external onlyOwner {
         require(pool != address(0), "Invalid pool address");
+
+        // SoftStack M-11: the active allowlist is documented, and relied upon elsewhere in this
+        // codebase, as a SECOND, INDEPENDENT approval step that stops a pool's manager (or
+        // trader) from registering exposure to a market of their own choosing — nothing on-chain
+        // previously enforced that independence; this contract's owner() and a pool's
+        // manager()/trader() could be (and, on the live deployment, are) the exact same address,
+        // making the "second key" not exist. Reject that directly and unconditionally: this call
+        // can never succeed for a pool whose manager or trader is also this contract's current
+        // owner, regardless of who owns this contract at any given time. This is a structural
+        // check, not a one-time admin action — it keeps holding even after a future
+        // transferOwnership(), and for any future pool, without needing to be re-verified by
+        // hand each time.
+        address poolManagerLogic = IPoolLogic(pool).poolManagerLogic();
+        address poolOwner = owner();
+        if (poolOwner == IManaged(poolManagerLogic).manager()) revert OwnerIsPoolManagerOrTrader();
+        address poolTrader = IManaged(poolManagerLogic).trader();
+        if (poolTrader != address(0) && poolOwner == poolTrader) {
+            revert OwnerIsPoolManagerOrTrader();
+        }
 
         // Read old markets into memory
         Id[] memory oldMarkets = poolMarkets[pool];

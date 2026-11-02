@@ -18,6 +18,10 @@ import { AaveV4SpokeAssetGuard } from "./AaveV4SpokeAssetGuard.sol";
 ///      accounts for selected reserves — an illiquid reserve the plan did not select can no
 ///      longer block a healthy one.
 ///      Position id = the reserveId (uint256 widened to bytes32).
+///      SoftStack M-05 applies identically here, for the same reason: the inherited
+///      HubLiquidityLedger only coordinates within one top-level call, not across separate pools
+///      or separate per-asset call frames — see AaveV4SpokeAssetGuard's own contract-level
+///      documentation for the full reasoning (an accepted, documented residual, not fixed here).
 contract AaveV4SpokeSelectiveAssetGuard is AaveV4SpokeAssetGuard, ISubPositionGuard {
     error InvalidPositionId();
     error PositionsNotAscending();

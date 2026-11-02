@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IAssetGuard } from "../interfaces/guards/IAssetGuard.sol";
-import {
-    IMorphoBlueLendingPoolAssetGuard
-} from "../interfaces/guards/IMorphoBlueLendingPoolAssetGuard.sol";
-import { IPoolManagerLogic } from "../interfaces/IPoolManagerLogic.sol";
-import { CallResultChecker } from "./CallResultChecker.sol";
+import { PoolTxExecutor } from "./PoolTxExecutor.sol";
 
 /// @title PoolLogicFlashloanMorpho
 /// @notice Stateless Morpho Blue flashloan callback logic
+/// @dev The callback body itself lives in PoolTxExecutor.executeMorphoFlashloan() (an
+///      externally-linked library reached via DELEGATECALL, so it still runs in the pool's own
+///      context) — moved there verbatim purely to recover EIP-170 bytecode headroom on PoolLogic.
+///      Its callback-sender check calls IPoolManagerLogic.getAllowedCallbackSenders() directly,
+///      which is exactly what PoolLogic's _isAllowedCallbackSender() override does.
 abstract contract PoolLogicFlashloanMorpho {
     /// @dev MUST be implemented by PoolLogic
     function _isAllowedCallbackSender(address sender) internal view virtual returns (bool);
@@ -19,44 +18,6 @@ abstract contract PoolLogicFlashloanMorpho {
     function _getPoolManagerLogic() internal view virtual returns (address);
 
     function _executeMorphoFlashloan(uint256 repayAmount, bytes calldata data) internal {
-        require(_isAllowedCallbackSender(msg.sender), "callback sender not allowed");
-        require(data.length >= 64, "bad morpho data");
-
-        address pml = _getPoolManagerLogic();
-        address guard = IPoolManagerLogic(pml).getAssetGuard(msg.sender);
-        require(guard != address(0), "invalid morpho guard");
-
-        require(msg.sender == _validateMorphoGuard(guard), "invalid morpho sender");
-
-        (address repayAsset, bytes memory innerParams) = abi.decode(data, (address, bytes));
-        require(repayAsset != address(0), "repayAsset=0");
-
-        uint256 balanceBefore = IERC20(repayAsset).balanceOf(address(this));
-
-        IAssetGuard.MultiTransaction[] memory txs = IMorphoBlueLendingPoolAssetGuard(guard)
-            .flashloanProcessing(address(this), repayAsset, repayAmount, innerParams);
-
-        bool success;
-        bytes memory returndata;
-
-        for (uint256 i = 0; i < txs.length; ++i) {
-            (success, returndata) = txs[i].to.call(txs[i].txData);
-
-            CallResultChecker._checkCallResult(txs[i].txData, success, returndata);
-        }
-
-        require(IERC20(repayAsset).balanceOf(address(this)) >= balanceBefore, "high slippage");
-    }
-
-    // Guard MUST implement IMorphoBlueLendingPoolAssetGuard.
-    // Using staticcall to avoid DoS if the guard is misconfigured.
-
-    function _validateMorphoGuard(address guard) internal view returns (address) {
-        (bool ok, bytes memory data) = guard.staticcall(
-            abi.encodeWithSelector(IMorphoBlueLendingPoolAssetGuard.morpho.selector)
-        );
-
-        require(ok && data.length == 32, "invalid morpho guard");
-        return abi.decode(data, (address));
+        PoolTxExecutor.executeMorphoFlashloan(_getPoolManagerLogic(), repayAmount, data);
     }
 }

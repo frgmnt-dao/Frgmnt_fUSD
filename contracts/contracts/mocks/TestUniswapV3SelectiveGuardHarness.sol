@@ -30,6 +30,16 @@ contract TestUniswapV3SelectiveGuardHarness is UniswapV3SelectiveAssetGuard {
         injectUnexpected = v;
     }
 
+    /// @notice SoftStack M-07 regression proof: exposes the inherited (unmodified) deviation
+    ///         check on the Selective guard type itself, mirroring
+    ///         TestUniswapV3AssetGuardHarness.exposedCheckSpotPriceDeviation exactly.
+    function exposedCheckSpotPriceDeviation(
+        uint160 spotSqrtPriceX96,
+        uint160 twapSqrtPriceX96
+    ) external view returns (bool) {
+        return _checkSpotPriceDeviation(spotSqrtPriceX96, twapSqrtPriceX96);
+    }
+
     function withdrawProcessing(
         address pool,
         address asset,

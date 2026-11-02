@@ -685,6 +685,295 @@ describe('PoolLogic', () => {
     expect(await target.lastValue()).to.equal(7n);
   });
 
+  describe('SoftStack M-01: execTransaction reentrancy', () => {
+    it('a nested execTransaction call triggered from within an outer one reverts', async () => {
+      const { pool, poolManager, txGuard, target, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Sender = await ethers.getContractFactory('ReentrantCallbackSender');
+      const sender = await Sender.deploy();
+      const senderAddr = await sender.getAddress();
+
+      // Both the sender (outer call target) and the inner target need a registered, public
+      // contract guard so execTransaction accepts calling them.
+      await poolManager.setContractGuard(senderAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+      const targetAddr = await target.getAddress();
+      await poolManager.setContractGuard(targetAddr, await txGuard.getAddress());
+
+      const innerData = target.interface.encodeFunctionData('doSomething', [99n]);
+      await sender.configure(poolAddr, targetAddr, innerData);
+
+      const outerData = sender.interface.encodeFunctionData('execute', []);
+      // The outer call itself succeeds (execute() catches the inner revert), but the nested
+      // execTransaction it attempted must have failed.
+      await pool.connect(manager).execTransaction(senderAddr, outerData);
+      expect(await sender.reentryAttempted()).to.equal(true);
+      expect(await sender.reentrySucceeded()).to.equal(false);
+      // The inner target must be untouched — the nested call never actually ran.
+      expect(await target.lastValue()).to.equal(0n);
+    });
+  });
+
+  describe('SoftStack M-12 verification: does M-01 already block the hook-triggered harvest/stake/unstake reentrancy this finding depends on?', () => {
+    it('a hook-token-style callback calling harvest() directly, mid-execTransaction, reverts via the shared ReentrancyGuard mutex', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('ReentrantHarvestCallbackSender');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      const callHarvest = relay.interface.encodeFunctionData('callHarvest', [poolAddr]);
+      await pool.connect(manager).execTransaction(relayAddr, callHarvest);
+
+      expect(await relay.lastHarvestReverted()).to.equal(true);
+      expect(await relay.lastHarvestRevertSelector()).to.equal(
+        pool.interface.getError('ReentrancyGuardReentrantCall')!.selector,
+      );
+    });
+
+    it('a hook-token-style callback calling stake() directly, mid-execTransaction, reverts via the same mutex', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('ReentrantHarvestCallbackSender');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      const callStake = relay.interface.encodeFunctionData('callStake', [poolAddr, 1n]);
+      await pool.connect(manager).execTransaction(relayAddr, callStake);
+
+      expect(await relay.lastStakeReverted()).to.equal(true);
+      expect(await relay.lastStakeRevertSelector()).to.equal(
+        pool.interface.getError('ReentrancyGuardReentrantCall')!.selector,
+      );
+    });
+
+    it('a hook-token-style callback calling unstake() directly, mid-execTransaction, reverts via the same mutex', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('ReentrantHarvestCallbackSender');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      const callUnstake = relay.interface.encodeFunctionData('callUnstake', [poolAddr, 1n]);
+      await pool.connect(manager).execTransaction(relayAddr, callUnstake);
+
+      expect(await relay.lastUnstakeReverted()).to.equal(true);
+      expect(await relay.lastUnstakeRevertSelector()).to.equal(
+        pool.interface.getError('ReentrancyGuardReentrantCall')!.selector,
+      );
+    });
+  });
+
+  describe('SoftStack M-13: allowedCallbackSenders alone no longer grants user-impersonation power', () => {
+    it("a manager-listed callback sender cannot forward a different user's identity via unstake, even though it is allowlisted", async () => {
+      const { pool, fusd, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const amount = ethers.parseUnits('100', 18);
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await pool.connect(user).stake(amount);
+      const userShares = await pool.balanceOf(await user.getAddress());
+      expect(userShares).to.be.gt(0n);
+
+      const Sender = await ethers.getContractFactory('ImpersonatingActionSender');
+      const sender = await Sender.deploy(poolAddr);
+      const senderAddr = await sender.getAddress();
+
+      // The manager lists the malicious contract via the OLD mechanism — still manager-
+      // controlled, still legitimately needed for flashloan protocol callbacks — but never
+      // registers it as userActionsRouter (that would require the factoryOwner).
+      await poolManager.connect(manager).setAllowedCallbackSender(senderAddr, true);
+      expect(await poolManager.getAllowedCallbackSenders(senderAddr)).to.equal(true);
+      await sender.setActionUser(await user.getAddress());
+
+      // Pre-fix, _actionSender() would have resolved this call to the victim (user), letting
+      // the malicious contract unstake the victim's shares on their behalf with no consent.
+      // Post-fix, being merely allowlisted does nothing: _actionSender() still resolves to the
+      // sender contract's own address, which holds no shares of its own, so the forwarded call
+      // simply fails on insufficient balance — the victim's position is untouched.
+      await expect(sender.forwardUnstake(userShares)).to.be.reverted;
+      expect(await pool.balanceOf(await user.getAddress())).to.equal(userShares);
+    });
+
+    it('the same sender succeeds once it is registered as userActionsRouter (the only legitimate path)', async () => {
+      const { pool, fusd, poolManager, user } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const amount = ethers.parseUnits('100', 18);
+      await mintAndApproveFUSD(fusd, pool, user, amount);
+      await pool.connect(user).stake(amount);
+      const userShares = await pool.balanceOf(await user.getAddress());
+
+      const Sender = await ethers.getContractFactory('ImpersonatingActionSender');
+      const sender = await Sender.deploy(poolAddr);
+      const senderAddr = await sender.getAddress();
+      await sender.setActionUser(await user.getAddress());
+
+      // This is the only address that should ever be able to grant this — exercised directly
+      // here (bypassing manager/factoryOwner distinctions, which the mock does not enforce) to
+      // isolate the userActionsRouter check itself from PoolManagerLogic's own access control
+      // (covered separately in PoolManagerLogic.test.ts).
+      await poolManager.setUserActionsRouter(senderAddr);
+
+      await sender.forwardUnstake(userShares);
+      expect(await pool.balanceOf(await user.getAddress())).to.equal(0n);
+      expect(await fusd.balanceOf(await user.getAddress())).to.equal(userShares);
+    });
+  });
+
+  describe('SoftStack M-10 verification: does mintFromPool(mgr, _fee) actually mint sfUSD pool shares to the manager?', () => {
+    // The finding's claim is that _accrueYield()'s fee mint inflates the manager's POOL
+    // balanceOf() (the sfUSD staked-share balance tracked by rewardDebt/compoundedRewardIndex),
+    // so the newly "minted shares" retroactively earn the reward growth for an interval before
+    // they existed. mintFromPool(mgr, _fee) mints plain FUSD via ITokenLogic (a completely
+    // separate ERC20 contract, `fusd`) — PoolLogic's own balanceOf() (inherited, unmodified,
+    // from ERC20Upgradeable) tracks ONLY PoolLogic's own token supply (staked sfUSD shares) and
+    // is never touched by a mint on the `fusd` contract. This test proves that directly: a
+    // manager's pool share balance and pending reward are both completely unaffected by the fee
+    // mint — only their FUSD balance (an unstaked, un-reward-earning token) changes.
+    it("the fee mint changes the manager's FUSD balance, never their pool share balance or pending reward", async () => {
+      const { pool, fusd, poolManager, manager, user } = await loadFixture(deployPoolFixture);
+      await poolManager.setFees(1000n, 0n, 0n, 0n, 10_000n); // 10% perf fee
+
+      // Manager stakes a pre-existing sfUSD position BEFORE any yield cycle, so there is a
+      // concrete balance to prove is untouched by the fee mint that follows.
+      const managerStake = ethers.parseUnits('200', 18);
+      await mintAndApproveFUSD(fusd, pool, manager, managerStake);
+      await pool.connect(manager).stake(managerStake);
+      const managerSharesBefore = await pool.balanceOf(await manager.getAddress());
+      expect(managerSharesBefore).to.equal(managerStake);
+
+      const managerFusdBefore = await fusd.balanceOf(await manager.getAddress());
+      expect(managerFusdBefore).to.equal(0n);
+
+      // A real staker also stakes, so there is a NAV to grow and a netYield to split.
+      const stakeAmount = ethers.parseUnits('1000', 18);
+      await mintAndApproveFUSD(fusd, pool, user, stakeAmount);
+      await pool.connect(user).stake(stakeAmount);
+
+      // Simulate 500 FUSD of yield: 10% perf fee -> perfFee = 50 FUSD minted to the manager.
+      const reward = ethers.parseUnits('500', 18);
+      await fusd.mint(await pool.getAddress(), reward);
+      await poolManager.setTotalFundValue(reward);
+
+      // Trigger accrual (a tiny stake by the user, matching the existing FNA tests' own pattern).
+      const tiny = ethers.parseUnits('1', 18);
+      await mintAndApproveFUSD(fusd, pool, user, tiny);
+      await pool.connect(user).stake(tiny);
+
+      const expectedFee = (reward * 1000n) / 10_000n; // 50 FUSD
+      const managerFusdAfter = await fusd.balanceOf(await manager.getAddress());
+      expect(managerFusdAfter).to.equal(managerFusdBefore + expectedFee);
+
+      // The claim under test: the manager's POOL share balance must be completely unaffected by
+      // that fee mint — it is a different ERC20 contract.
+      const managerSharesAfter = await pool.balanceOf(await manager.getAddress());
+      expect(managerSharesAfter).to.equal(managerSharesBefore);
+
+      // A manager who staked NOTHING before this cycle must show exactly zero pending reward —
+      // the decisive check that the fee mint grants no reward entitlement on its own, since a
+      // phantom "fee_shares" credit (the finding's claimed mechanism) would show up here with
+      // no staked balance to otherwise explain it.
+      const {
+        pool: pool2,
+        fusd: fusd2,
+        poolManager: poolManager2,
+        manager: manager2,
+        user: user2,
+      } = await loadFixture(deployPoolFixture);
+      await poolManager2.setFees(1000n, 0n, 0n, 0n, 10_000n);
+      await mintAndApproveFUSD(fusd2, pool2, user2, stakeAmount);
+      await pool2.connect(user2).stake(stakeAmount);
+      await fusd2.mint(await pool2.getAddress(), reward);
+      await poolManager2.setTotalFundValue(reward);
+      await mintAndApproveFUSD(fusd2, pool2, user2, tiny);
+      await pool2.connect(user2).stake(tiny); // triggers _accrueYield(), mints the fee to manager2
+
+      expect(await fusd2.balanceOf(await manager2.getAddress())).to.equal(expectedFee);
+      expect(await pool2.balanceOf(await manager2.getAddress())).to.equal(0n);
+      expect(await pool2.pendingReward(await manager2.getAddress())).to.equal(0n);
+    });
+  });
+
+  describe('SoftStack M-02: executeOperation (Aave flashloan callback) guarded-call invariant', () => {
+    it('reverts when called with no PoolLogic call already in progress', async () => {
+      const { pool } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('FlashloanCallbackRelay');
+      const relay = await Relay.deploy();
+
+      await relay.callExecuteOperation(poolAddr);
+      expect(await relay.lastAaveReverted()).to.equal(true);
+      expect(await relay.lastAaveRevertSelector()).to.equal(
+        pool.interface.getError('FlashloanCallbackOutsideGuardedCall')!.selector,
+      );
+    });
+
+    it('does NOT hit that guard when called nested inside an already-guarded execTransaction call (the legitimate Aave pattern)', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('FlashloanCallbackRelay');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      // Nested via execTransaction, exactly like Aave calling back mid-flashloan.
+      const callAave = relay.interface.encodeFunctionData('callExecuteOperation', [poolAddr]);
+      await pool.connect(manager).execTransaction(relayAddr, callAave);
+      // Whatever happens past the reentrancy gate (empty asset arrays give it nothing real to
+      // do) is irrelevant here — the only thing under test is that the gate itself did not fire.
+      expect(await relay.lastAaveRevertSelector()).to.not.equal(
+        pool.interface.getError('FlashloanCallbackOutsideGuardedCall')!.selector,
+      );
+    });
+  });
+
+  describe('SoftStack M-03: onMorphoFlashLoan (Morpho flashloan callback) guarded-call invariant', () => {
+    it('reverts when called with no PoolLogic call already in progress', async () => {
+      const { pool } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('FlashloanCallbackRelay');
+      const relay = await Relay.deploy();
+
+      await relay.callOnMorphoFlashLoan(poolAddr);
+      expect(await relay.lastMorphoReverted()).to.equal(true);
+      expect(await relay.lastMorphoRevertSelector()).to.equal(
+        pool.interface.getError('FlashloanCallbackOutsideGuardedCall')!.selector,
+      );
+    });
+
+    it('does NOT hit that guard when called nested inside an already-guarded execTransaction call (the legitimate Morpho pattern)', async () => {
+      const { pool, poolManager, txGuard, manager } = await loadFixture(deployPoolFixture);
+      const poolAddr = await pool.getAddress();
+
+      const Relay = await ethers.getContractFactory('FlashloanCallbackRelay');
+      const relay = await Relay.deploy();
+      const relayAddr = await relay.getAddress();
+      await poolManager.setContractGuard(relayAddr, await txGuard.getAddress());
+      await txGuard.setTxType(1, true);
+
+      const callMorpho = relay.interface.encodeFunctionData('callOnMorphoFlashLoan', [poolAddr]);
+      await pool.connect(manager).execTransaction(relayAddr, callMorpho);
+      expect(await relay.lastMorphoRevertSelector()).to.not.equal(
+        pool.interface.getError('FlashloanCallbackOutsideGuardedCall')!.selector,
+      );
+    });
+  });
+
   // 28) only manager can toggle immediate withdraw mode
   it('only manager can setImmediateWithdrawEnabled', async () => {
     const { pool, manager, user } = await loadFixture(deployPoolFixture);
@@ -2689,6 +2978,14 @@ describe('PoolLogic', () => {
       // management-fee component exactly.
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n);
 
+      // SoftStack M-04: the management fee is now sized against totalFundValue() (real NAV),
+      // not just fusd.totalSupply() — so this test needs the mock to actually report NAV from
+      // the pool's real asset balance (the default flat _totalFundValue mock defaults to 0,
+      // which was fine before this fix since management fee never read it). Same opt-in
+      // dynamicTotalFundValue mode used by the SoftStack L-02 fixes in this same file.
+      await poolManager.setPool(poolAddr);
+      await poolManager.setDynamicTotalFundValue(true);
+
       // Pool: 100 value backing Alice's 100 FUSD (fully collateralized, so accountedAssets ==
       // totalValue and netYield stays 0 regardless of the finalize below).
       await fusd.triggerIncrementAccountedAssets(poolAddr, ethers.parseUnits('100', 18));
@@ -3372,12 +3669,16 @@ describe('PoolLogic', () => {
   });
 
   describe('FNA-22: pre-deposit fee checkpoint', () => {
-    // _accrueYield() clamps managementFee to netYield (totalValue - accountedAssets), so every
-    // test below sets totalFundValue far ahead of any accountedAssets ratcheting these small
-    // management-fee numbers could cause, keeping netYield comfortably non-binding throughout.
-    // See UtilityLibraries.test.ts's FNA-22 coverage for a clamp-independent, exact-arithmetic
-    // proof of the underlying retroactive-taxation fix via computeYieldAccrual directly.
-    const ampleFundValue = ethers.parseUnits('10000000', 18);
+    // _accrueYield() clamps managementFee to netYield (totalValue - accountedAssets). These
+    // tests never touch accountedAssets (stays at its 0 default), so netYield == totalValue —
+    // the clamp cannot bind as long as totalFundValue is set to any realistic pool size, since
+    // a 10%/year fee over weeks is always a small fraction of totalValue itself.
+    // SoftStack M-04: totalFundValue now also IS the management-fee base directly (previously
+    // only fusd.totalSupply() was), so each test below sets it to the pool's actual fUSD supply
+    // at peg (not an arbitrarily inflated figure — the old ampleFundValue no longer makes sense
+    // once totalValue feeds the fee calculation itself) — see UtilityLibraries.test.ts's FNA-22
+    // coverage for a clamp-independent, exact-arithmetic proof of the underlying
+    // retroactive-taxation fix via computeYieldAccrual directly.
 
     it('checkpointFeesForDeposit reverts unless called by TokenLogic (fusd)', async () => {
       const { pool, user } = await loadFixture(deployPoolFixture);
@@ -3391,7 +3692,8 @@ describe('PoolLogic', () => {
     it('checkpointFeesForDeposit settles the management fee against the pre-call fUSD supply and resets the accrual clock', async () => {
       const { pool, fusd, poolManager, manager, user } = await loadFixture(deployPoolFixture);
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n); // 10%/year mgmt, 0% perf
-      await poolManager.setTotalFundValue(ampleFundValue);
+      // At peg with the 1000 fUSD minted below, matching the already-written expected-fee math.
+      await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
 
       const managerAddr = await manager.getAddress();
       const poolAddr = await pool.getAddress();
@@ -3438,7 +3740,8 @@ describe('PoolLogic', () => {
       const { pool, fusd, poolManager, manager, user, user2 } =
         await loadFixture(deployPoolFixture);
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n); // 10%/year mgmt, 0% perf
-      await poolManager.setTotalFundValue(ampleFundValue);
+      // At peg with the 1000 fUSD minted below.
+      await poolManager.setTotalFundValue(ethers.parseUnits('1000', 18));
 
       const managerAddr = await manager.getAddress();
       const poolAddr = await pool.getAddress();
@@ -3450,11 +3753,11 @@ describe('PoolLogic', () => {
       await fusd.triggerCheckpointFeesForDeposit(poolAddr);
       const mgrBalAfterCheckpoint = await fusd.balanceOf(managerAddr);
 
-      // Simulate a large deposit arriving right after the checkpoint. Fund value is bumped
-      // further ahead of the just-ratcheted accountedAssets so netYield stays ample for the
-      // next accrual too.
+      // Simulate a large deposit arriving right after the checkpoint. Fund value tracks the new,
+      // larger fUSD supply at peg (SoftStack M-04: totalFundValue is the fee base itself now, so
+      // an arbitrarily inflated figure here would no longer give a representative fee).
       await fusd.mint(await user2.getAddress(), ethers.parseUnits('100000', 18));
-      await poolManager.setTotalFundValue(ampleFundValue * 2n);
+      await poolManager.setTotalFundValue(ethers.parseUnits('101000', 18));
       await increaseTime(1 * 24 * 60 * 60); // dt2 = 1 day
 
       // Trigger the next accrual via a dust stake (transfers, doesn't mint/burn fUSD, so it
@@ -3479,7 +3782,10 @@ describe('PoolLogic', () => {
       const { pool, fusd, poolManager, manager, user, user2 } =
         await loadFixture(deployPoolFixture);
       await poolManager.setFees(0n, 1000n, 0n, 0n, 10_000n);
-      await poolManager.setTotalFundValue(ampleFundValue);
+      // At peg with the post-deposit (final) fUSD supply — this flat mock is set once, and the
+      // single accrual below only happens after both mints, matching the comment's own ~101000
+      // fUSD expectation (SoftStack M-04: totalFundValue is the fee base itself now).
+      await poolManager.setTotalFundValue(ethers.parseUnits('101000', 18));
 
       const managerAddr = await manager.getAddress();
 

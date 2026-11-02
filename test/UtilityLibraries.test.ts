@@ -160,7 +160,10 @@ describe('Utility libraries', () => {
       const { fund } = await loadFixture(deployLibrariesFixture);
       const now = await time.latest();
 
+      // At peg (totalValue == totalFusd), SoftStack M-04's fix is a no-op vs. the pre-fix
+      // formula, so these keep their pre-fix expected values exactly.
       const [, sameTimestamp] = await fund.calculateManagementFee(
+        1_000n,
         1_000n,
         BigInt(now),
         1_000n,
@@ -169,11 +172,29 @@ describe('Utility libraries', () => {
       expect(sameTimestamp).to.equal(BigInt(now));
 
       const oneDayAgo = BigInt(now - 24 * 60 * 60);
-      expect((await fund.calculateManagementFee(0n, oneDayAgo, 1_000n, 10_000n))[0]).to.equal(0n);
-      expect((await fund.calculateManagementFee(1_000n, oneDayAgo, 0n, 10_000n))[0]).to.equal(0n);
+      expect((await fund.calculateManagementFee(0n, 0n, oneDayAgo, 1_000n, 10_000n))[0]).to.equal(
+        0n,
+      );
+      expect(
+        (await fund.calculateManagementFee(1_000n, 1_000n, oneDayAgo, 0n, 10_000n))[0],
+      ).to.equal(0n);
+      // totalFusd == 0 (no outstanding claims at all) must zero out the fee even if totalValue
+      // somehow isn't zero (e.g. dust sitting in the pool before any deposit).
       expect(
         (
           await fund.calculateManagementFee(
+            ethers.parseUnits('1', 18),
+            0n,
+            oneDayAgo,
+            1_000n,
+            10_000n,
+          )
+        )[0],
+      ).to.equal(0n);
+      expect(
+        (
+          await fund.calculateManagementFee(
+            ethers.parseUnits('365', 18),
             ethers.parseUnits('365', 18),
             oneDayAgo,
             1_000n,
@@ -181,6 +202,40 @@ describe('Utility libraries', () => {
           )
         )[0],
       ).to.equal(ethers.parseUnits('0.1', 18));
+    });
+
+    it('SoftStack M-04: sizes the management fee against USD NAV, not the raw fUSD token count', async () => {
+      const { fund } = await loadFixture(deployLibrariesFixture);
+      const now = await time.latest();
+      const oneDayAgo = BigInt(now - 365 * 24 * 60 * 60);
+
+      // 1000 fUSD outstanding, but the pool's NAV is $1050 (5% yield not yet reflected in
+      // supply) — exactly finding M-04's scenario. 0.3% annual management fee.
+      const totalFusd = ethers.parseUnits('1000', 18);
+      const totalValue = ethers.parseUnits('1050', 18);
+      const managementFeeNumerator = 30n; // 0.3%
+      const feeDenominator = 10_000n;
+
+      const [tokenCountBasisFee] = await fund.calculateManagementFee(
+        totalFusd, // totalValue == totalFusd: reproduces the OLD (buggy, peg-assuming) result
+        totalFusd,
+        oneDayAgo,
+        managementFeeNumerator,
+        feeDenominator,
+      );
+      // Old formula: 0.3% of 1000 fUSD tokens = 3 fUSD, regardless of real NAV.
+      expect(tokenCountBasisFee).to.equal(ethers.parseUnits('3', 18));
+
+      const [usdBasisFee] = await fund.calculateManagementFee(
+        totalValue, // the real NAV this fix sizes the fee against
+        totalFusd, // only gates the "no outstanding claims" zero case now
+        oneDayAgo,
+        managementFeeNumerator,
+        feeDenominator,
+      );
+      // Fixed: 0.3% of the real $1050 AUM = 3.15 fUSD, not 3.
+      expect(usdBasisFee).to.equal(ethers.parseUnits('3.15', 18));
+      expect(usdBasisFee).to.be.greaterThan(tokenCountBasisFee);
     });
 
     it('converts FUSD to asset amounts across support, price, and decimal branches', async () => {
@@ -369,6 +424,12 @@ describe('Utility libraries', () => {
       });
     });
 
+    // SoftStack M-04: computeYieldAccrual's management fee is now sized against totalValue
+    // directly (see calculateManagementFee's own doc). Every test below keeps using
+    // totalFusd == totalValue (at peg), under which this fix is a no-op vs. the pre-fix
+    // behavior, so their pre-fix expected values are unchanged — they were never about the fee's
+    // unit-of-account. The dedicated M-04 test above (calculateManagementFee) is the one that
+    // varies totalValue away from totalFusd.
     describe('computeYieldAccrual', () => {
       it('is a no-op when navComplete is false, leaving accountedAssets and lastFeeMintTime unchanged', async () => {
         const { fund } = await loadFixture(deployLibrariesFixture);
@@ -408,7 +469,7 @@ describe('Utility libraries', () => {
           ethers.parseUnits('1000', 18), // totalFusd
           oneYearAgo,
           1_000n, // 10% performance fee
-          10_000n, // 100% management fee rate over the elapsed year -> forces the clamp
+          10_000n, // 100% management fee rate over the elapsed year -> forces the clamp either way
           10_000n,
           true,
         );
@@ -432,7 +493,7 @@ describe('Utility libraries', () => {
           totalValue,
           true,
           accountedAssets,
-          ethers.parseUnits('1000', 18),
+          ethers.parseUnits('1000', 18), // totalFusd
           oneYearAgo,
           1_000n,
           10_000n,
@@ -441,8 +502,9 @@ describe('Utility libraries', () => {
         );
 
         expect(result.performanceFee).to.equal(ethers.parseUnits('10', 18));
-        // Uncapped: 100% of totalFusd over ~1 year, not clamped to netYield.
-        expect(result.managementFee).to.equal(ethers.parseUnits('1000', 18));
+        // Uncapped: 100% of totalValue (1100, SoftStack M-04 — was totalFusd=1000 pre-fix) over
+        // ~1 year, not clamped to netYield.
+        expect(result.managementFee).to.equal(ethers.parseUnits('1100', 18));
         // netYield left at its pre-clamp value since applyClamp is false.
         expect(result.netYield).to.equal(ethers.parseUnits('90', 18));
       });
@@ -465,6 +527,33 @@ describe('Utility libraries', () => {
         );
 
         expect(result.newAccountedAssets).to.equal(accountedAssets);
+      });
+
+      it('SoftStack M-04: the management fee uses the real NAV even when the performance fee also fires in the same checkpoint', async () => {
+        const { fund } = await loadFixture(deployLibrariesFixture);
+        const now = BigInt(await time.latest());
+        const oneYearAgo = now - 365n * 24n * 60n * 60n;
+        const accountedAssets = ethers.parseUnits('1000', 18);
+        const totalFusd = ethers.parseUnits('1000', 18); // 1000 fUSD outstanding
+        const totalValue = ethers.parseUnits('1050', 18); // real NAV: $1050 (5% yield, not yet reflected in supply)
+
+        const result = await fund.computeYieldAccrual(
+          totalValue,
+          true,
+          accountedAssets,
+          totalFusd,
+          oneYearAgo,
+          1_000n, // 10% performance fee
+          30n, // 0.3%/yr management fee
+          10_000n,
+          false, // uncapped, so the management fee is visible on its own (not clamped into netYield)
+        );
+
+        // Performance fee: 10% of the $50 incremental yield = $5, unaffected by this fix.
+        expect(result.performanceFee).to.equal(ethers.parseUnits('5', 18));
+        // Management fee: 0.3% of the real $1050 NAV = $3.15 — NOT 0.3% of the 1000 fUSD token
+        // count ($3, what PoolLogic minted before this fix for every cycle NAV/fUSD != $1).
+        expect(result.managementFee).to.equal(ethers.parseUnits('3.15', 18));
       });
 
       // FNA-22: TokenLogic._deposit() previously minted new fUSD without first checkpointing

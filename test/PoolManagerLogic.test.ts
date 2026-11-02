@@ -867,6 +867,30 @@ describe('PoolManagerLogic', () => {
       expect(await contract.getAllowedCallbackSenders(await other.getAddress())).to.equal(true);
     });
 
+    // SoftStack M-13: setUserActionsRouter deliberately uses a DIFFERENT gate than
+    // setAllowedCallbackSender above (factoryOwner, not manager) — the whole point of the fix
+    // is that the manager alone can no longer grant user-impersonation power.
+    it('setUserActionsRouter is factoryOwner-gated, not manager-gated, and defaults to unset', async () => {
+      const { contract, manager, owner, other } = await loadFixture(setupFixture);
+
+      expect(await contract.userActionsRouter()).to.equal(ethers.ZeroAddress);
+
+      await expect(
+        contract.connect(manager).setUserActionsRouter(await other.getAddress()),
+      ).to.be.revertedWith('only factoryOwner allowed');
+
+      await expect(contract.connect(owner).setUserActionsRouter(await other.getAddress()))
+        .to.emit(contract, 'UserActionsRouterSet')
+        .withArgs(ethers.ZeroAddress, await other.getAddress());
+      expect(await contract.userActionsRouter()).to.equal(await other.getAddress());
+
+      // address(0) is a deliberate, valid input — it disables impersonation entirely.
+      await expect(contract.connect(owner).setUserActionsRouter(ethers.ZeroAddress))
+        .to.emit(contract, 'UserActionsRouterSet')
+        .withArgs(await other.getAddress(), ethers.ZeroAddress);
+      expect(await contract.userActionsRouter()).to.equal(ethers.ZeroAddress);
+    });
+
     it('mints manager fee before changing manager and rejects zero manager', async () => {
       const { contract, manager, other, poolLogic } = await loadFixture(setupFixture);
 

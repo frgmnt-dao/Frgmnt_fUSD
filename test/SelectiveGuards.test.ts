@@ -1188,4 +1188,69 @@ describe('UniswapV3SelectiveAssetGuard: harness checks and the REAL validated gu
     );
     expect(sub.length).to.equal(0);
   });
+
+  // -----------------------------------------------------------------------
+  // SoftStack M-07: UniswapV3SelectiveAssetGuard inherits the M-06 deviation-
+  // gate split unchanged (no override, no code change in this contract).
+  // -----------------------------------------------------------------------
+  describe('SoftStack M-07: the M-06 oracle-deviation split is inherited unchanged', () => {
+    function sqrtX96(price: bigint, scale: bigint): bigint {
+      const target = (price * (1n << 192n)) / scale;
+      let lo = 0n;
+      let hi = target + 1n;
+      while (lo < hi) {
+        const mid = (lo + hi) / 2n;
+        if (mid * mid <= target) lo = mid + 1n;
+        else hi = mid;
+      }
+      return lo - 1n;
+    }
+
+    it('REAL Selective guard: withdrawalSlippageBps and withdrawalTwapDeviationBps both default to 100 bps', async () => {
+      const guard: any = await (
+        await ethers.getContractFactory('UniswapV3SelectiveAssetGuard')
+      ).deploy();
+      expect(await guard.withdrawalSlippageBps()).to.equal(100n);
+      expect(await guard.withdrawalTwapDeviationBps()).to.equal(100n);
+    });
+
+    it('REAL Selective guard: the inherited setters are independently settable and admin-gated, exactly as on the base guard', async () => {
+      const [admin, other] = await ethers.getSigners();
+      const guard: any = await (
+        await ethers.getContractFactory('UniswapV3SelectiveAssetGuard')
+      ).deploy();
+
+      await guard.connect(admin).setWithdrawalTwapDeviationBps(200);
+      expect(await guard.withdrawalTwapDeviationBps()).to.equal(200n);
+      expect(await guard.withdrawalSlippageBps()).to.equal(100n);
+
+      await guard.connect(admin).setWithdrawalSlippageBps(2000);
+      expect(await guard.withdrawalSlippageBps()).to.equal(2000n);
+      expect(await guard.withdrawalTwapDeviationBps()).to.equal(200n);
+
+      await expect(guard.connect(other).setWithdrawalTwapDeviationBps(100)).to.be.revertedWith(
+        'UniswapV3AssetGuard: not admin',
+      );
+    });
+
+    it('harness: the decoupled oracle gate behaves identically on the Selective guard type as it does on the base guard (SoftStack M-06 parity)', async () => {
+      const [admin] = await ethers.getSigners();
+      const guard: any = await (
+        await ethers.getContractFactory('TestUniswapV3SelectiveGuardHarness')
+      ).deploy();
+
+      const twap = sqrtX96(1n, 1n);
+      const spot = sqrtX96(1015n, 1000n); // 1.5% above TWAP
+
+      // At the shared 100 bps default, the move still reverts the oracle gate.
+      await expect(guard.exposedCheckSpotPriceDeviation(spot, twap)).to.be.revertedWith(
+        'UniswapV3AssetGuard: Spot deviation too high',
+      );
+
+      // Raising withdrawalTwapDeviationBps alone opens the gate without touching the LP floor.
+      await guard.connect(admin).setWithdrawalTwapDeviationBps(200);
+      expect(await guard.withdrawalSlippageBps()).to.equal(100n);
+      expect(await guard.exposedCheckSpotPriceDeviation(spot, twap)).to.equal(true);
+    });
+  });
 });

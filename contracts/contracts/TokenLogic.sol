@@ -588,9 +588,13 @@ contract TokenLogic is
         emit Deposited(to, asset, received, fusdAmount);
     }
 
+    /// @dev SoftStack M-13: see PoolLogic._actionSender()'s own documentation — impersonation
+    ///      power now comes from a single, factoryOwner-set userActionsRouter, not the
+    ///      manager-controlled allowedCallbackSenders list.
     function _actionSender() internal view returns (address sender) {
         sender = msg.sender;
-        if (poolManagerLogic.getAllowedCallbackSenders(sender)) {
+        address router = poolManagerLogic.userActionsRouter();
+        if (router != address(0) && sender == router) {
             sender = IUserActionSender(sender).actionUser();
         }
     }

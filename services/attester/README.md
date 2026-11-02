@@ -85,6 +85,20 @@ missing fUSD allowance), `NOT_SOLVENT_FOR_PLAN`, `CHAIN_STATE_UNAVAILABLE`.
   `AttestedWithdrawPlanExecuted` events.
 - `minValueOutBps` (1 to 100) is the band signed into every plan. A wider band survives more
   drift; the contract caps it at 1%.
+- **`liquidityBufferBps` exists for a specific, real risk: shared-liquidity drift between signing
+  and execution.** Some guards (e.g. an Aave V4 Spoke) report `withdrawableValue` against a pot of
+  liquidity shared with _other, unrelated pools_ — a Hub, not something exclusive to this one.
+  `composePlan` reads that figure live, at request time, but a plan can sit unexecuted for up to
+  `planTtlSeconds`; if another pool drains the same shared Hub in that window, the amount this
+  pool could actually deliver by execution time is lower than what was quoted at signing time. The
+  contract's own `minValueOutBps` tolerance (see above) is the final backstop and will revert
+  cleanly (no partial loss to the user) if the drift exceeds it — but refusing up front, via
+  `liquidityBufferBps`, is cheaper for the user than a signed plan expiring unused or reverting on
+  submission. Keep this buffer meaningfully above zero on any pool using a shared-liquidity guard;
+  the example config's 500 (5%) is a starting point, not a universal correct value — size it against
+  how fast the specific Hub(s) you depend on actually move in practice. (SoftStack Stage 2 M-05 —
+  see `AaveV4SpokeAssetGuard.sol`'s own contract-level docs for the full reasoning on why this is
+  an off-chain, operational mitigation rather than something the guard contract can close itself.)
 
 ## Tests
 

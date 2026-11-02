@@ -248,6 +248,14 @@ contract TestPoolManagerLogic {
         return allowedCallbackSenders[caller];
     }
 
+    // SoftStack M-13: separate from allowedCallbackSenders above — see the real
+    // PoolManagerLogic.setUserActionsRouter()'s own documentation.
+    address public userActionsRouter;
+
+    function setUserActionsRouter(address router) external {
+        userActionsRouter = router;
+    }
+
     // ---- Optional pool backref ----
 
     function setPool(address _pool) external {
