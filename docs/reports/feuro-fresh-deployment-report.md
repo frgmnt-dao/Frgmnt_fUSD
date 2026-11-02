@@ -1,4 +1,4 @@
-*Internal Report*
+_Internal Report_
 
 # fEURO: Fresh Deployment Rehearsal & Verification
 
@@ -10,15 +10,15 @@ A brand-new, EUR-pegged Frgmnt deployment — not an upgrade of anything live �
 
 ## Contents
 
-01. Executive summary
-02. Scope & objective
-03. The central finding: no genuine EUR/USD feed exists on Base
-04. Deployment methodology
-05. Deployed contracts
-06. Core user flows & the EUR conversion proof
-07. The permanent EUR/USD mode lock (FNA-40)
-08. Lending guards vs. real external protocols (Morpho Blue, Aave V3)
-09. Uniswap V3 guards vs. a real external pool (swap + full LP lifecycle)
+1.  Executive summary
+2.  Scope & objective
+3.  The central finding: no genuine EUR/USD feed exists on Base
+4.  Deployment methodology
+5.  Deployed contracts
+6.  Core user flows & the EUR conversion proof
+7.  The permanent EUR/USD mode lock (FNA-40)
+8.  Lending guards vs. real external protocols (Morpho Blue, Aave V3)
+9.  Uniswap V3 guards vs. a real external pool (swap + full LP lifecycle)
 10. Three dormant guard families, proven against real infrastructure
 11. Guard validation (negative tests: M-09, M-12)
 12. ERC20Guard validation
@@ -87,12 +87,12 @@ Checking Chainlink's own published feed directory for Base turned up only **`EUR
 
 For _this rehearsal only_, with that constraint made explicit, the real EURC/USD feed was used and the strict validator was bypassed directly at the call site (never edited in the shared validator file itself) — logged clearly in the deploy script's own output and in the saved deployment JSON as a rehearsal-only relaxation, never to be reused for a real deployment.
 
-| Property | Value |
-| --- | --- |
-| Feed address | `0x9867186e52d2F1C2c565CDA6E747101Fa56501e0` |
-| `description()` | `"EURC / USD"` |
-| Decimals | 8 |
-| Observed price | ~1.1155–1.1195 USD per EURC, at different points in this rehearsal |
+| Property          | Value                                                                                                                                                   |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Feed address      | `0x9867186e52d2F1C2c565CDA6E747101Fa56501e0`                                                                                                            |
+| `description()`   | `"EURC / USD"`                                                                                                                                          |
+| Decimals          | 8                                                                                                                                                       |
+| Observed price    | ~1.1155–1.1195 USD per EURC, at different points in this rehearsal                                                                                      |
 | Validator outcome | Would be correctly **rejected** by the real, unmodified `validateEurUsdFeed.ts` — bypassed only in this rehearsal's own deploy script, at the call site |
 
 ## 04. Deployment methodology
@@ -103,14 +103,14 @@ Run with `SEND=1` against the local Anvil fork only (`baseFork` network, pointed
 
 ## 05. Deployed contracts
 
-| Contract | Address (this rehearsal's fork only) |
-| --- | --- |
-| Governance | `0x9Ba9F602B84D46f9c511518520aFb773162A0df3` |
-| AssetHandler (proxy) | `0xf1485e28070983B2145D262F110Ae1b62f9FBC6b` |
-| PoolManagerLogic (proxy) | `0x28f693F3AdE67Cab21123D42e6FF39889588Dc3D` |
-| TokenLogic / fEURO (proxy) | `0x1aC0bB86f0139B05e2Fc7B7fe8f9cAD87Df4A791` |
-| PoolLogic / sfEURO (proxy) | `0xc396EF69582127D55E974C59CFf2d0fa364494ce` |
-| MorphoBlueManager | `0xf86c451fdACe00179451Eb2E524ADBCC99AffaC9` |
+| Contract                               | Address (this rehearsal's fork only)             |
+| -------------------------------------- | ------------------------------------------------ |
+| Governance                             | `0x9Ba9F602B84D46f9c511518520aFb773162A0df3`     |
+| AssetHandler (proxy)                   | `0xf1485e28070983B2145D262F110Ae1b62f9FBC6b`     |
+| PoolManagerLogic (proxy)               | `0x28f693F3AdE67Cab21123D42e6FF39889588Dc3D`     |
+| TokenLogic / fEURO (proxy)             | `0x1aC0bB86f0139B05e2Fc7B7fe8f9cAD87Df4A791`     |
+| PoolLogic / sfEURO (proxy)             | `0xc396EF69582127D55E974C59CFf2d0fa364494ce`     |
+| MorphoBlueManager                      | `0xf86c451fdACe00179451Eb2E524ADBCC99AffaC9`     |
 | ERC20Guard, UniswapV3*, AaveV3* guards | see `deployments/deploy-eur-fork-rehearsal.json` |
 
 `contracts/contracts/` is byte-identical between the EUR and USD products (enforced by `scripts/check-branch-parity.sh`) — every address above is a fresh instance of the exact same audited bytecode the live fUSD deployment runs, parameterized only by deploy-time arguments (name, symbol, the EUR/USD feed).
@@ -119,13 +119,13 @@ Run with `SEND=1` against the local Anvil fork only (`baseFork` network, pointed
 
 The single most important property to prove for this product is that EUR pricing is genuinely applied end to end — not just at the token-metadata level (a contract called "fEURO" that quietly mints and redeems at a 1:1 USD rate would be the one mistake that matters most here). Verified with a real deposit, stake, unstake and withdrawal, each checked against the actual EUR/USDC conversion rate read live from `AssetHandler.getUSDPrice(USDC)` (which, with the EUR aggregator set, genuinely returns the EUR-denominated price — the function name is kept for ABI compatibility, confirmed directly in `AssetHandler.sol`, not assumed).
 
-| Step | Result |
-| --- | --- |
-| Deposit 1,000.0 USDC | Mints 896.207… fEURO — the genuine EUR-converted amount at the live ~0.8962 EUR/USDC rate, not ~1,000.0 (1:1 USD, wrong) and not ~1,120 (inverted direction, wrong) |
-| Stake | 896.207… fEURO → 896.207… sfEURO, 1:1 share mint on a fresh pool |
+| Step                        | Result                                                                                                                                                                                         |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Deposit 1,000.0 USDC        | Mints 896.207… fEURO — the genuine EUR-converted amount at the live ~0.8962 EUR/USDC rate, not ~1,000.0 (1:1 USD, wrong) and not ~1,120 (inverted direction, wrong)                            |
+| Stake                       | 896.207… fEURO → 896.207… sfEURO, 1:1 share mint on a fresh pool                                                                                                                               |
 | Harvest (immediately after) | Correctly reverts `NothingToHarvest()` — this rehearsal pool has no real yield source wired up yet, so there is genuinely nothing to harvest; confirmed as correct behavior, not routed around |
-| Unstake | 896.207… sfEURO → 896.207… fEURO back, principal exactly preserved |
-| withdrawCashImmediate | Burns 896.207… fEURO, returns exactly **1,000.0 USDC** — the correct inverse of the deposit conversion, not 896 (double-converted) and not 1,120 (inverted) |
+| Unstake                     | 896.207… sfEURO → 896.207… fEURO back, principal exactly preserved                                                                                                                             |
+| withdrawCashImmediate       | Burns 896.207… fEURO, returns exactly **1,000.0 USDC** — the correct inverse of the deposit conversion, not 896 (double-converted) and not 1,120 (inverted)                                    |
 
 The full round-trip — 1,000 USDC in, 1,000.0 USDC out — confirms the EUR conversion is applied symmetrically and correctly in both directions.
 
@@ -141,21 +141,21 @@ The full round-trip — 1,000 USDC in, 1,000.0 USDC out — confirms the EUR con
 
 Both dispatched via direct `execTransaction` calls through the pool's real guard-registration path (the same mechanism the live fUSD pool uses for its own lending activity) — not a mock, against real Morpho Blue and Aave V3 contracts on the forked Base state.
 
-| Test | Result |
-| --- | --- |
+| Test                          | Result                                                                                                                                                                                                                               |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Morpho Blue supply + withdraw | Supplied 1,000.0 USDC into one of the 10 real, governance-configured markets; withdrew back 999.999999 USDC using the shares gained (Morpho's own recommended full-withdrawal pattern); `supplyShares` returned exactly to baseline. |
-| Aave V3 supply + withdraw | Supplied 1,000.0 USDC; aToken balance increased by 999.999999; withdrew the full balance back (`type(uint256).max`, Aave's own full-withdrawal semantics); final aToken balance exactly 0. |
+| Aave V3 supply + withdraw     | Supplied 1,000.0 USDC; aToken balance increased by 999.999999; withdrew the full balance back (`type(uint256).max`, Aave's own full-withdrawal semantics); final aToken balance exactly 0.                                           |
 
 ## 09. Uniswap V3 guards vs. a real external pool (swap + full LP lifecycle)
 
 USDT_BASE ("Bridged Tether USD," the same real, circulating Base token this codebase's own `AaveLendingPoolAssetGuard.sol` already treats as "USDT") was registered as a second stablecoin so a real, non-fabricated swap and LP position could be exercised, mirroring the live fUSD deployment's own stablecoin-only Uniswap testing. Isolated on its own snapshot/revert so the registration and position are never left behind on the shared pool state the rest of this rehearsal runs on.
 
-| Test | Result |
-| --- | --- |
-| Real USDC → USDT_BASE swap (UniswapV3RouterGuard) | Swapped 450.0 USDC for 450.517951 USDT_BASE through the real, live 0.01% fee-tier pool. |
+| Test                                                                           | Result                                                                                                                                                                         |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Real USDC → USDT_BASE swap (UniswapV3RouterGuard)                              | Swapped 450.0 USDC for 450.517951 USDT_BASE through the real, live 0.01% fee-tier pool.                                                                                        |
 | Real LP mint (UniswapV3NonfungiblePositionGuard + AssetGuard, M-14 loss check) | Minted a real position around the pool's current tick; M-14's fair-price/mint-loss check passed with no revert; the new position was correctly tracked in `NftTrackerStorage`. |
-| FNA-48: removal blocked while tracked | Attempting to delist the Uniswap position manager while the minted position was still open correctly reverted (`"UniswapV3AssetGuard: positions tracked"`). |
-| Burn (full close) | Position fully closed; no longer appears in `getOwnedTokenIds()` afterward. |
+| FNA-48: removal blocked while tracked                                          | Attempting to delist the Uniswap position manager while the minted position was still open correctly reverted (`"UniswapV3AssetGuard: positions tracked"`).                    |
+| Burn (full close)                                                              | Position fully closed; no longer appears in `getOwnedTokenIds()` afterward.                                                                                                    |
 
 Before trusting this round's results, `NftTrackerStorage.poolFactory()` was confirmed to point at this pool's own `PoolManagerLogic` — the live USD deployment had an independent, already-CertiK-flagged misconfiguration here (fixed separately in that deployment's own upgrade), and a fresh EUR deployment could in principle repeat it if the deploy script's initializer call were wrong. It was not: this fresh deploy initializes `NftTrackerStorage` correctly from the start.
 
@@ -167,20 +167,20 @@ Beyond the four guard families this fresh EUR pool is actually registered with (
 >
 > The USD-side version of this same exercise found a serious, cross-cutting methodology bug: testing these three families against a _pre-upgrade_ pool (one with no concept of `IPreValuedAssetGuard`) silently mispriced them by a factor of ~10^12, sizing withdrawal portions as effectively zero while still burning the user's tokens for real. This EUR pool is deployed fresh, directly from this branch, so it is never in that pre-upgrade state to begin with — but the three test scripts still carry the same explicit precondition check (`PoolLogic.compoundedRewardIndex()` must not revert) as a standing safeguard, rather than assuming "fresh deploy" is automatically safe from a bug that was originally about upgrade sequencing.
 
-| Family | Real infrastructure used | Tests |
-| --- | --- | --- |
-| AaveV4Spoke | `MAG7_SPOKE` + `GiverPositionManager` + `TakerPositionManager` (real, live Aave V4 Base contracts) | 5/5 pass: real supply via Giver, automatic pro-rata withdrawal, manual withdrawal via Taker (`approveWithdraw` + `withdrawOnBehalfOf`), non-whitelisted-reserve rejection, `spender != pool` rejection (the guard's own "single most important check," per its source comment — otherwise Aave V4's `withdraw()` sends funds to `msg.sender`, not `onBehalfOf`, letting an arbitrary approved spender drain the position). |
-| AaveV4Tokenization | `TOKENIZATION_SPOKE` (real, live ERC-4626-shaped Aave V4 contract) | 5/5 pass: real deposit, automatic pro-rata withdrawal, manual `withdraw()`, `receiver != pool` rejection, non-whitelisted-vault rejection. |
-| Morpho Vault V2 | A freshly-created vault through Morpho's real, live `VaultV2Factory` on Base | 5/5 pass: real deposit, automatic pro-rata withdrawal, manual `withdraw()`, `receiver != pool` rejection, non-whitelisted-vault rejection. |
+| Family             | Real infrastructure used                                                                           | Tests                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------ | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AaveV4Spoke        | `MAG7_SPOKE` + `GiverPositionManager` + `TakerPositionManager` (real, live Aave V4 Base contracts) | 5/5 pass: real supply via Giver, automatic pro-rata withdrawal, manual withdrawal via Taker (`approveWithdraw` + `withdrawOnBehalfOf`), non-whitelisted-reserve rejection, `spender != pool` rejection (the guard's own "single most important check," per its source comment — otherwise Aave V4's `withdraw()` sends funds to `msg.sender`, not `onBehalfOf`, letting an arbitrary approved spender drain the position). |
+| AaveV4Tokenization | `TOKENIZATION_SPOKE` (real, live ERC-4626-shaped Aave V4 contract)                                 | 5/5 pass: real deposit, automatic pro-rata withdrawal, manual `withdraw()`, `receiver != pool` rejection, non-whitelisted-vault rejection.                                                                                                                                                                                                                                                                                 |
+| Morpho Vault V2    | A freshly-created vault through Morpho's real, live `VaultV2Factory` on Base                       | 5/5 pass: real deposit, automatic pro-rata withdrawal, manual `withdraw()`, `receiver != pool` rejection, non-whitelisted-vault rejection.                                                                                                                                                                                                                                                                                 |
 
 All 15 tests pass, reproduced twice from two independent, freshly-restarted forks and fresh deployments. Each family is isolated on its own snapshot/revert, so none of the three — and none of the fresh pseudo-assets, markets or vaults each one registers — are left behind on the shared pool state the rest of this report's tests run on.
 
 ## 11. Guard validation (negative tests: M-09, M-12)
 
-| Test | Result |
-| --- | --- |
-| M-12: multi-hop path through an unsupported token | Correctly reverted: `"Frgmnt: unsupported hop asset"`. |
-| M-09: zero output-minimum swap | Correctly reverted: `"Frgmnt: amountOutMinimum must be > 0"`. |
+| Test                                              | Result                                                        |
+| ------------------------------------------------- | ------------------------------------------------------------- |
+| M-12: multi-hop path through an unsupported token | Correctly reverted: `"Frgmnt: unsupported hop asset"`.        |
+| M-09: zero output-minimum swap                    | Correctly reverted: `"Frgmnt: amountOutMinimum must be > 0"`. |
 
 ## 12. ERC20Guard validation
 
@@ -190,13 +190,13 @@ Only `approve()` is handled by this guard (there is no `transfer()` handler — 
 
 Every user-facing withdrawal entry point on `PoolLogic`, mirroring the breadth of the live fUSD deployment's own functional-test suite (see Section 21 for the one path deliberately not included).
 
-| Function | Result |
-| --- | --- |
-| `withdrawCashImmediate` | Covered as part of the core-flow proof (Section 6) and the multi-user round (Section 15). |
-| `withdrawCashImmediateTo` | Burned 2,688.622… fEURO; third-party recipient received 2,999.999999 USDC; caller's own USDC balance untouched, as designed. |
-| `withdrawCashImmediateSafe` | Withdrew with an explicit 4-entry `ComplexAsset[]` (default/empty entries, matching `getSupportedAssets().length`); received 2,999.999999 USDC. |
-| `withdrawCashImmediateToSafe` | Combined both of the above: third-party recipient received the remaining 6,000.0 USDC; caller's fEURO balance zeroed exactly. |
-| `requestCashWithdraw` + `finalizeCashWithdraw` + `claimCashWithdraw` (queued path) | Request #1: requested 4,481.037… fEURO, claimed 5,000.0 USDC after the manager finalized and the user claimed from escrow. |
+| Function                                                                           | Result                                                                                                                                          |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `withdrawCashImmediate`                                                            | Covered as part of the core-flow proof (Section 6) and the multi-user round (Section 15).                                                       |
+| `withdrawCashImmediateTo`                                                          | Burned 2,688.622… fEURO; third-party recipient received 2,999.999999 USDC; caller's own USDC balance untouched, as designed.                    |
+| `withdrawCashImmediateSafe`                                                        | Withdrew with an explicit 4-entry `ComplexAsset[]` (default/empty entries, matching `getSupportedAssets().length`); received 2,999.999999 USDC. |
+| `withdrawCashImmediateToSafe`                                                      | Combined both of the above: third-party recipient received the remaining 6,000.0 USDC; caller's fEURO balance zeroed exactly.                   |
+| `requestCashWithdraw` + `finalizeCashWithdraw` + `claimCashWithdraw` (queued path) | Request #1: requested 4,481.037… fEURO, claimed 5,000.0 USDC after the manager finalized and the user claimed from escrow.                      |
 
 ## 14. Automatic pro-rata withdrawal (asset guards)
 
@@ -210,11 +210,11 @@ Distinct from Section 8's manual `execTransaction` dispatch: this exercises the 
 
 Three independent accounts, three different exit paths, run in the same scenario with no snapshot isolation between them (to actually test for cross-contamination, not assume its absence):
 
-| User | Exit path | Result |
-| --- | --- | --- |
-| A | `withdrawCashImmediate` direct | Received 3,999.999999 USDC; final fEURO balance 0 |
-| B | stake → unstake → `withdrawCashImmediate` | Received 5,999.999999 USDC; final fEURO balance 0 |
-| C | `requestCashWithdraw` → finalize → claim | Received 9,000.0 USDC; final fEURO balance 0 |
+| User | Exit path                                 | Result                                            |
+| ---- | ----------------------------------------- | ------------------------------------------------- |
+| A    | `withdrawCashImmediate` direct            | Received 3,999.999999 USDC; final fEURO balance 0 |
+| B    | stake → unstake → `withdrawCashImmediate` | Received 5,999.999999 USDC; final fEURO balance 0 |
+| C    | `requestCashWithdraw` → finalize → claim  | Received 9,000.0 USDC; final fEURO balance 0      |
 
 All three independent; none of the three balances were affected by either of the other two users' activity.
 
@@ -226,10 +226,10 @@ All three independent; none of the three balances were affected by either of the
 
 Three privileged functions probed with an unauthorized random account (expecting rejection) and the real, intended caller (expecting success):
 
-| Function | Unauthorized caller | Real caller |
-| --- | --- | --- |
-| `Governance.setContractGuard` | Correctly reverted (`OwnableUnauthorizedAccount`) | Succeeded |
-| `TokenLogic.configureAsset` | Correctly reverted (missing `DEFAULT_ADMIN_ROLE`) | Succeeded |
+| Function                           | Unauthorized caller                               | Real caller       |
+| ---------------------------------- | ------------------------------------------------- | ----------------- |
+| `Governance.setContractGuard`      | Correctly reverted (`OwnableUnauthorizedAccount`) | Succeeded         |
+| `TokenLogic.configureAsset`        | Correctly reverted (missing `DEFAULT_ADMIN_ROLE`) | Succeeded         |
 | `MorphoBlueManager.setPoolMarkets` | Correctly reverted (`OwnableUnauthorizedAccount`) | See callout below |
 
 > **A structural limitation of this rehearsal's identity choices, not a bug**
@@ -238,11 +238,11 @@ Three privileged functions probed with an unauthorized random account (expecting
 
 ## 18. Reinitializer protection
 
-| Initializer | Result |
-| --- | --- |
-| `TokenLogic.initializeDepositFusdCap()` | Correctly reverted on a second call — already consumed for real by the deploy script itself. |
+| Initializer                              | Result                                                                                                                        |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `TokenLogic.initializeDepositFusdCap()`  | Correctly reverted on a second call — already consumed for real by the deploy script itself.                                  |
 | `PoolLogic.initializeWithdrawalEscrow()` | Correctly reverted on a second call (a plain already-set check, not reinitializer-gated — confirmed by reading the contract). |
-| `PoolLogic.initializeAutoCompounding()` | Correctly reverted — but by a genuinely **different mechanism** than on the USD upgrade rehearsal, see callout below. |
+| `PoolLogic.initializeAutoCompounding()`  | Correctly reverted — but by a genuinely **different mechanism** than on the USD upgrade rehearsal, see callout below.         |
 
 > **A subtlety specific to fresh deployments, checked directly rather than assumed**
 >
@@ -252,58 +252,58 @@ Three privileged functions probed with an unauthorized random account (expecting
 
 39 of 39 tests pass, run across three files and reproduced from a completely fresh fork + fresh deployment (not reused state).
 
-| # | Test | Result |
-| --- | --- | --- |
-| 1 | EUR-converted deposit (not 1:1 USD) | PASS |
-| 2 | Stake (1:1 share mint) | PASS |
-| 3 | Harvest correctly reverts `NothingToHarvest()` | PASS |
-| 4 | Unstake (principal preserved) | PASS |
-| 5 | `withdrawCashImmediate` at correct inverse EUR rate | PASS |
-| 6 | FNA-40 EUR/USD mode lock engaged permanently | PASS |
-| 7 | Morpho Blue supply + withdraw | PASS |
-| 8 | Aave V3 supply + withdraw | PASS |
-| 9 | M-12 multi-hop rejection | PASS |
-| 10 | M-09 zero output-minimum rejection | PASS |
-| 11 | ERC20Guard approve() validation | PASS |
-| 12 | Real Uniswap V3 swap (USDC → USDT_BASE) | PASS |
-| 13 | Real LP mint (M-14 check, tracked) | PASS |
-| 14 | FNA-48 removal blocked while tracked | PASS |
-| 15 | Burn clears NFT tracking | PASS |
-| 16 | `withdrawCashImmediateTo` | PASS |
-| 17 | `withdrawCashImmediateSafe` | PASS |
-| 18 | `withdrawCashImmediateToSafe` | PASS |
-| 19 | Queued withdrawal (request + finalize + claim) | PASS |
-| 20 | Automatic pro-rata pull (Morpho + Aave) | PASS |
-| 21 | Deposit cap enforcement | PASS |
-| 22 | Access control (3 functions) | PASS |
-| 23 | Reinitializer protection (3 initializers) | PASS |
-| 24 | Multi-user isolation (3 users, 3 exit paths) | PASS |
-| 25 | AaveV4Spoke: real supply via GiverPositionManager | PASS |
-| 26 | AaveV4Spoke: automatic pro-rata withdrawal from the real position | PASS |
-| 27 | AaveV4Spoke: manual withdrawal via TakerPositionManager | PASS |
-| 28 | AaveV4Spoke: non-whitelisted reserve rejection | PASS |
-| 29 | AaveV4Spoke: `spender != pool` rejection | PASS |
-| 30 | AaveV4Tokenization: real deposit into the live TOKENIZATION_SPOKE | PASS |
-| 31 | AaveV4Tokenization: automatic pro-rata withdrawal from the real position | PASS |
-| 32 | AaveV4Tokenization: manual `withdraw()` | PASS |
-| 33 | AaveV4Tokenization: `receiver != pool` rejection | PASS |
-| 34 | AaveV4Tokenization: non-whitelisted-vault rejection | PASS |
-| 35 | Morpho Vault V2: real deposit into a freshly-created vault | PASS |
-| 36 | Morpho Vault V2: automatic pro-rata withdrawal from the real position | PASS |
-| 37 | Morpho Vault V2: manual `withdraw()` | PASS |
-| 38 | Morpho Vault V2: `receiver != pool` rejection | PASS |
-| 39 | Morpho Vault V2: non-whitelisted-vault rejection | PASS |
+| #   | Test                                                                     | Result |
+| --- | ------------------------------------------------------------------------ | ------ |
+| 1   | EUR-converted deposit (not 1:1 USD)                                      | PASS   |
+| 2   | Stake (1:1 share mint)                                                   | PASS   |
+| 3   | Harvest correctly reverts `NothingToHarvest()`                           | PASS   |
+| 4   | Unstake (principal preserved)                                            | PASS   |
+| 5   | `withdrawCashImmediate` at correct inverse EUR rate                      | PASS   |
+| 6   | FNA-40 EUR/USD mode lock engaged permanently                             | PASS   |
+| 7   | Morpho Blue supply + withdraw                                            | PASS   |
+| 8   | Aave V3 supply + withdraw                                                | PASS   |
+| 9   | M-12 multi-hop rejection                                                 | PASS   |
+| 10  | M-09 zero output-minimum rejection                                       | PASS   |
+| 11  | ERC20Guard approve() validation                                          | PASS   |
+| 12  | Real Uniswap V3 swap (USDC → USDT_BASE)                                  | PASS   |
+| 13  | Real LP mint (M-14 check, tracked)                                       | PASS   |
+| 14  | FNA-48 removal blocked while tracked                                     | PASS   |
+| 15  | Burn clears NFT tracking                                                 | PASS   |
+| 16  | `withdrawCashImmediateTo`                                                | PASS   |
+| 17  | `withdrawCashImmediateSafe`                                              | PASS   |
+| 18  | `withdrawCashImmediateToSafe`                                            | PASS   |
+| 19  | Queued withdrawal (request + finalize + claim)                           | PASS   |
+| 20  | Automatic pro-rata pull (Morpho + Aave)                                  | PASS   |
+| 21  | Deposit cap enforcement                                                  | PASS   |
+| 22  | Access control (3 functions)                                             | PASS   |
+| 23  | Reinitializer protection (3 initializers)                                | PASS   |
+| 24  | Multi-user isolation (3 users, 3 exit paths)                             | PASS   |
+| 25  | AaveV4Spoke: real supply via GiverPositionManager                        | PASS   |
+| 26  | AaveV4Spoke: automatic pro-rata withdrawal from the real position        | PASS   |
+| 27  | AaveV4Spoke: manual withdrawal via TakerPositionManager                  | PASS   |
+| 28  | AaveV4Spoke: non-whitelisted reserve rejection                           | PASS   |
+| 29  | AaveV4Spoke: `spender != pool` rejection                                 | PASS   |
+| 30  | AaveV4Tokenization: real deposit into the live TOKENIZATION_SPOKE        | PASS   |
+| 31  | AaveV4Tokenization: automatic pro-rata withdrawal from the real position | PASS   |
+| 32  | AaveV4Tokenization: manual `withdraw()`                                  | PASS   |
+| 33  | AaveV4Tokenization: `receiver != pool` rejection                         | PASS   |
+| 34  | AaveV4Tokenization: non-whitelisted-vault rejection                      | PASS   |
+| 35  | Morpho Vault V2: real deposit into a freshly-created vault               | PASS   |
+| 36  | Morpho Vault V2: automatic pro-rata withdrawal from the real position    | PASS   |
+| 37  | Morpho Vault V2: manual `withdraw()`                                     | PASS   |
+| 38  | Morpho Vault V2: `receiver != pool` rejection                            | PASS   |
+| 39  | Morpho Vault V2: non-whitelisted-vault rejection                         | PASS   |
 
 ## 20. Issues found and fixed during this rehearsal
 
 None of these were known going in — each was found by actually running the deployment against real protocol state, not anticipated in advance.
 
-| Issue | Root cause | Fix |
-| --- | --- | --- |
-| M-11 self-dealing check reverted the first `setPoolMarkets` call | `GOVERNANCE_SAFE` was set as both the pool manager and (after an early `transferOwnership`) `MorphoBlueManager`'s owner — exactly the condition M-11 is designed to block. | Resequenced: call `setPoolMarkets` while the deployer still owns `MorphoBlueManager`, transfer ownership to `GOVERNANCE_SAFE` only afterward. |
-| `"TokenLogic: asset not allowed"` on the first deposit | `TokenLogic.deposit()` requires `TokenLogic.configureAsset()` — a separate allowlist from `PoolManagerLogic.changeAssets()`, easy to miss since both sound like the same registration step. | Added `fusdAsManager.configureAsset(USDC, true, 0n)` to the deploy script. |
-| `"TokenLogic: deposit cap exceeded"` on the first deposit | `maxDepositFusdSupply` defaults to 0 on a fresh deploy. | Added `fusdAsManager.initializeDepositFusdCap(500,000e18)` to the deploy script. |
-| `evm_increaseTime` for cooldown-clearing also tripped the EUR feed's own staleness check | A plain time-jump advances the fork's clock past the EUR/USD feed's 24h `eurUsdTimeout` — and unlike the USD side, this timeout can never be raised again post-launch (FNA-40, Section 7). | Used `TokenLogic.setCooldown(0)` (a real, intended admin lever) instead of time-travel for the entire expanded test suite — no `evm_increaseTime` call anywhere in `eur_guard_and_withdrawal_tests.ts`. |
+| Issue                                                                                    | Root cause                                                                                                                                                                                  | Fix                                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M-11 self-dealing check reverted the first `setPoolMarkets` call                         | `GOVERNANCE_SAFE` was set as both the pool manager and (after an early `transferOwnership`) `MorphoBlueManager`'s owner — exactly the condition M-11 is designed to block.                  | Resequenced: call `setPoolMarkets` while the deployer still owns `MorphoBlueManager`, transfer ownership to `GOVERNANCE_SAFE` only afterward.                                                           |
+| `"TokenLogic: asset not allowed"` on the first deposit                                   | `TokenLogic.deposit()` requires `TokenLogic.configureAsset()` — a separate allowlist from `PoolManagerLogic.changeAssets()`, easy to miss since both sound like the same registration step. | Added `fusdAsManager.configureAsset(USDC, true, 0n)` to the deploy script.                                                                                                                              |
+| `"TokenLogic: deposit cap exceeded"` on the first deposit                                | `maxDepositFusdSupply` defaults to 0 on a fresh deploy.                                                                                                                                     | Added `fusdAsManager.initializeDepositFusdCap(500,000e18)` to the deploy script.                                                                                                                        |
+| `evm_increaseTime` for cooldown-clearing also tripped the EUR feed's own staleness check | A plain time-jump advances the fork's clock past the EUR/USD feed's 24h `eurUsdTimeout` — and unlike the USD side, this timeout can never be raised again post-launch (FNA-40, Section 7).  | Used `TokenLogic.setCooldown(0)` (a real, intended admin lever) instead of time-travel for the entire expanded test suite — no `evm_increaseTime` call anywhere in `eur_guard_and_withdrawal_tests.ts`. |
 
 ## 21. Deliberately not covered, and why
 
@@ -321,12 +321,12 @@ None of these were known going in — each was found by actually running the dep
 
 ## 23. Reproducing this rehearsal
 
-| Step | Command |
-| --- | --- |
-| 1. Start the fork | `./scripts/fork/start-base-fork.sh 53384400` |
-| 2. Deploy fresh | `SEND=1 npx hardhat run scripts/fork/deploy_eur_fresh.ts --network baseFork` |
-| 3. Core-flow tests | `npx hardhat run scripts/fork/eur_functional_tests.ts --network baseFork` |
-| 4. Guard + withdrawal tests | `npx hardhat run scripts/fork/eur_guard_and_withdrawal_tests.ts --network baseFork` |
+| Step                                                                         | Command                                                                                  |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| 1. Start the fork                                                            | `./scripts/fork/start-base-fork.sh 53384400`                                             |
+| 2. Deploy fresh                                                              | `SEND=1 npx hardhat run scripts/fork/deploy_eur_fresh.ts --network baseFork`             |
+| 3. Core-flow tests                                                           | `npx hardhat run scripts/fork/eur_functional_tests.ts --network baseFork`                |
+| 4. Guard + withdrawal tests                                                  | `npx hardhat run scripts/fork/eur_guard_and_withdrawal_tests.ts --network baseFork`      |
 | 5. Dormant guard families (AaveV4Spoke, AaveV4Tokenization, Morpho Vault V2) | `npx hardhat run scripts/fork/eur_dormant_guards_integration_test.ts --network baseFork` |
 
 Every address, balance and transaction above is reproducible exactly from this sequence against the pinned fork block — confirmed by running it twice, from two independent, freshly-restarted forks.
