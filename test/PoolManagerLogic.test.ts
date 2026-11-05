@@ -622,6 +622,24 @@ describe('PoolManagerLogic', () => {
       );
     });
 
+    it('reverts commitFeeIncrease when nothing has been announced, leaving live fees untouched', async () => {
+      const { contract, manager } = await loadFixture(setupFixture);
+
+      const [perfBefore, mgmtBefore, entryBefore, exitBefore] = await contract.getFee();
+      expect(perfBefore).to.equal(500n);
+      expect(mgmtBefore).to.equal(100n);
+
+      await expect(contract.connect(manager).commitFeeIncrease()).to.be.revertedWith(
+        'nothing announced',
+      );
+
+      const [perfAfter, mgmtAfter, entryAfter, exitAfter] = await contract.getFee();
+      expect(perfAfter).to.equal(perfBefore);
+      expect(mgmtAfter).to.equal(mgmtBefore);
+      expect(entryAfter).to.equal(entryBefore);
+      expect(exitAfter).to.equal(exitBefore);
+    });
+
     it('announces and commits fee increases after delay', async () => {
       const { contract, manager, poolLogic } = await loadFixture(setupFixture);
 

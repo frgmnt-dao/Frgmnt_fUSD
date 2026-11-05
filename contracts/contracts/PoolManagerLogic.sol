@@ -821,6 +821,11 @@ contract PoolManagerLogic is Initializable, IPoolManagerLogic, IHasSupportedAsse
     ///      figure and only subtracts reserved value, never touching completeness), so this check
     ///      is exactly equivalent, one transaction earlier.
     function commitFeeIncrease() external onlyManager {
+        // Without this check, calling commitFeeIncrease() with no announcement pending does not
+        // revert: announcedFeeIncreaseTimestamp defaults to 0, so the delay check below is
+        // trivially satisfied, and every fee numerator is silently set to the announced ones —
+        // also still 0 — wiping the manager's own live fees to zero with no error.
+        require(announcedFeeIncreaseTimestamp != 0, "nothing announced");
         require(block.timestamp >= announcedFeeIncreaseTimestamp, "delay active");
 
         (, bool navComplete) = totalFundValueWithCompleteness();
