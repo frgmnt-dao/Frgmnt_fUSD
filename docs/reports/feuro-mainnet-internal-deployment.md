@@ -1,8 +1,17 @@
 # fEURO — Real Base Mainnet Deployment (Internal Testing)
 
-Deployed and tested live on Base mainnet (chain 8453), for internal testing only — not a public launch. A single deployer wallet holds every privileged role (manager, emergency address, every proxy/contract owner). Nothing in this deployment was broadcast to a fork or testnet — every address and transaction below is real and live on Base mainnet today.
+Deployed and tested live on Base mainnet (chain 8453), for internal testing only — not a public launch. A single deployer wallet originally held every privileged role (manager, emergency address, every proxy/contract owner); a separate test trader address has since been assigned (Section 1a). Nothing in this deployment was broadcast to a fork or testnet — every address and transaction below is real and live on Base mainnet.
 
-**Deployer / sole role-holder:** `0x5edc24182f5e8723Bd73FaE8472EA184124a92F7`
+**Deployer / manager / every other role:** `0x5edc24182f5e8723Bd73FaE8472EA184124a92F7`
+
+## 1a. Role assignments
+
+| Role          | Address                                      | Transaction                                                                                                                 |
+| ------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Manager       | `0x5edc24182f5e8723Bd73FaE8472EA184124a92F7` | unchanged since initial deployment — confirmed as the current `manager()` before this assignment, no new transaction needed |
+| Trader (test) | `0xc436f276cC237834eFcfb9f460a63a121d41DB96` | `PoolManagerLogic.setTrader(...)` — `0xd2f9e039695f4ce28336e1a996c7944ba3ab178c0b0f2d163cd6abb40e4def3d`                    |
+
+Every other privileged role (AssetHandler/PoolManagerLogic/PoolLogic owner, TokenLogic admin, every guard's owner/admin) remains the single deployer address.
 
 ## 1. Product configuration
 
@@ -155,5 +164,6 @@ Scripts (all require `--network base` and `SEND=1` to broadcast for real; defaul
 - `scripts/configure_eurc_and_dormant_guards_mainnet.ts` — switches the deposit asset to EURC and deploys the three dormant guard families.
 - `scripts/test_eurc_mainnet_full_flow.ts` — the full user-flow and guard-by-guard test suite (Section 4).
 - `scripts/deploy_remaining_guards_mainnet.ts` — deploys and verifies the remaining guard contracts (Section 2's "Remaining guard contracts" table).
+- `scripts/set_trader_mainnet.ts` — assigns the test trader role (Section 1a).
 
 Deployment/configuration/test records are saved under `deployments/deploy-eur-mainnet-*.json`.
