@@ -2,7 +2,7 @@
 
 **Status: planning only. Nothing in this document has been executed. No transaction described below has been sent, and no contract has been deployed on Base mainnet as part of this plan.** Every address, role, and on-chain value in Section 1 was read directly from Base mainnet (chain 8453) immediately before this report was written — none of it is taken from prior notes without re-checking.
 
-The live fUSD/sfUSD deployment has never been upgraded since its original launch. Every fix closed during this engagement (SoftStack Stage 1, SoftStack Stage 2, and the FNA findings tracked separately) exists only in source code today. This plan describes exactly what needs to be redeployed, registered, and signed to bring the live system up to the current branch — and, because the deployment is governed by a multisig rather than a single key, how to actually build and execute those transactions through Gnosis Safe.
+The live fUSD/sfUSD deployment has never been upgraded since its original launch. Every fix closed during this engagement — both SoftStack's findings (Stage 1 and Stage 2, numbered M-XX/L-XX) and CertiK's findings (numbered FNA-01 through FNA-60) — exists only in source code today; none of it is live. This plan describes exactly what needs to be redeployed, registered, and signed to bring the live system up to the current branch — and, because the deployment is governed by a multisig rather than a single key, how to actually build and execute those transactions through Gnosis Safe.
 
 ## 1. Current live state (verified on-chain)
 
@@ -50,6 +50,8 @@ The DAO Safe owns every proxy's upgrade authority and three of the four core con
 Checked fresh for this report: `PoolLogic.lastRequestId()` currently reads **0** — no withdrawal request has ever been queued against the live pool, so there is nothing pending today. This is time-sensitive, not a one-time fact: it must be re-checked immediately before Phase A's Safe batch is actually executed (the script does this automatically and refuses to proceed otherwise, short of explicitly setting `ALLOW_PENDING_WITHDRAWALS=1` — treat needing that flag as a stop-and-investigate signal, not a routine override), not only during planning.
 
 ## 2. Phase A — core contract proxies
+
+Despite its filename, this script carries far more than SoftStack's own findings. The bulk of CertiK's ~60 FNA findings live inside the logic of `PoolLogic`, `TokenLogic`, `PoolManagerLogic`, and `AssetHandler` themselves (NAV accrual, fee handling, deposit/withdraw accounting, asset-removal guards, and so on) — those land automatically the moment each proxy's implementation is swapped, with no separate call needed. Only the FNA fixes that need their own explicit step beyond "upgrade the implementation" are called out below (FNA-03, FNA-40, FNA-50) — the rest are simply what the new implementation bytecode already does differently from the live one.
 
 Implemented in `scripts/upgrade_softstack_core_contracts.ts` (already in the working tree, dry-run by default, never executed). What it does, in order:
 
