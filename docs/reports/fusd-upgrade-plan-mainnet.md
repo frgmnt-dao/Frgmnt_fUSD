@@ -139,13 +139,62 @@ Net: two batches need the DAO Safe's signatures (Phase A's and Phase B's — the
 
 ## 6. Building and executing the Gnosis Safe transactions
 
-This is the mechanical part — how a JSON file on disk becomes an executed, multisig-approved mainnet transaction.
+This is the mechanical part — how a JSON file on disk becomes an executed, multisig-approved mainnet transaction, down to the actual cryptography and bytecode involved, not just the UI clicks. Every address, hash, and byte layout below was independently verified for this report against real Base mainnet and against the Safe v1.4.1 source itself — not asserted from memory.
 
 ### 6.1 What you're actually signing
 
-Both Safes are standard Gnosis Safe v1.4.1 contracts (confirmed via their own `VERSION()` getter) — not a custom contract, so the ordinary Safe tooling at [app.safe.global](https://app.safe.global) works unmodified. The DAO Safe requires 3 of its 4 owners to approve; the Pool Manager Safe requires 2 of its 3. A Safe transaction is only ever executed once enough owners have signed the *exact same* proposed transaction (same `to`, `value`, `data`, and the Safe's own internal nonce at proposal time) — partial signatures do nothing on their own.
+Both Safes report `version()` = `"1.4.1+L2"`, confirmed independently through two separate channels that agree: a direct on-chain read, and the Safe Transaction Service API (`https://api.safe.global/tx-service/base/api/v1/safes/<address>/` — the same backend `app.safe.global` itself talks to) returning the identical owners, threshold, and nonce for the DAO Safe as the raw RPC calls in Section 1.2. Both Safes' `masterCopy` (the singleton implementation every Safe proxy delegates to) is `0x29fcB43b46531BcA003ddC8FCB67FFE91900C762`, the standard, unmodified Safe v1.4.1 L2 singleton — not a custom fork. Every owner of both Safes (all 7 unique addresses across the two) was checked individually and has zero bytecode — all are plain EOAs, none a smart-contract wallet — so there is no EIP-1271 contract-signature complexity to account for anywhere in this plan; every signature collected is an ordinary ECDSA signature over an EIP-712 hash.
 
-### 6.2 The batch files this plan produces
+A Safe transaction is only ever executed once enough owners have signed the *exact same* proposed transaction (same `to`, `value`, `data`, `operation`, and the Safe's own nonce at the moment of signing) — partial signatures do nothing on their own, and a signature computed for one nonce becomes permanently invalid the instant the Safe's nonce moves past it (Section 6.7 relies on exactly this property to explain how to kill a bad proposal).
+
+### 6.2 The cryptographic mechanics — what hash you're actually approving
+
+Pulled directly from the Safe v1.4.1 source (`contracts/Safe.sol` in `safe-global/safe-smart-account`), confirmed against this exact version since both Safes report `1.4.1+L2`:
+
+```solidity
+bytes32 private constant DOMAIN_SEPARATOR_TYPEHASH =
+    0x47e79534a245952e8b16893a336b85a3d9ea9fa8c573f3d803afb92a79469218;
+    // keccak256("EIP712Domain(uint256 chainId,address verifyingContract)")
+
+bytes32 private constant SAFE_TX_TYPEHASH =
+    0xbb8310d486368db6bd6f849402fdd73ad53d316b5a4b2644ad6efe0f941286d8;
+    // keccak256("SafeTx(address to,uint256 value,bytes data,uint8 operation,uint256 safeTxGas,
+    //            uint256 baseGas,uint256 gasPrice,address gasToken,address refundReceiver,uint256 nonce)")
+
+function domainSeparator() public view returns (bytes32) {
+    return keccak256(abi.encode(DOMAIN_SEPARATOR_TYPEHASH, getChainId(), this));
+}
+```
+
+Note what's *not* in the domain: no `name` or `version` field — just `chainId` and the Safe's own address (`verifyingContract`). This is deliberate and matters operationally: the domain separator is unique to each Safe on each chain, so a signature can never be replayed against the wrong Safe or the wrong network, but it also means **the UI showing the right Safe address and the right chain is the entire basis of trust** — there's nothing else baked into the hash that would catch a phishing page presenting the wrong Safe. Always confirm the Safe address in the browser matches Section 1.2/the appendix before connecting a wallet.
+
+`getTransactionHash(to, value, data, operation, safeTxGas, baseGas, gasPrice, gasToken, refundReceiver, nonce)` is a public, read-only function on every Safe — anyone can call it to independently recompute the exact hash the UI is asking you to sign, with no wallet connection or transaction required. This was done for real against the live DAO Safe as a worked example for this report:
+
+```
+cast call 0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3 \
+  "getTransactionHash(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,uint256)(bytes32)" \
+  0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3 0 0x 0 0 0 0 \
+  0x0000000000000000000000000000000000000000 0x0000000000000000000000000000000000000000 12 \
+  --rpc-url https://mainnet.base.org
+```
+returns `0x16c009cee387d5f7fd0f69adb5c5452a13100ee529c6ffd54f1119624a5cb23a` — the real `safeTxHash` for a trivial no-op (self-call, empty data, nonce 12) against this exact Safe, right now. **Before signing anything the UI shows you, run the equivalent `cast call` yourself with the batch's real `to`/`data`/`operation`/`nonce` and confirm it matches the hash the UI (or your hardware wallet's signing screen) displays.** This is the single most reliable defense against a compromised frontend or a malicious batch substitution — it needs nothing but a public RPC endpoint and the parameters you're being asked to approve.
+
+### 6.3 How several calls become one Safe transaction: MultiSend
+
+Every batch in this plan bundles multiple calls into a single Safe transaction, so one more layer of mechanics sits between "the JSON file" and "the hash in 6.2." Safe ships two canonical helper contracts for this, both deployed deterministically at the same address on every chain that has them — verified live on Base for this report, not assumed from the published addresses alone:
+
+| Contract | Address on Base | Verified | Semantics |
+| --- | --- | --- | --- |
+| `MultiSend` | `0xA238CBeb142c10Ef7Ad8442C6D1f9E89e07e7761` | Runtime bytecode's `keccak256` matches the official `@safe-global/safe-deployments` package's published hash exactly (checked live) | Must be reached via **delegatecall**; each packed sub-call inside it then executes with the *Safe's own address* as `msg.sender`, because the delegatecall preserves the Safe's execution context all the way through |
+| `MultiSendCallOnly` | `0x40A2aCCbd92BCA938b02010E17A5b8929b49130D` | Same — bytecode hash matches exactly | Reached via a plain **call**; each packed sub-call then executes with *this contract's own address* as `msg.sender`, not the Safe's |
+
+This distinction is not cosmetic for this plan. Every single call in Phases A and B is gated by an `onlyOwner`/`onlyFactoryOwner`/role check resolving to the Safe itself — `Governance.onlyOwner` (DAO Safe), each `ProxyAdmin.owner()` (DAO Safe), `PoolManagerLogic.onlyFactoryOwner` (DAO Safe, confirmed in Section 2), `NftTrackerStorage.onlyOwner` (Pool Manager Safe). If the batch were ever routed through `MultiSendCallOnly` instead of `MultiSend`, every one of those checks would see the `MultiSendCallOnly` contract's address as the caller instead of the Safe, and every call would revert its own access check. **When reviewing a decoded batch before signing, confirm the single outer Safe transaction's `to` is the `MultiSend` address above with `operation = 1` (delegatecall) — not `MultiSendCallOnly` with `operation = 0`.** Transaction Builder's own UI exposes the operation type in its advanced/review view; if it's ever unclear, decode the outer call directly and check `to`/`operation` against this table.
+
+The packed encoding `MultiSend.multiSend(bytes transactions)` expects, confirmed from source, is a flat concatenation with **no padding between entries**: for each sub-call, `operation (1 byte, 0=call/1=delegatecall) ++ to (20 bytes) ++ value (32 bytes) ++ dataLength (32 bytes) ++ data (dataLength bytes)`, repeated for every call in the batch. This is exactly what Transaction Builder's "Import batch" feature constructs from the flat `transactions: [{to, value, data}]` array in this plan's JSON files (each entry implicitly gets `operation = 0`, since every individual call in this plan is a normal call, not a nested delegatecall — only the single outer Safe→MultiSend hop is a delegatecall).
+
+One safety property worth knowing rather than just trusting: `execTransaction`'s own source has `require(success || safeTxGas != 0 || gasPrice != 0, "GS013")` — and this plan's batches use the default `safeTxGas = 0, baseGas = 0, gasPrice = 0` (gas is estimated dynamically, no refund mechanism in play). That means if *any* sub-call inside the batch fails for any reason — wrong operation routing, a stale precondition, an unexpected revert — `execTransaction` reverts in its entirety. There is no partial-execution failure mode here: either the whole batch lands, or none of it does, and the Safe's nonce still advances (the failed attempt is recorded via `ExecutionFailure`, not silently dropped) — so a bad attempt still consumes the nonce slot it was proposed at.
+
+### 6.4 The batch files this plan produces
 
 Each script above (`upgrade_softstack_core_contracts.ts`, `upgrade_softstack_guards.ts`), run without `SEND=1`, writes one or more files shaped like:
 
@@ -165,24 +214,44 @@ Each script above (`upgrade_softstack_core_contracts.ts`, `upgrade_softstack_gua
 }
 ```
 
-This is the exact format Safe's own "Transaction Builder" app consumes — not a bespoke format invented for this plan.
+This is the exact format Safe's own "Transaction Builder" app consumes — not a bespoke format invented for this plan. The app itself handles the `MultiSend` packing described in 6.3; nothing in this JSON format encodes that layer explicitly.
 
-### 6.3 Step by step
+### 6.5 Step by step
 
 1. **Run the script as a dry run** (no `SEND` set) against `--network base`. It reads live state, performs its preflight checks, and either refuses (if something unexpected has already changed on-chain — see each script's idempotency check) or writes its batch file(s) under `deployments/`. Nothing is sent to mainnet by this step.
 2. **Read the batch file before doing anything else.** Each `transactions[].data` is ABI-encoded calldata — decode it (Etherscan's "Input Data" decoder works for this if the target contract is verified, or `cast calldata-decode`/`cast 4byte-decode` locally) and confirm it matches what this report describes for that step. Never import and sign a batch you haven't independently read.
 3. **Go to [app.safe.global](https://app.safe.global)**, connect a wallet that is one of the Safe's owners, and open the correct Safe — the DAO Safe (`0x74aF72D91D5FB263fBa09Ed43aD1C1ea079058B3`) or the Pool Manager Safe (`0x18f84Ea9D3351081780d817e5edd554112CF81Ab`), matching whichever batch file you're importing. Getting this wrong fails loudly (the UI won't let you propose against a Safe your connected wallet doesn't own), not silently.
-4. **Open the "Transaction Builder" app** from that Safe's Apps tab, and use its "Import batch" option to load the JSON file. The app re-displays every call in human-readable form (target address, function selector, decoded arguments where the target's ABI is known/verified) — review this against the batch's own `meta.description` and against this report before continuing.
-5. **Create the batch as a single Safe transaction** (the Transaction Builder bundles all the imported calls into one `multiSend` call under the hood) and submit it for signing. This creates a pending transaction at the Safe's current nonce.
-6. **Collect signatures.** Each remaining owner connects their own wallet to the same Safe UI, opens the pending transaction under the Safe's "Transactions" queue, reviews the same decoded calldata, and signs. The Safe UI shows a running count ("2 of 3 required", etc.). No on-chain action happens until the threshold is met.
-7. **Execute.** Once enough signatures are collected, any owner (or any address willing to pay gas, using the already-collected signatures) can click "Execute" — this is the one step that actually broadcasts to mainnet. Before clicking it, re-confirm nothing else has changed the target contracts' state since step 2 (re-run the script's own preflight checks, or the relevant `cast call`s from Section 1, one more time).
-8. **Re-verify on-chain**, not just from the Safe UI's "success" indicator — read back the specific values this batch was meant to change (new implementation addresses via `cast implementation`, new guard registrations via `Governance.contractGuards`/`assetGuards`, the new initializer values) directly against mainnet.
+4. **Open the "Transaction Builder" app** from that Safe's Apps tab, and use its "Import batch" option to load the JSON file. The app re-displays every call in human-readable form (target address, function selector, decoded arguments where the target's ABI is known/verified) — review this against the batch's own `meta.description`, against this report, and against 6.3's `MultiSend`/operation check before continuing.
+5. **Create the batch as a single Safe transaction** and submit it for signing. This creates a pending transaction at the Safe's current nonce.
+6. **Before signing, independently recompute the hash** using 6.2's `getTransactionHash` technique with the exact `to` (the `MultiSend` address), `data` (the packed sub-calls), `operation = 1`, and current `nonce` the UI is proposing. Confirm it matches what your wallet is about to sign. This step is what actually protects against a compromised frontend — everything else in this list assumes the UI is honest; this step doesn't have to.
+7. **Collect signatures.** Each remaining owner connects their own wallet to the same Safe UI, opens the pending transaction under the Safe's "Transactions" queue, independently repeats step 6, and signs. The Safe UI shows a running count ("2 of 3 required", etc.). No on-chain action happens until the threshold is met.
+8. **Execute.** Once enough signatures are collected, any owner (or any address willing to pay gas, using the already-collected signatures) can click "Execute" — this is the one step that actually broadcasts to mainnet. Before clicking it, re-confirm nothing else has changed the target contracts' state since step 2 (re-run the script's own preflight checks, or the relevant `cast call`s from Section 1, one more time).
+9. **Re-verify on-chain**, not just from the Safe UI's "success" indicator — read back the specific values this batch was meant to change (new implementation addresses via `cast implementation`, new guard registrations via `Governance.contractGuards`/`assetGuards`, the new initializer values) directly against mainnet.
 
-### 6.4 Nonce sequencing
+### 6.6 Nonce sequencing
 
-Each Safe tracks its own nonce independently (`nonce()` — currently 12 for the DAO Safe, 4 for the Pool Manager Safe) — proposing a batch against one Safe has no effect on the other's nonce or queue. Within a single Safe, a second batch proposed while an earlier one is still pending will queue at the next nonce and simply wait its turn; it does not need to wait for the first to execute before being proposed and signed, only before *it* executes (Safe enforces strict nonce ordering for execution). This is why Section 5's "Pool Manager Safe batch must be proposed after the DAO Safe batch executes" is phrased as a hard dependency on *execution*, not just proposal — the underlying call would revert if sent before the DAO Safe's `NftTrackerStorage` implementation upgrade has actually landed, regardless of nonce.
+Each Safe tracks its own nonce independently (`nonce()` — currently 12 for the DAO Safe, 4 for the Pool Manager Safe) — proposing a batch against one Safe has no effect on the other's nonce or queue. Within a single Safe, a second batch proposed while an earlier one is still pending will queue at the next nonce and simply wait its turn; it does not need to wait for the first to execute before being proposed and signed, only before *it* executes (Safe enforces strict nonce ordering for execution — `execTransaction` always hashes against the contract's *current* `nonce` state variable, not a caller-supplied value, which is also the mechanism 6.7 below relies on). This is why Section 5's "Pool Manager Safe batch must be proposed after the DAO Safe batch executes" is phrased as a hard dependency on *execution*, not just proposal — the underlying call would revert if sent before the DAO Safe's `NftTrackerStorage` implementation upgrade has actually landed, regardless of nonce.
 
-### 6.5 What does *not* need multisig
+### 6.7 Rejecting a bad or stale proposal
+
+If a proposed transaction turns out to be wrong after signatures have already started accumulating (a parameter error, a changed precondition, anything short of "it already executed"), there is no "delete" — Safe transactions aren't withdrawable once proposed. The standard mechanism is to **propose a second, harmless transaction at the same nonce** (conventionally a zero-value self-call with empty data — `to = Safe's own address, value = 0, data = 0x`) and get *that* one signed and executed instead. Because `execTransaction` always checks signatures against the hash computed from the Safe's *current* nonce, executing the replacement immediately invalidates the original: the moment any transaction at nonce N executes, the Safe's nonce becomes N+1, and the original proposal's signatures — computed over a hash that embedded nonce N — can never again match what the contract recomputes for any future execution attempt. Safe's own UI exposes this as a "Reject transaction" button on a pending item, which is exactly this mechanism under a friendlier label.
+
+### 6.8 Troubleshooting: what a failed Safe transaction is actually telling you
+
+Pulled directly from the v1.4.1 source's own `require` statements — if a transaction fails on-chain (or a simulation/dry run reverts) with one of these, this is what it means, not a generic "transaction failed":
+
+| Code | Meaning |
+| --- | --- |
+| `GS010` | Not enough gas was forwarded to safely cover `safeTxGas` plus the overhead for post-execution bookkeeping — a gas estimation problem, not a logic one. |
+| `GS013` | The inner call failed, **and** both `safeTxGas` and `gasPrice` were 0 (this plan's default) — so the Safe treats "it must succeed" as the rule and reverts the whole transaction. This is the one most likely to appear if 6.3's `MultiSend`/operation check was ever wrong, or if a precondition (Section 1.4's pending-withdrawal check, Phase B's idempotency check) changed between proposal and execution. |
+| `GS020` | Not enough signature data was supplied for the required threshold — someone's signature is missing or malformed. |
+| `GS021`–`GS023` | Malformed contract-signature (EIP-1271) encoding — not applicable here, since every owner of both Safes is a plain EOA (6.1), so this should never legitimately appear. |
+| `GS024` | An EIP-1271 contract signature failed validation — again, not applicable given 6.1's finding; if seen, something is badly wrong (e.g. the wrong signature bytes were submitted). |
+| `GS025` | A signature's recovered address isn't an owner who has either signed on-chain (`approveHash`) or isn't the `msg.sender` executing the call — typically means a signature was collected for the wrong Safe, wrong chain, or wrong transaction hash (see 6.2 — this is exactly what independently recomputing the hash before signing prevents). |
+| `GS026` | Signatures were not supplied in ascending order of owner address, or an address that isn't actually an owner was included — the Safe UI handles this ordering automatically; only a concern if assembling `execTransaction` calldata by hand instead of through the UI/SDK. |
+| `GS030` | A non-owner tried to call an owner-only administrative function on the Safe itself (not relevant to executing a transaction with valid signatures). |
+
+### 6.9 What does *not* need multisig
 
 Not every privileged action on this system goes through a Safe. `PoolManagerLogic.trader()` is a plain EOA (1.2) — any trader-gated action is a single signature, no Safe involved. None of the upgrade steps in Phases A–C touch a trader-gated function, so this plan's own transactions are entirely Safe-gated; it's included here only so the distinction isn't assumed to apply more broadly than it does.
 
